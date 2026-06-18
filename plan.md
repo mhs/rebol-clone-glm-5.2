@@ -6,116 +6,116 @@ on the one above unless noted.
 
 ## Milestone 1 — Scaffold workspace
 
-- [ ] Create root `Cargo.toml` with `[workspace]` and `members = ["crates/red-core", "crates/red-eval", "crates/red-cli"]`
-- [ ] Create `crates/red-core/Cargo.toml` (lib, deps: `string_cache`)
-- [ ] Create `crates/red-eval/Cargo.toml` (lib, deps: `red-core`)
-- [ ] Create `crates/red-cli/Cargo.toml` (bin, deps: `red-eval`, `rustyline`)
-- [ ] Create empty `src/lib.rs` in `red-core` and `red-eval`
-- [ ] Create `src/main.rs` in `red-cli` printing "red 0.0.1"
-- [ ] Add `[dev-dependencies]` `assert_cmd`, `predicates` to `red-cli`
-- [ ] Create `examples/` directory with a placeholder `.gitkeep`
-- [ ] Run `cargo build --workspace` — passes with no errors
-- [ ] Run `cargo test --workspace` — passes (no tests yet)
-- [ ] Add `.gitignore` for `/target`
+- [x] Create root `Cargo.toml` with `[workspace]` and `members = ["crates/red-core", "crates/red-eval", "crates/red-cli"]`
+- [x] Create `crates/red-core/Cargo.toml` (lib, deps: `string_cache`)
+- [x] Create `crates/red-eval/Cargo.toml` (lib, deps: `red-core`)
+- [x] Create `crates/red-cli/Cargo.toml` (bin, deps: `red-eval`, `rustyline`)
+- [x] Create empty `src/lib.rs` in `red-core` and `red-eval`
+- [x] Create `src/main.rs` in `red-cli` printing "red 0.0.1"
+- [x] Add `[dev-dependencies]` `assert_cmd`, `predicates` to `red-cli`
+- [x] Create `examples/` directory with a placeholder `.gitkeep`
+- [x] Run `cargo build --workspace` — passes with no errors
+- [x] Run `cargo test --workspace` — passes (no tests yet)
+- [x] Add `.gitignore` for `/target`
 - [ ] Commit "scaffold workspace" baseline
 
 ## Milestone 2 — Value, Symbol, Printer
 
-- [ ] Create `red-core/src/value.rs`
-- [ ] Define `Symbol` newtype over `Rc<str>` (defer `string_cache` until needed)
-- [ ] Define `Span { start: usize, end: usize }`
-- [ ] Define `Series { data: Rc<RefCell<Vec<Value>>>, index: usize }`
-- [ ] Define `Binding` enum (`Unbound`, `Local`, `Func`) — `Local`/`Func` variants can be unit for now
-- [ ] Define `FuncDef` struct (fields stubbed, `native: Option<NativeFn>`)
-- [ ] Define `Value` enum (all variants from brief, even if unused yet)
-- [ ] Implement `Clone` for `Value` (deep clone via `Rc::clone` for shared data)
-- [ ] Implement `Debug` for `Value` (Rust-side, not the Red mold)
-- [ ] Add `Value::span()` helper returning `Option<Span>` (None on literals until spans are attached)
-- [ ] Create `red-core/src/context.rs` with `Context` skeleton (empty slots + name map)
-- [ ] Create `red-core/src/printer.rs`
-- [ ] Implement `mold(&Value, &mut String)` recursive writer
-- [ ] Mold `None` → `none`, `Logic(true)` → `true`, `Logic(false)` → `false`
-- [ ] Mold `Integer` → decimal digits, `Float` → with `.` (even if `.0`)
-- [ ] Mold `String` → double-quoted with escapes (`"`, `\\`, `\n`, `\t`)
-- [ ] Mold `Word`/`SetWord`/`GetWord`/`LitWord` → sym + prefix/suffix
-- [ ] Mold `Block` → `[ ... ]` with single spaces, no leading/trailing whitespace
-- [ ] Mold `Paren` → `( ... )`
-- [ ] Mold `Func` → `#[function]` placeholder (POC)
-- [ ] Mold `Path` → `foo/bar`
-- [ ] Mold nested blocks recursively
-- [ ] Export `Value`, `Symbol`, `Span`, `Series`, `mold` from `lib.rs`
-- [ ] Inline `#[test]` for each value kind's mold
-- [ ] Inline `#[test]` for nested block molding
-- [ ] Inline `#[test]` for string escaping round-trip
-- [ ] `cargo test -p red-core` passes
+- [x] Create `red-core/src/value.rs`
+- [x] Define `Symbol` newtype over `Rc<str>` (defer `string_cache` until needed)
+- [x] Define `Span { start: usize, end: usize }`
+- [x] Define `Series { data: Rc<RefCell<Vec<Value>>>, index: usize }`
+- [x] Define `Binding` enum (`Unbound`, `Local`, `Func`) — `Local`/`Func` variants can be unit for now
+- [x] Define `FuncDef` struct (fields stubbed, `native: Option<NativeFn>`)
+- [x] Define `Value` enum (all variants from brief, even if unused yet)
+- [x] Implement `Clone` for `Value` (deep clone via `Rc::clone` for shared data)
+- [x] Implement `Debug` for `Value` (Rust-side, not the Red mold)
+- [x] Add `Value::span()` helper returning `Option<Span>` (None on literals until spans are attached)
+- [x] Create `red-core/src/context.rs` with `Context` skeleton (empty slots + name map)
+- [x] Create `red-core/src/printer.rs`
+- [x] Implement `mold(&Value, &mut String)` recursive writer
+- [x] Mold `None` → `none`, `Logic(true)` → `true`, `Logic(false)` → `false`
+- [x] Mold `Integer` → decimal digits, `Float` → with `.` (even if `.0`)
+- [x] Mold `String` → double-quoted with escapes (`"`, `\\`, `\n`, `\t`)
+- [x] Mold `Word`/`SetWord`/`GetWord`/`LitWord` → sym + prefix/suffix
+- [x] Mold `Block` → `[ ... ]` with single spaces, no leading/trailing whitespace
+- [x] Mold `Paren` → `( ... )`
+- [x] Mold `Func` → `#[function]` placeholder (POC)
+- [x] Mold `Path` → `foo/bar`
+- [x] Mold nested blocks recursively
+- [x] Export `Value`, `Symbol`, `Span`, `Series`, `mold` from `lib.rs`
+- [x] Inline `#[test]` for each value kind's mold
+- [x] Inline `#[test]` for nested block molding
+- [x] Inline `#[test]` for string escaping round-trip
+- [x] `cargo test -p red-core` passes
 
 ## Milestone 3 — Lexer
 
-- [ ] Create `red-core/src/lexer.rs`
-- [ ] Define `TokenKind` enum (Integer, Float, String, Word, SetWord, GetWord, LitWord, LBracket, RBracket, LParen, RParen)
-- [ ] Define `Token { kind: TokenKind, span: Span }`
-- [ ] Define `LexError` enum (UnterminatedString, InvalidNumber, InvalidWord, UnbalancedBrace)
-- [ ] Implement `pub fn lex(src: &str) -> Result<Vec<Token>, LexError>`
-- [ ] Skip whitespace (space, tab, CR, LF)
-- [ ] Skip `;` comments to EOL
-- [ ] Emit `LBracket`/`RBracket`/`LParen`/`RParen` with spans
-- [ ] Implement `scan_number`: digits, optional `.digits` → Float, optional `e[+-]digits`
-- [ ] Reject `1.2.3` with `InvalidNumber`
-- [ ] Implement `scan_quoted`: `"..."` with escape table (`\"`, `\\`, `\n`, `\t`, `\r`)
-- [ ] Error `UnterminatedString` on EOF
-- [ ] Implement `scan_braced`: `{...}` with depth counter, nested braces, multi-line
-- [ ] Error `UnbalancedBrace` on EOF with depth > 0
-- [ ] Implement `scan_word`: read run of non-delimiter chars
-- [ ] Delimiter set: whitespace, `[](){};",`
-- [ ] Classify leading `:` → GetWord, leading `'` → LitWord, trailing `:` → SetWord
-- [ ] Reject empty word (`InvalidWord`) e.g. `::` or `''`
-- [ ] Intern symbols via `Symbol::new`
-- [ ] Every token has correct byte-offset span
-- [ ] Inline `#[test]`: integer, negative integer, float, float with exponent
-- [ ] Inline `#[test]`: quoted string with each escape
-- [ ] Inline `#[test]`: braced string single-line and multi-line
-- [ ] Inline `#[test]`: nested braced string `{{a}}`
-- [ ] Inline `#[test]`: word, set-word, get-word, lit-word
-- [ ] Inline `#[test]`: block and paren delimiters intermixed
-- [ ] Inline `#[test]`: comment to EOL skipped
-- [ ] Inline `#[test]`: unterminated string/brace errors
-- [ ] Export `lex`, `Token`, `TokenKind`, `LexError` from `lib.rs`
-- [ ] Create `red-core/tests/round_trip.rs` empty harness (one trivial fixture)
-- [ ] Create `red-core/tests/golden/` with 2-3 trivial `.red` + `.expected` pairs
-- [ ] `cargo test -p red-core` passes
+- [x] Create `red-core/src/lexer.rs`
+- [x] Define `TokenKind` enum (Integer, Float, String, Word, SetWord, GetWord, LitWord, LBracket, RBracket, LParen, RParen)
+- [x] Define `Token { kind: TokenKind, span: Span }`
+- [x] Define `LexError` enum (UnterminatedString, InvalidNumber, InvalidWord, UnbalancedBrace)
+- [x] Implement `pub fn lex(src: &str) -> Result<Vec<Token>, LexError>`
+- [x] Skip whitespace (space, tab, CR, LF)
+- [x] Skip `;` comments to EOL
+- [x] Emit `LBracket`/`RBracket`/`LParen`/`RParen` with spans
+- [x] Implement `scan_number`: digits, optional `.digits` → Float, optional `e[+-]digits`
+- [x] Reject `1.2.3` with `InvalidNumber`
+- [x] Implement `scan_quoted`: `"..."` with escape table (`\"`, `\\`, `\n`, `\t`, `\r`)
+- [x] Error `UnterminatedString` on EOF
+- [x] Implement `scan_braced`: `{...}` with depth counter, nested braces, multi-line
+- [x] Error `UnbalancedBrace` on EOF with depth > 0
+- [x] Implement `scan_word`: read run of non-delimiter chars
+- [x] Delimiter set: whitespace, `[](){};",`
+- [x] Classify leading `:` → GetWord, leading `'` → LitWord, trailing `:` → SetWord
+- [x] Reject empty word (`InvalidWord`) e.g. `::` or `''`
+- [x] Intern symbols via `Symbol::new`
+- [x] Every token has correct byte-offset span
+- [x] Inline `#[test]`: integer, negative integer, float, float with exponent
+- [x] Inline `#[test]`: quoted string with each escape
+- [x] Inline `#[test]`: braced string single-line and multi-line
+- [x] Inline `#[test]`: nested braced string `{{a}}`
+- [x] Inline `#[test]`: word, set-word, get-word, lit-word
+- [x] Inline `#[test]`: block and paren delimiters intermixed
+- [x] Inline `#[test]`: comment to EOL skipped
+- [x] Inline `#[test]`: unterminated string/brace errors
+- [x] Export `lex`, `Token`, `TokenKind`, `LexError` from `lib.rs`
+- [x] Create `red-core/tests/round_trip.rs` empty harness (one trivial fixture)
+- [x] Create `red-core/tests/golden/` with 2-3 trivial `.red` + `.expected` pairs
+- [x] `cargo test -p red-core` passes
 
 ## Milestone 4 — Parser
 
-- [ ] Create `red-core/src/parser.rs`
-- [ ] Define `Parser<'a> { tokens: &'a [Token], pos: usize }`
-- [ ] Define `ParseError` enum (Unexpected, MissingClose, EmptyInput)
-- [ ] Implement `peek()`, `advance()`, `consume(kind)`
-- [ ] Implement `parse_value()` dispatch on token kind
-- [ ] Parse `LBracket ... RBracket` → `Value::Block(Series { index: 0, ... })`
-- [ ] Parse `LParen ... RParen` → `Value::Paren(Series)`
-- [ ] Parse atoms: Integer/Float/String → corresponding variants
-- [ ] Parse word-family → `Word`/`SetWord`/`GetWord`/`LitWord` with `Binding::Unbound`
-- [ ] Carry token spans onto parsed `Value`s (extend `Value` to hold spans)
-- [ ] Implement `parse_block()` and `parse_paren()` with EOF→MissingClose error
-- [ ] Implement `parse_program()`: detect `Red` word + header block + body block
-- [ ] Implement `load()` for bare body (no header)
-- [ ] Handle empty block `[]` and empty paren `()`
-- [ ] Handle nested blocks `[a [b c] d]`
-- [ ] Reject stray `]` or `)` with `Unexpected` error
-- [ ] Wire up end-to-end: `parse_program(lex(src)?)` returns `Result<(Series, Series), ParseError>`
-- [ ] Add `pub fn load_source(src: &str) -> Result<Series, Error>` convenience combining lex+parse
-- [ ] Inline `#[test]`: single integer parses to `Block[Integer]`
-- [ ] Inline `#[test]`: nested block structure
-- [ ] Inline `#[test]`: all word kinds parse correctly
-- [ ] Inline `#[test]`: header + body parse correctly
-- [ ] Inline `#[test]`: bare body via `load`
-- [ ] Inline `#[test]`: MissingClose error on `[1 2`
-- [ ] Inline `#[test]`: Unexpected error on stray `]`
-- [ ] Update `red-core/tests/round_trip.rs` to walk `tests/golden/` and compare `mold(parse(src))` to `.expected`
-- [ ] Add `tests/common/mod.rs` helper to enumerate fixture pairs
-- [ ] Add 8-10 golden fixtures covering: literals, strings, words, nested blocks, parens, comments, header
-- [ ] Run round-trip; all green
-- [ ] `cargo test -p red-core` passes
+- [x] Create `red-core/src/parser.rs`
+- [x] Define `Parser<'a> { tokens: &'a [Token], pos: usize }`
+- [x] Define `ParseError` enum (Unexpected, MissingClose, EmptyInput)
+- [x] Implement `peek()`, `advance()`, `consume(kind)`
+- [x] Implement `parse_value()` dispatch on token kind
+- [x] Parse `LBracket ... RBracket` → `Value::Block(Series { index: 0, ... })`
+- [x] Parse `LParen ... RParen` → `Value::Paren(Series)`
+- [x] Parse atoms: Integer/Float/String → corresponding variants
+- [x] Parse word-family → `Word`/`SetWord`/`GetWord`/`LitWord` with `Binding::Unbound`
+- [x] Carry token spans onto parsed `Value`s (extend `Value` to hold spans)
+- [x] Implement `parse_block()` and `parse_paren()` with EOF→MissingClose error
+- [x] Implement `parse_program()`: detect `Red` word + header block + body block
+- [x] Implement `load()` for bare body (no header)
+- [x] Handle empty block `[]` and empty paren `()`
+- [x] Handle nested blocks `[a [b c] d]`
+- [x] Reject stray `]` or `)` with `Unexpected` error
+- [x] Wire up end-to-end: `parse_program(lex(src)?)` returns `Result<(Series, Series), ParseError>`
+- [x] Add `pub fn load_source(src: &str) -> Result<Series, Error>` convenience combining lex+parse
+- [x] Inline `#[test]`: single integer parses to `Block[Integer]`
+- [x] Inline `#[test]`: nested block structure
+- [x] Inline `#[test]`: all word kinds parse correctly
+- [x] Inline `#[test]`: header + body parse correctly
+- [x] Inline `#[test]`: bare body via `load`
+- [x] Inline `#[test]`: MissingClose error on `[1 2`
+- [x] Inline `#[test]`: Unexpected error on stray `]`
+- [x] Update `red-core/tests/round_trip.rs` to walk `tests/golden/` and compare `mold(parse(src))` to `.expected`
+- [x] Add `tests/common/mod.rs` helper to enumerate fixture pairs
+- [x] Add 8-10 golden fixtures covering: literals, strings, words, nested blocks, parens, comments, header
+- [x] Run round-trip; all green
+- [x] `cargo test -p red-core` passes
 
 ## Milestone 5 — Env, Context, minimal eval
 

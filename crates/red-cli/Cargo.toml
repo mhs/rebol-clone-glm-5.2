@@ -1,0 +1,12 @@
+[package]
+name = "red-cli"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+red-eval = { path = "../red-eval" }
+rustyline = "13"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"

@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/red-core", "crates/red-eval", "crates/red-cli"]
+resolver = "2"
