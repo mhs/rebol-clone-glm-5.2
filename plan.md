@@ -1,0 +1,332 @@
+# Plan: Step-by-Step Build of the Red Clone POC
+
+Execution checklist for the project described in `project-brief.md` and
+architected in `architecture.md`. Work top-to-bottom; each milestone depends
+on the one above unless noted.
+
+## Milestone 1 — Scaffold workspace
+
+- [ ] Create root `Cargo.toml` with `[workspace]` and `members = ["crates/red-core", "crates/red-eval", "crates/red-cli"]`
+- [ ] Create `crates/red-core/Cargo.toml` (lib, deps: `string_cache`)
+- [ ] Create `crates/red-eval/Cargo.toml` (lib, deps: `red-core`)
+- [ ] Create `crates/red-cli/Cargo.toml` (bin, deps: `red-eval`, `rustyline`)
+- [ ] Create empty `src/lib.rs` in `red-core` and `red-eval`
+- [ ] Create `src/main.rs` in `red-cli` printing "red 0.0.1"
+- [ ] Add `[dev-dependencies]` `assert_cmd`, `predicates` to `red-cli`
+- [ ] Create `examples/` directory with a placeholder `.gitkeep`
+- [ ] Run `cargo build --workspace` — passes with no errors
+- [ ] Run `cargo test --workspace` — passes (no tests yet)
+- [ ] Add `.gitignore` for `/target`
+- [ ] Commit "scaffold workspace" baseline
+
+## Milestone 2 — Value, Symbol, Printer
+
+- [ ] Create `red-core/src/value.rs`
+- [ ] Define `Symbol` newtype over `Rc<str>` (defer `string_cache` until needed)
+- [ ] Define `Span { start: usize, end: usize }`
+- [ ] Define `Series { data: Rc<RefCell<Vec<Value>>>, index: usize }`
+- [ ] Define `Binding` enum (`Unbound`, `Local`, `Func`) — `Local`/`Func` variants can be unit for now
+- [ ] Define `FuncDef` struct (fields stubbed, `native: Option<NativeFn>`)
+- [ ] Define `Value` enum (all variants from brief, even if unused yet)
+- [ ] Implement `Clone` for `Value` (deep clone via `Rc::clone` for shared data)
+- [ ] Implement `Debug` for `Value` (Rust-side, not the Red mold)
+- [ ] Add `Value::span()` helper returning `Option<Span>` (None on literals until spans are attached)
+- [ ] Create `red-core/src/context.rs` with `Context` skeleton (empty slots + name map)
+- [ ] Create `red-core/src/printer.rs`
+- [ ] Implement `mold(&Value, &mut String)` recursive writer
+- [ ] Mold `None` → `none`, `Logic(true)` → `true`, `Logic(false)` → `false`
+- [ ] Mold `Integer` → decimal digits, `Float` → with `.` (even if `.0`)
+- [ ] Mold `String` → double-quoted with escapes (`"`, `\\`, `\n`, `\t`)
+- [ ] Mold `Word`/`SetWord`/`GetWord`/`LitWord` → sym + prefix/suffix
+- [ ] Mold `Block` → `[ ... ]` with single spaces, no leading/trailing whitespace
+- [ ] Mold `Paren` → `( ... )`
+- [ ] Mold `Func` → `#[function]` placeholder (POC)
+- [ ] Mold `Path` → `foo/bar`
+- [ ] Mold nested blocks recursively
+- [ ] Export `Value`, `Symbol`, `Span`, `Series`, `mold` from `lib.rs`
+- [ ] Inline `#[test]` for each value kind's mold
+- [ ] Inline `#[test]` for nested block molding
+- [ ] Inline `#[test]` for string escaping round-trip
+- [ ] `cargo test -p red-core` passes
+
+## Milestone 3 — Lexer
+
+- [ ] Create `red-core/src/lexer.rs`
+- [ ] Define `TokenKind` enum (Integer, Float, String, Word, SetWord, GetWord, LitWord, LBracket, RBracket, LParen, RParen)
+- [ ] Define `Token { kind: TokenKind, span: Span }`
+- [ ] Define `LexError` enum (UnterminatedString, InvalidNumber, InvalidWord, UnbalancedBrace)
+- [ ] Implement `pub fn lex(src: &str) -> Result<Vec<Token>, LexError>`
+- [ ] Skip whitespace (space, tab, CR, LF)
+- [ ] Skip `;` comments to EOL
+- [ ] Emit `LBracket`/`RBracket`/`LParen`/`RParen` with spans
+- [ ] Implement `scan_number`: digits, optional `.digits` → Float, optional `e[+-]digits`
+- [ ] Reject `1.2.3` with `InvalidNumber`
+- [ ] Implement `scan_quoted`: `"..."` with escape table (`\"`, `\\`, `\n`, `\t`, `\r`)
+- [ ] Error `UnterminatedString` on EOF
+- [ ] Implement `scan_braced`: `{...}` with depth counter, nested braces, multi-line
+- [ ] Error `UnbalancedBrace` on EOF with depth > 0
+- [ ] Implement `scan_word`: read run of non-delimiter chars
+- [ ] Delimiter set: whitespace, `[](){};",`
+- [ ] Classify leading `:` → GetWord, leading `'` → LitWord, trailing `:` → SetWord
+- [ ] Reject empty word (`InvalidWord`) e.g. `::` or `''`
+- [ ] Intern symbols via `Symbol::new`
+- [ ] Every token has correct byte-offset span
+- [ ] Inline `#[test]`: integer, negative integer, float, float with exponent
+- [ ] Inline `#[test]`: quoted string with each escape
+- [ ] Inline `#[test]`: braced string single-line and multi-line
+- [ ] Inline `#[test]`: nested braced string `{{a}}`
+- [ ] Inline `#[test]`: word, set-word, get-word, lit-word
+- [ ] Inline `#[test]`: block and paren delimiters intermixed
+- [ ] Inline `#[test]`: comment to EOL skipped
+- [ ] Inline `#[test]`: unterminated string/brace errors
+- [ ] Export `lex`, `Token`, `TokenKind`, `LexError` from `lib.rs`
+- [ ] Create `red-core/tests/round_trip.rs` empty harness (one trivial fixture)
+- [ ] Create `red-core/tests/golden/` with 2-3 trivial `.red` + `.expected` pairs
+- [ ] `cargo test -p red-core` passes
+
+## Milestone 4 — Parser
+
+- [ ] Create `red-core/src/parser.rs`
+- [ ] Define `Parser<'a> { tokens: &'a [Token], pos: usize }`
+- [ ] Define `ParseError` enum (Unexpected, MissingClose, EmptyInput)
+- [ ] Implement `peek()`, `advance()`, `consume(kind)`
+- [ ] Implement `parse_value()` dispatch on token kind
+- [ ] Parse `LBracket ... RBracket` → `Value::Block(Series { index: 0, ... })`
+- [ ] Parse `LParen ... RParen` → `Value::Paren(Series)`
+- [ ] Parse atoms: Integer/Float/String → corresponding variants
+- [ ] Parse word-family → `Word`/`SetWord`/`GetWord`/`LitWord` with `Binding::Unbound`
+- [ ] Carry token spans onto parsed `Value`s (extend `Value` to hold spans)
+- [ ] Implement `parse_block()` and `parse_paren()` with EOF→MissingClose error
+- [ ] Implement `parse_program()`: detect `Red` word + header block + body block
+- [ ] Implement `load()` for bare body (no header)
+- [ ] Handle empty block `[]` and empty paren `()`
+- [ ] Handle nested blocks `[a [b c] d]`
+- [ ] Reject stray `]` or `)` with `Unexpected` error
+- [ ] Wire up end-to-end: `parse_program(lex(src)?)` returns `Result<(Series, Series), ParseError>`
+- [ ] Add `pub fn load_source(src: &str) -> Result<Series, Error>` convenience combining lex+parse
+- [ ] Inline `#[test]`: single integer parses to `Block[Integer]`
+- [ ] Inline `#[test]`: nested block structure
+- [ ] Inline `#[test]`: all word kinds parse correctly
+- [ ] Inline `#[test]`: header + body parse correctly
+- [ ] Inline `#[test]`: bare body via `load`
+- [ ] Inline `#[test]`: MissingClose error on `[1 2`
+- [ ] Inline `#[test]`: Unexpected error on stray `]`
+- [ ] Update `red-core/tests/round_trip.rs` to walk `tests/golden/` and compare `mold(parse(src))` to `.expected`
+- [ ] Add `tests/common/mod.rs` helper to enumerate fixture pairs
+- [ ] Add 8-10 golden fixtures covering: literals, strings, words, nested blocks, parens, comments, header
+- [ ] Run round-trip; all green
+- [ ] `cargo test -p red-core` passes
+
+## Milestone 5 — Env, Context, minimal eval
+
+- [ ] Create `red-eval/src/context.rs`
+- [ ] Re-export `Context`, `Binding`, `FuncDef` from `red-core`
+- [ ] Implement `Context::new()` with empty slots + name map
+- [ ] Implement `Context::slot_mut(&mut self, sym: Symbol) -> &mut RefCell<Value>` (allocate if absent)
+- [ ] Implement `Context::get(&self, sym: Symbol) -> Option<Value>`
+- [ ] Implement `Context::set(&mut self, sym: Symbol, val: Value)`
+- [ ] Define `Env { user_ctx: Context, call_stack: Vec<CallFrame>, natives: HashMap<Symbol, NativeFn> }`
+- [ ] Define `CallFrame { ctx: Context, func: Option<Rc<FuncDef>> }`
+- [ ] Define `EvalError` enum (UnboundWord, TypeError, Arity, Return, Native)
+- [ ] Create `red-eval/src/interp.rs`
+- [ ] Implement `pub fn eval(block: &Value, env: &mut Env) -> Result<Value, EvalError>`
+- [ ] Eval arm: literals return self
+- [ ] Eval arm: `Block` returns as-is (data)
+- [ ] Eval arm: `Paren` walks eagerly
+- [ ] Eval arm: `Word` resolves via binding or native lookup
+- [ ] Eval arm: `SetWord` evals next value, writes to bound slot
+- [ ] Eval arm: `GetWord` returns slot value without calling
+- [ ] Eval arm: `LitWord` returns as-is
+- [ ] Implement `resolve_word(sym, binding, env, span)`
+- [ ] Implement `write_setword(sym, binding, val, env, span)`
+- [ ] Implement binding pass: walk parsed tree, attach `Local(user_ctx, slot)` to top-level SetWords and matching Words
+- [ ] Expose `pub fn run_source(src: &str) -> Result<Value, Error>` combining load + bind + eval
+- [ ] Inline `#[test]`: `5` evaluates to `Integer(5)`
+- [ ] Inline `#[test]`: `foo: 5 foo` evaluates to `Integer(5)`
+- [ ] Inline `#[test]`: unbound word errors
+- [ ] Inline `#[test]`: paren evaluates eagerly
+- [ ] Inline `#[test]`: block returns as-is
+- [ ] `cargo test -p red-eval` passes
+
+## Milestone 6 — print/prin + hello world
+
+- [ ] Create `red-eval/src/natives.rs`
+- [ ] Implement native registration: `pub fn register_natives(env: &mut Env)`
+- [ ] Implement `print` native: mold each arg, join with space, append newline, write to stdout
+- [ ] Implement `prin` native: like print, no trailing newline
+- [ ] Implement `probe` native: mold arg, print `== <mold>`
+- [ ] Register `none`, `true`, `false`, `newline` as constants (Values bound in user_ctx)
+- [ ] Update CLI `red-cli/src/main.rs`:
+- [ ] Parse args (`file.red` or no args)
+- [ ] Read file, call `run_source`, print result via `mold`
+- [ ] Exit code 0 on success, 1 on error (print `*** Error: ...` to stderr)
+- [ ] Add `--help` and `--version`
+- [ ] Create `examples/hello.red`: `Red [] print "Hello, World!"`
+- [ ] Run `cargo run -p red-cli -- examples/hello.red` → prints `Hello, World!`
+- [ ] Create `red-cli/tests/cli.rs` with `assert_cmd` test for `hello.red`
+- [ ] Add error-path CLI test (file with unbound word)
+- [ ] Inline `#[test]`: `print 5` → stdout "5\n"
+- [ ] Inline `#[test]`: `prin "a" prin "b"` → stdout "ab"
+- [ ] Inline `#[test]`: `print [1 2 3]` → stdout "[1 2 3]\n"
+- [ ] `cargo test --workspace` passes
+
+## Milestone 7 — Arithmetic, conditionals, loops
+
+- [ ] Implement `+` native: Integer/Float, mixed promotes to Float
+- [ ] Implement `-`, `*`, `/` (division by zero → EvalError)
+- [ ] Implement `=` `<>` `<` `>` `<=` `>=` returning `Logic`
+- [ ] Implement `and`, `or`, `not` for `Logic`
+- [ ] Implement `if cond block` → evaluates block if cond is truthy, else `None`
+- [ ] Implement `either cond t-block f-block`
+- [ ] Implement `loop block` — infinite loop until `break` (return `none` for now)
+- [ ] Implement `repeat 'word count block` — binds counter, runs block N times
+- [ ] Implement `until block` — runs block until it returns truthy
+- [ ] Implement `while cond-block body-block`
+- [ ] Implement `break`/`continue` via `EvalError` variants caught by loop natives
+- [ ] Implement `do block` — walks block, returns last value
+- [ ] Implement `reduce block` — evals each value, returns block of results
+- [ ] Truthiness rule: only `false` and `none` are falsy; everything else truthy
+- [ ] Inline `#[test]`: `1 + 2 = 3`
+- [ ] Inline `#[test]`: `10 / 0` errors
+- [ ] Inline `#[test]`: `if true [42]` → 42
+- [ ] Inline `#[test]`: `if false [42]` → none
+- [ ] Inline `#[test]`: `either 1 > 0 ["y"]["n"]` → "y"
+- [ ] Inline `#[test]`: `repeat i 3 [print i]` → "1\n2\n3\n"
+- [ ] Inline `#[test]`: `until [i: i + 1 i > 3]` → true, i == 4
+- [ ] Inline `#[test]`: `while [a < 3][a: a + 1]` → terminates
+- [ ] Inline `#[test]`: `reduce [1 + 1 2 + 2]` → `[2 4]`
+- [ ] Add 3-4 golden program fixtures exercising arithmetic + loops
+- [ ] `cargo test --workspace` passes
+
+## Milestone 8 — Series model
+
+- [ ] Create `red-eval/src/series.rs`
+- [ ] Implement `block?`, `paren?`, `series?`, `any-block?`, `empty?`
+- [ ] Implement `first`, `second`, `third`, `last`
+- [ ] Implement `next`, `back` (return new Series with adjusted index)
+- [ ] Implement `at`, `skip` (index-based navigation)
+- [ ] Implement `head`, `tail` (index 0 / index == len)
+- [ ] Implement `index?`, `length?`
+- [ ] Implement `pick` (by 1-based index)
+- [ ] Implement `poke` (mutate by index)
+- [ ] Implement `select` (linear search, return value after match)
+- [ ] Implement `find` (return positioned series or none)
+- [ ] Implement `append` (mutate shared storage)
+- [ ] Implement `insert` (at cursor)
+- [ ] Implement `change` (replace at cursor)
+- [ ] Implement `remove` (at cursor, optional /part)
+- [ ] Implement `clear` (truncate from cursor)
+- [ ] Implement `take` (remove + return)
+- [ ] Implement `copy` (shallow; /part optional)
+- [ ] Implement `foreach 'word series block` — iterate, bind word, do block
+- [ ] Implement `forall 'word series block` — advance series cursor between iterations
+- [ ] Register all series natives in `register_natives`
+- [ ] Inline `#[test]`: `first [1 2 3]` → 1
+- [ ] Inline `#[test]`: `next [1 2 3]` then `first` → 2
+- [ ] Inline `#[test]`: `append [1 2] 3` → `[1 2 3]` and original mutated
+- [ ] Inline `#[test]`: `select [a 1 b 2] 'b` → 1
+- [ ] Inline `#[test]`: `find [1 2 3] 2` returns positioned series
+- [ ] Inline `#[test]`: `foreach x [1 2 3][print x]` → "1\n2\n3\n"
+- [ ] Inline `#[test]`: shared storage mutation visible via aliases
+- [ ] Add 4-5 golden fixtures exercising series ops
+- [ ] `cargo test --workspace` passes
+
+## Milestone 9 — Functions + binding
+
+- [ ] Create `red-eval/src/binding.rs`
+- [ ] Implement `func` native: takes spec block + body block, returns `Value::Func`
+- [ ] Bind function body words to fresh function context at creation time
+- [ ] Implement `does` native: zero-arg `func`
+- [ ] Implement `make function!` (same as `func`)
+- [ ] Implement `function?` predicate
+- [ ] Implement `return value` native — unwinds via `EvalError::Return`
+- [ ] Function call shim: push `CallFrame`, bind params, eval body, pop, catch Return
+- [ ] Support default arg evaluation: caller evaluates args before call
+- [ ] Implement `bind block context` — rebind words in a block to a context
+- [ ] Implement `use [words] block` — creates local context, binds words, evals block
+- [ ] Implement `in context 'word` — returns bound word value
+- [ ] Implement `get 'word` — returns value bound to word
+- [ ] Implement `set 'word value` — sets value in word's context
+- [ ] Implement `value? 'word` — returns true if word has a value
+- [ ] Recursive functions work (function can call itself)
+- [ ] Closures explicitly out of scope (document in code comment)
+- [ ] Inline `#[test]`: `square: func [x][x * x] square 5` → 25
+- [ ] Inline `#[test]`: `does` zero-arg call
+- [ ] Inline `#[test]`: `return` exits early
+- [ ] Inline `#[test]`: recursive factorial
+- [ ] Inline `#[test]`: `use [x][x: 5 x]` → 5, x unbound outside
+- [ ] Inline `#[test]`: `value? 'foo` before/after `foo: 5`
+- [ ] Inline `#[test]`: `bind` rebinds words to a context
+- [ ] Add 5-6 golden fixtures using functions, recursion, locals
+- [ ] `cargo test --workspace` passes
+
+## Milestone 10 — `parse` dialect
+
+- [ ] Create `red-eval/src/parse.rs`
+- [ ] Implement `pub fn parse_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError>`
+- [ ] Input: `string!` or `block!` (Series); rules: `block!`
+- [ ] Maintain input cursor (string byte index or Series index)
+- [ ] Rule: literal value matches against current input, advances cursor
+- [ ] Rule: `skip` — advance one element/char
+- [ ] Rule: `to value` — advance until value found (cursor before match)
+- [ ] Rule: `thru value` — advance past value
+- [ ] Rule: `end` — assert cursor at end
+- [ ] Rule: `none` — always matches, no advance
+- [ ] Rule: `any rule` — zero-or-more
+- [ ] Rule: `some rule` — one-or-more
+- [ ] Rule: `opt rule` — zero-or-one
+- [ ] Rule: `while rule` — greedy like `any` but checks end condition
+- [ ] Rule: `|` — alternative (try left, on fail try right)
+- [ ] Rule: `copy 'word rule` — capture matched sub-input, bind word in user context
+- [ ] Rule: `set 'word rule` — bind word to single matched value
+- [ ] Rule: `[...]` — sub-rule group
+- [ ] Rule: `(...)` — Red code side-effect, evaluated via `eval`
+- [ ] Return `Logic` (true = matched entirely, false = failed)
+- [ ] Backtracking: save cursor before each alternative/repetition; restore on failure
+- [ ] Register `parse` in `register_natives`
+- [ ] Inline `#[test]`: `parse "abc" ["a" "b" "c"]` → true
+- [ ] Inline `#[test]`: `parse "abc" ["a" "z"]` → false
+- [ ] Inline `#[test]`: `parse [1 2 3] [1 2 3]` → true
+- [ ] Inline `#[test]`: `parse "hello" [copy w to end]` → true, w == "hello"
+- [ ] Inline `#[test]`: `parse "a;b;c" [some [skip to ";"]]` → true
+- [ ] Inline `#[test]`: `parse` with `(...)` side-effect runs
+- [ ] Add 4-5 golden fixtures for `parse` (string + block inputs)
+- [ ] `cargo test --workspace` passes
+
+## Milestone 11 — REPL
+
+- [ ] Add `rustyline` to `red-cli` deps
+- [ ] Implement REPL loop: prompt → read line → `load_source` → `eval` → `mold` → print
+- [ ] Persist `Env` across lines (user context + natives carry over)
+- [ ] Handle multi-line blocks: if parse reports unclosed `[`/`(`, prompt for continuation
+- [ ] Handle empty input (just prompt again)
+- [ ] Print errors as `*** Error: <msg>` but don't exit REPL
+- [ ] Bind Ctrl-C / Ctrl-D to clean exit
+- [ ] Add `--repl` flag explicitly (or no-args = REPL)
+- [ ] Support `quit`/`exit` words as aliases for Ctrl-D
+- [ ] Mold result of each line unless it's `none` (matches Red REPL behavior)
+- [ ] Inline `#[test]` (or integration test) feeding "5\n" → captures "5\n"
+- [ ] Inline `#[test]` feeding `x: 10\n x\n` → captures `10`
+- [ ] CLI test: `assert_cmd` spawning REPL with piped stdin
+- [ ] `cargo test --workspace` passes
+
+## Milestone 12 — Golden suite + error polish
+
+- [ ] Audit `EvalError` rendering: every variant produces a clear `*** Error:` line
+- [ ] Include span info in error messages (`file.red:line:col:`)
+- [ ] Implement line/col lookup from byte offset (precompute line starts in lexer)
+- [ ] Unbound word error names the symbol
+- [ ] Type errors name expected vs. found
+- [ ] Arity errors name the native and counts
+- [ ] Errors from natives carry a span (use first arg's span as fallback)
+- [ ] Add golden fixtures for each error case (one per error kind)
+- [ ] Expand `red-eval/tests/programs/` to 15-20 fixtures covering all features
+- [ ] Include fixtures for: arithmetic, strings, blocks, parens, functions, recursion, series ops, `parse`, errors
+- [ ] Add a `tests/programs/README.md` explaining fixture format
+- [ ] Audit `mold` output for printer edge cases (empty block, nested quotes, floats)
+- [ ] Add property-style test: `mold(parse(mold(v))) == mold(v)` for random-ish `Value`s
+- [ ] Run clippy on workspace; fix warnings
+- [ ] Run `cargo fmt --all --check`
+- [ ] Final `cargo test --workspace` green
+- [ ] Update `project-brief.md` and `architecture.md` if any drift was discovered
+- [ ] Tag release `v0.1.0-poc`

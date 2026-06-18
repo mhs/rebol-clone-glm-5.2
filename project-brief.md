@@ -1,0 +1,352 @@
+# Plan: Proof-of-Concept Red Clone in Rust
+
+## Goals
+- Lexer → parser → tree-walking evaluator for a small Red subset
+- `Red []` header convention, stdout-only I/O
+- Cargo workspace with multiple crates
+- Integration tests + golden files for parser/printer round-trips and program execution
+
+## Workspace layout
+
+```
+rebol-clone/
+├── Cargo.toml                    # [workspace] manifest, members only
+├── crates/
+│   ├── red-core/                 # Value model, lexer, parser, printer
+│   │   ├── Cargo.toml
+│   │   ├── src/
+│   │   │   ├── lib.rs
+│   │   │   ├── value.rs          # Value enum + Word/Set-word/Block/Paren/Func/etc.
+│   │   │   ├── context.rs        # Context, Binding, FuncDef (shared w/ red-eval)
+│   │   │   ├── lexer.rs          # Source -> tokens (curly/bracket strings, comments, numbers, words)
+│   │   │   ├── parser.rs         # Tokens -> Value tree (with source spans)
+│   │   │   └── printer.rs        # Value -> Red source text (mold)
+│   │   └── tests/
+│   │       ├── round_trip.rs     # golden: load -> mold == normalized source
+│   │       └── golden/           # *.red + *.expected
+│   │
+│   │   ├── red-eval/                 # Tree-walking interpreter
+│   │   │   ├── Cargo.toml            # depends on red-core
+│   │   │   ├── src/
+│   │   │   │   ├── lib.rs
+│   │   │   │   ├── context.rs        # re-exports + Env (user ctx + call stack)
+│   │   │   │   ├── interp.rs         # eval(Value, &mut Env) -> Result<Value, Error>
+│   │   │   │   ├── natives.rs        # print, prin, if, either, loop, repeat, +, -, *, =, etc.
+│   │   │   │   ├── series.rs         # first/next/append/select/find/... natives
+│   │   │   │   ├── binding.rs        # bind/use/in/get/set/value? natives
+│   │   │   │   ├── parse.rs          # parse dialect (matcher subset)
+│   │   │   │   └── error.rs          # Red-style errors as values
+│   │   └── tests/
+│   │       ├── programs.rs       # run .red file, compare stdout to .expected
+│   │       └── programs/         # *.red + *.expected
+│   │
+│   └── red-cli/                  # Binary entry point
+│       ├── Cargo.toml            # depends on red-eval
+│       ├── src/
+│       │   └── main.rs           # `red path/to/file.red` and `red` (REPL stub)
+│       └── tests/
+│           └── cli.rs            # assert_cmd against fixtures
+│
+└── examples/                     # Sample .red programs usable from CLI
+```
+
+## Value model (`red-core/src/value.rs`)
+
+A single `Value` enum backed by shared storage + cursors for blocks (full
+series semantics), and by `Rc<FuncDef>` for function values:
+
+```rust
+struct Series {
+    data: Rc<RefCell<Vec<Value>>>,
+    index: usize,            // 0..=len; cursor for series natives
+}
+
+enum Binding {
+    Unbound,
+    Local(Context, usize),   // context + slot index
+    Func(Rc<FuncDef>, usize),// function + param index
+}
+
+struct FuncDef {
+    params: Vec<Symbol>,
+    body: Series,
+    ctx: Context,            // definition context (parent for lookups)
+    native: Option<fn(&[Value], &mut Env) -> Result<Value, EvalError>>,
+}
+
+enum Value {
+    None,
+    Logic(bool),
+    Integer(i64),
+    Float(f64),
+    String(Rc<str>),            // {"..."} and "..." alike
+    Word { sym: Symbol, binding: Binding },    // foo
+    SetWord { sym: Symbol, binding: Binding }, // foo:
+    GetWord { sym: Symbol, binding: Binding }, // :foo
+    LitWord(Symbol),            // 'foo
+    Block(Series),              // [...] — code is data; see "Red blocks" below
+    Paren(Series),              // (...)
+    Func(Rc<FuncDef>),
+    Path(Vec<Value>),           // foo/bar (simple select-on-block only in POC)
+    String8(Vec<u8>),           // binary #"..." (optional, skip in POC)
+}
+```
+
+`Symbol` = interned string (use `string_cache` crate or roll a simple `Rc<str>` newtype to start).
+
+`Context` is defined in `red-core/src/context.rs` (see Evaluator section):
+an ordered `Symbol -> slot index` map plus a `Vec<RefCell<Value>>` of slots.
+
+## Red blocks — semantics notes
+
+Blocks (`[...]`) are the central data structure in Red: **code is data**. The
+POC implements the full series model *and* word binding.
+
+- **Homoiconicity**: a block is a `Vec<Value>`; evaluating it walks values in
+  order. The same block is usable as data (molded, indexed, sliced) and as
+  code (via `do` / `reduce` / `compose` / top-level script `do`).
+
+- **Evaluation rule**:
+  - A `Block` value encountered by `eval` is returned **as-is** (data).
+    Only `do`, `reduce`, `compose`, and the top-level script loader walk into
+    a block.
+  - A `Paren` value encountered by `eval` is evaluated **eagerly** in place
+    (like an inline `do`). This distinction is load-bearing.
+
+- **Argument convention**: a block passed as an argument is *not* evaluated
+  by the caller; the callee decides. `if`/`either`/`loop`/`until`/`repeat`
+  receive a block and `do` it themselves; `print`/`+`/etc. receive already-
+  evaluated values.
+
+### Series model (full)
+
+A block is `Series { data: Rc<RefCell<Vec<Value>>>, index: usize }` so the
+same underlying storage can be shared by multiple positioned views (Red's
+`series!` semantics).
+
+- Type predicates: `series?`, `block?`, `paren?`, `any-block?`, `empty?`.
+- Navigation: `first`, `second`, `third`, `last`, `next`, `back`, `at`,
+  `skip`, `head`, `tail`, `index?`, `length?`.
+- Access: `pick`, `poke`, `select`, `find` (linear; no `match`/regex in POC).
+- Mutation: `append`, `insert`, `change`, `remove`, `clear`, `take`, `poke`.
+- Slicing: `copy/part`, `at`-based sub-series share storage (copy-on-write
+  deferred — note as future work).
+- Iteration: `foreach` (over block or series), `repeat`, `forall` (uses the
+  series cursor), `while`/`until`.
+- `series/head`, `series/index`, etc. paths are out of scope; use natives.
+
+Series natives operate on the cursor; `next` returns a new `Series` pointing
+one ahead; mutation via `append`/`insert` affects shared storage (matches
+Red's reference semantics).
+
+### Binding & contexts (real implementation)
+
+Words inside blocks are **bound** to contexts. The POC implements Red-style
+binding, not just dynamic lookup.
+
+- `Context` = an ordered map of `Symbol -> slot index` plus a
+  `Vec<RefCell<Value>>` of slots. Self-referential (a context can hold a
+  value that references itself) via `Rc<RefCell<...>>`.
+- `Word` carries a `Binding`: `Unbound`, `Local(Context, slot)`, or
+  `Func(func_rc, param_index)`. Binding is attached at `load`-time for
+  script-level words and at `make`/`func`-creation time for function bodies.
+- `set-word` in a script binds into the **user context** (a single top-level
+  context for the POC; `context?` / `object` not modeled yet).
+- `func` / `does` / `make function!` create function values with their own
+  context (parent = definition context for closures-less `func`).
+- Lookup walks: word's binding → if bound, read slot; if unbound, error
+  (Red-style "has no value") rather than falling back to a global chain.
+- `bind`, `use`, `in`, `value?`, `get`, `set` natives to manipulate bindings
+  explicitly.
+- Known gap: **objects** (`make object!`, `object` context inheritance) are
+  out of scope; only the user context + function contexts exist.
+- Known gap: **closures** (`closure!`) deferred; `func` uses shallow copy of
+  args on each call.
+
+### Spans
+Each `Block`/`Paren` retains the span of its `[...]`/`(...)` delimiters;
+inner values already carry their own spans. Required for `do`-time errors and
+for `bind` to report unbound words with a location.
+
+### Built-ins (full block set)
+- Type predicates: `block?`, `paren?`, `series?`, `any-block?`, `empty?`.
+- Series nav: `first` `second` `third` `last` `next` `back` `at` `skip`
+  `head` `tail` `index?` `length?`.
+- Series access: `pick` `poke` `select` `find`.
+- Series mutate: `append` `insert` `change` `remove` `clear` `take`.
+- Iteration: `foreach` `forall` `while` `until` (plus `loop`/`repeat`).
+- Binding: `bind` `use` `in` `value?` `get` `set`.
+- Functions: `func` `does` `make` `function?` `return` (local).
+- Optional/deferred: `compose`, objects, closures,
+  paths beyond simple `select`-on-block. (`parse` is in scope — see "Dialects".)
+
+## Dialects
+
+A **dialect** in Red is any block evaluated by a custom interpreter instead
+of the default `do` evaluator. Blocks are data, so any native can walk a
+block with its own rules. The POC implements one concrete dialect (`parse`);
+no typed framework — a dialect is simply a native that interprets a block.
+
+### Dialect concept
+- A dialect is just a function `fn(&[Value], &mut Env) -> Result<Value, EvalError>`
+  taking a block's contents and interpreting them however it likes.
+- `parse` is the only built-in dialect in the POC.
+- User-defined dialects are possible by passing a block to a native that
+  interprets it (e.g. a future `draw` dialect); no special syntax needed.
+- Contrast: `do` is the "Red dialect" (normal eval); `reduce` is the
+  "reduce dialect" (eval each value, collect results); `compose` is a
+  single native (eval parens, leave rest) — not a dialect framework user.
+
+### `parse` dialect (in scope for POC)
+Mini-DSL on blocks/strings, implemented as a native that walks its rule
+block. Works on **both string! and block! input**.
+
+```red
+parse "abc" ["a" "b" "c"]          ; => true
+parse [1 2 3] [1 2 3]              ; => true
+parse "hello world" [copy name to " " skip copy rest to end]
+```
+
+POC rule set (matcher subset):
+- Literal values (string/integer/word) — match against input.
+- `skip`, `to`, `thru`, `end`, `none`.
+- `any`, `some`, `opt`, `while`.
+- `|` (alternative).
+- `copy word rule` (capture sub-match), `set word rule` (single value).
+- `[...]` grouping (sub-rules).
+- `(...)` (Red code side-effect, evaluated via `eval`).
+- Return `logic!` (matched/not).
+
+Deferred: `collect`/`keep`/`match`/`gather`, rule compilation, BNF-style
+grammar extraction, error rule blocks, `case` flag. Just the matcher.
+
+### Other dialects (illustrative, NOT implemented)
+- `load` dialect — already the parser; not a runtime dialect.
+- `draw` dialect, `vid` dialect (GUI), `secure` dialect — all out of scope.
+
+### Implications for the rest of the plan
+- `parse` is a non-trivial native → gets its own milestone and source file
+  (`red-eval/src/parse.rs`).
+- `parse` depends on the **series model** (cursor-based input scanning for
+  both strings and blocks) and on **binding** (for `copy`/`set` to write
+  into the user context).
+- Dialects motivate keeping `eval`'s public surface small: a dialect only
+  needs `&[Value]` + `&mut Env`, never a re-entry into the parser.
+
+## Lexer (`red-core/src/lexer.rs`)
+- Whitespace-delimited tokens (Red's defining feature)
+- Comments: `;` to EOL
+- Strings: `"..."` (escaped) and `{...}` (multi-line, balanced braces) — both supported
+- Integers and floats (both supported from the start)
+- Words (incl. `word:`, `:word`, `'word`)
+- Blocks `[ ]`, parens `( )`
+- Header `Red [...]` recognized at parser level
+- Each token carries a `Span { start, end }`
+
+## Parser (`red-core/src/parser.rs`)
+- Recursive descent over token stream
+- `parse_program` -> expects `Red` word + header block + body block (or bare body for `load`)
+- Returns `Value::Block` of body
+- Errors with spans
+- **Binding pass**: after constructing the value tree, walk it and attach
+  `Binding`s to words using the user context (script-level `set-word!`s and
+  references). Function bodies get bound at `func`/`does` creation time
+  (runtime), not at load.
+
+## Printer / `mold` (`red-core/src/printer.rs`)
+- Inverse of parser, used by REPL and tests
+- Round-trip property: `mold(parse(s)) == normalize(s)`
+
+## Evaluator (`red-eval/src/interp.rs`)
+
+`pub fn eval(block: &Value, env: &mut Env) -> Result<Value, EvalError>`
+
+`Env` is the **user context** plus the call stack of function contexts (not a
+flat `HashMap`). Defined in `red-eval/src/context.rs` (re-exports
+`red_core::context::{Context, Binding, FuncDef}`).
+
+- Walks the block, evaluating each value in order; last value returned
+- Word: resolve its **binding** → read slot from the bound context; error
+  Red-style ("has no value") if `Unbound`. No dynamic global fallback.
+- SetWord: eval next value, write into its bound context slot (or bind into
+  user context if unbound at script top-level)
+- Block: returned **as-is** (data). Only `do`/`reduce`/`compose`/natives
+  that take a block arg walk it. (See "Red blocks" section.)
+- Paren: evaluated **eagerly** in place when its enclosing block is walked
+- Path: leave unsupported for POC or implement simple object-less path as
+  `select` on a block
+
+### Built-in natives (POC set)
+See the "Red blocks → Built-ins (full block set)" list above for the
+complete set. Headline groups: I/O (`print`, `prin`, `probe`), arithmetic
+(`+ - * /`), comparison (`= <> < > <= >=`), logic (`and or not`),
+control flow (`if`, `either`, `loop`, `repeat`, `until`, `while`, `foreach`,
+`forall`), eval (`do`, `reduce`, `compose` optional), series ops (full set),
+binding (`bind`, `use`, `in`, `value?`, `get`, `set`), functions (`func`,
+`does`, `make`, `function?`, `return`), constants (`none`/`true`/`false`/
+`newline`).
+
+Native calls are implemented in Rust directly against `&[Value]` and
+`&mut Env`; `func`/`does` bodies are evaluated by recursing into `eval`
+with a fresh child context.
+
+## Error model
+- `EvalError { kind, span, message }`
+- Surface as `*** Error: <msg>` from CLI; tests assert against stderr.
+
+## CLI (`red-cli/src/main.rs`)
+- `red file.red` — load, parse, do, exit code from last value
+- `red` (no args) — minimal REPL using `rustyline`: read line, `load`, `do`, `mold` result, print
+- `--help`, `--version`
+
+## Testing strategy
+
+**Integration + golden:**
+
+1. `red-core/tests/round_trip.rs` — for each `tests/golden/*.red`:
+   - Read source, parse, mold, compare to `*.expected` (normalized form). New test files can be added with no code changes.
+
+2. `red-eval/tests/programs.rs` — for each `tests/programs/*.red`:
+   - Capture stdout, compare to `*.expected`. Also capture stderr for error cases.
+
+3. `red-cli/tests/cli.rs` — uses `assert_cmd` to run the binary on a couple of fixtures end-to-end.
+
+4. Inline `#[test]` only for tight unit checks (lexer token kinds, specific parser edge cases) — kept minimal per the "Integration + golden" preference.
+
+A small `tests/common/mod.rs` helper in each crate walks a directory and generates one test per fixture.
+
+## Dependencies (kept minimal)
+- `rustyline` — REPL line editing
+- `string_cache` (or hand-rolled Symbol) — interned words
+- `assert_cmd` + `predicates` (dev) — CLI tests
+- No async, no proc-macros.
+
+## Build/test commands
+- `cargo build -p red-cli`
+- `cargo test --workspace`
+- `cargo run -p red-cli -- examples/hello.red`
+
+## Implementation order (milestones)
+1. Scaffold workspace + 3 crate skeletons, empty tests pass
+2. `Value` + `Symbol` + `printer` (mold) with unit tests
+3. Lexer (token stream + spans), golden round-trip tests added
+4. Parser producing `Value::Block`; full round-trip green
+5. `Env`/`Context` + minimal `eval` (literals, words, set-words, do) + user-context binding pass
+6. Natives: `print`/`prin` first → "hello world" runs end-to-end via CLI
+7. Natives: arithmetic, conditionals (`if`/`either`), `loop`/`repeat`/`until`/`while`
+8. **Series model**: `Series` cursor, nav/access/mutate natives, `foreach`/`forall`, golden tests
+9. **Functions + binding**: `func`/`does`/`return`, `bind`/`use`/`in`/`get`/`set`/`value?`, function-context call frames
+10. **`parse` dialect**: matcher subset (`copy`/`set`/`to`/`thru`/`some`/`any`/`opt`/`while`/`|`), string + block input, golden tests
+11. REPL mode in CLI
+12. Golden program suite for eval; error handling polish
+
+## Decisions confirmed
+- Floats: included from the start
+- Strings: both `"..."` and `{...}` multiline supported
+- REPL: uses `rustyline`
+- README: skipped for now
+- Series model: full (cursor + mutation); copy-on-write deferred
+- Binding: real contexts (user + function); objects/closures deferred
+- Functions: in scope (`func`, `does`, `make function!`, `return`)
+- Dialects: no typed framework; a dialect is a native that walks a block.
+- `parse`: matcher subset in scope (string + block input); `collect`/`compile`/`case` deferred.
