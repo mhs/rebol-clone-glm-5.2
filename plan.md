@@ -150,25 +150,25 @@ on the one above unless noted.
 
 ## Milestone 6 — print/prin + hello world
 
-- [ ] Create `red-eval/src/natives.rs`
-- [ ] Implement native registration: `pub fn register_natives(env: &mut Env)`
-- [ ] Implement `print` native: mold each arg, join with space, append newline, write to stdout
-- [ ] Implement `prin` native: like print, no trailing newline
-- [ ] Implement `probe` native: mold arg, print `== <mold>`
-- [ ] Register `none`, `true`, `false`, `newline` as constants (Values bound in user_ctx)
-- [ ] Update CLI `red-cli/src/main.rs`:
-- [ ] Parse args (`file.red` or no args)
-- [ ] Read file, call `run_source`, print result via `mold`
-- [ ] Exit code 0 on success, 1 on error (print `*** Error: ...` to stderr)
-- [ ] Add `--help` and `--version`
-- [ ] Create `examples/hello.red`: `Red [] print "Hello, World!"`
-- [ ] Run `cargo run -p red-cli -- examples/hello.red` → prints `Hello, World!`
-- [ ] Create `red-cli/tests/cli.rs` with `assert_cmd` test for `hello.red`
-- [ ] Add error-path CLI test (file with unbound word)
-- [ ] Inline `#[test]`: `print 5` → stdout "5\n"
-- [ ] Inline `#[test]`: `prin "a" prin "b"` → stdout "ab"
-- [ ] Inline `#[test]`: `print [1 2 3]` → stdout "[1 2 3]\n"
-- [ ] `cargo test --workspace` passes
+- [x] Create `red-eval/src/natives.rs`
+- [x] Implement native registration: `pub fn register_natives(env: &mut Env)`
+- [x] Implement `print` native: mold each arg, join with space, append newline, write to stdout
+- [x] Implement `prin` native: like print, no trailing newline
+- [x] Implement `probe` native: mold arg, print `== <mold>`
+- [x] Register `none`, `true`, `false`, `newline` as constants (Values bound in user_ctx)
+- [x] Update CLI `red-cli/src/main.rs`:
+- [x] Parse args (`file.red` or no args)
+- [x] Read file, call `run_source`, print result via `mold`
+- [x] Exit code 0 on success, 1 on error (print `*** Error: ...` to stderr)
+- [x] Add `--help` and `--version`
+- [x] Create `examples/hello.red`: `Red [] print "Hello, World!"`
+- [x] Run `cargo run -p red-cli -- examples/hello.red` → prints `Hello, World!`
+- [x] Create `red-cli/tests/cli.rs` with `assert_cmd` test for `hello.red`
+- [x] Add error-path CLI test (file with unbound word)
+- [x] Inline `#[test]`: `print 5` → stdout "5\n"
+- [x] Inline `#[test]`: `prin "a" prin "b"` → stdout "ab"
+- [x] Inline `#[test]`: `print [1 2 3]` → stdout "[1 2 3]\n"
+- [x] `cargo test --workspace` passes
 
 ## Milestone 7 — Arithmetic, conditionals, loops
 

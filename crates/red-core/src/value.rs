@@ -86,12 +86,17 @@ pub enum Binding {
 /// Function definition shared by `Value::Func`. Fields stubbed for Milestone 2:
 /// `params` empty, `body`/`ctx` default-constructed, `native` `None`. Real
 /// population happens in Milestones 6 (natives) and 9 (`func`/`does`).
+///
+/// `variadic` marks natives (like `print`/`prin`/`probe`) that collect all
+/// remaining args in the enclosing block up to the next native word. Fixed
+/// natives ignore it and use `params.len()` for arity.
 #[derive(Clone, Debug, Default)]
 pub struct FuncDef {
     pub params: Vec<Symbol>,
     pub body: Series,
     pub ctx: Context,
     pub native: Option<NativeFn>,
+    pub variadic: bool,
 }
 
 /// The single runtime value type. Covers every variant from the brief, even

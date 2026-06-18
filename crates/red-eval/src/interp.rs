@@ -12,8 +12,8 @@ use std::rc::Rc;
 
 use red_core::lexer;
 use red_core::parser::parse_program;
-use red_core::value::{Binding, FuncDef, Series, Span, Symbol, Value};
-use red_core::{Context, Env, EvalError, Error};
+use red_core::value::{Binding, Series, Span, Symbol, Value};
+use red_core::{Context, Env, Error, EvalError};
 
 /// Walk `body` and attach `Binding::Local` to every word whose name matches a
 /// slot allocated for a `SetWord`. Recurses into nested `Block`/`Paren`
@@ -112,7 +112,8 @@ pub fn eval(block: &Value, env: &mut Env) -> Result<Value, EvalError> {
             }
 
             Value::Word { sym, binding } => {
-                resolve_word(sym, binding, env, span)?
+                let resolved = resolve_word(sym, binding, env, span)?;
+                dispatch_call(resolved, sym, &data, &mut i, env, span)?
             }
 
             Value::SetWord { sym, binding } => {
@@ -134,12 +135,71 @@ pub fn eval(block: &Value, env: &mut Env) -> Result<Value, EvalError> {
             }
 
             Value::GetWord { sym, binding } => {
+                // GetWord returns the slot value (or native Func) without
+                // invoking it — no argument collection, no dispatch.
                 resolve_word(sym, binding, env, span)?
             }
         };
         i += 1;
     }
     Ok(last)
+}
+
+/// If `resolved` is a native-bearing `Func`, collect arguments from `data`
+/// (advancing `i`) and invoke the native. Otherwise return `resolved` as-is
+/// (user-defined funcs land in M9). `sym` is the calling word's symbol, used
+/// for arity-error messages.
+fn dispatch_call(
+    resolved: Value,
+    sym: &Symbol,
+    data: &std::cell::Ref<Vec<Value>>,
+    i: &mut usize,
+    env: &mut Env,
+    span: Span,
+) -> Result<Value, EvalError> {
+    let fd = match &resolved {
+        Value::Func(fd) if fd.native.is_some() => fd.clone(),
+        _ => return Ok(resolved),
+    };
+    let f = fd.native.unwrap();
+    let mut args = Vec::new();
+    if fd.variadic {
+        // Consume remaining values until the next native word or end of block.
+        while *i + 1 < data.len() && !is_native_word(&data[*i + 1], env) {
+            *i += 1;
+            args.push(eval_value(&data[*i], env)?);
+        }
+    } else {
+        let arity = fd.params.len();
+        for _ in 0..arity {
+            *i += 1;
+            if *i >= data.len() {
+                return Err(EvalError::Arity {
+                    native: sym.clone(),
+                    expected: arity,
+                    got: args.len(),
+                    span,
+                });
+            }
+            args.push(eval_value(&data[*i], env)?);
+        }
+    }
+    f(&args, env)
+}
+
+/// True if `v` is an unbound `Word`/`GetWord` whose name is a registered
+/// native. Used to stop variadic argument collection at the next native call.
+fn is_native_word(v: &Value, env: &Env) -> bool {
+    let sym = match v {
+        Value::Word { sym, binding } | Value::GetWord { sym, binding } => {
+            if !matches!(binding, Binding::Unbound) {
+                return false;
+            }
+            sym
+        }
+        _ => return false,
+    };
+    env.natives.contains_key(sym)
 }
 
 /// Evaluate a single value as if it were the sole element of a block.
@@ -169,11 +229,8 @@ fn resolve_word(
     match binding {
         Binding::Local(ctx, idx) => Ok(ctx.slot_value(*idx)),
         Binding::Unbound => {
-            if let Some(&f) = env.natives.get(sym) {
-                Ok(Value::Func(Rc::new(FuncDef {
-                    native: Some(f),
-                    ..Default::default()
-                })))
+            if let Some(fd) = env.natives.get(sym) {
+                Ok(Value::Func(Rc::clone(fd)))
             } else {
                 Err(EvalError::UnboundWord {
                     sym: sym.clone(),
@@ -221,23 +278,37 @@ fn write_setword(
 /// End-to-end: lex → parse → bind → eval. Handles both bare bodies and
 /// `Red [...] <body>` programs (the header is discarded for the POC).
 pub fn run_source(src: &str) -> Result<Value, Error> {
+    run_source_with_output(src, Box::new(std::io::stdout()))
+}
+
+/// Like `run_source` but with a custom output sink. Used by golden program
+/// tests to capture native output into an in-memory buffer.
+pub fn run_source_with_output(src: &str, out: Box<dyn std::io::Write>) -> Result<Value, Error> {
     let tokens = lexer::lex(src)?;
     let body = if tokens.is_empty() {
         Series::empty()
     } else {
-        // `parse_program` recognizes an optional `Red [...]` header and
-        // returns `(header, body)`. With no header, it falls back to a bare
-        // body parse (header is an empty series).
         let (_header, body) = parse_program(&tokens)?;
         body
     };
-    run_series(body)
+    run_series_with_output(body, out)
 }
 
 /// Evaluate an already-parsed body series with a fresh environment.
+/// Constants (`none`/`true`/`false`/`newline`) are installed into the user
+/// context before the binding pass, and natives (`print`/`prin`/`probe`) are
+/// registered before eval.
 pub fn run_series(body: Series) -> Result<Value, Error> {
-    let ctx_rc = bind_pass(&body, Context::new());
-    let mut env = Env::new(ctx_rc);
+    run_series_with_output(body, Box::new(std::io::stdout()))
+}
+
+/// Like `run_series` but with a custom output sink.
+pub fn run_series_with_output(body: Series, out: Box<dyn std::io::Write>) -> Result<Value, Error> {
+    let mut ctx = Context::new();
+    crate::natives::install_constants(&mut ctx);
+    let ctx_rc = bind_pass(&body, ctx);
+    let mut env = Env::new_with_output(ctx_rc, out);
+    crate::natives::register_natives(&mut env);
     let block = Value::Block {
         series: body,
         span: Span::new(0, 0),

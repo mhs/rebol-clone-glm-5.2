@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::io::{self, Write};
 use std::rc::Rc;
 
 use crate::context::Context;
@@ -19,20 +20,33 @@ use crate::value::{FuncDef, Span, Symbol, Value};
 pub type NativeFn = fn(&[Value], &mut Env) -> Result<Value, EvalError>;
 
 /// Top-level interpreter state: the shared user context, the function call
-/// stack (empty until M9), and the native registry (populated in M6).
+/// stack (empty until M9), the native registry (populated in M6), and the
+/// shared output sink that natives like `print`/`prin`/`probe` write to.
+///
+/// `out` defaults to `io::stdout()`; tests inject a `Box<dyn Write>` buffer
+/// so inline tests can assert on captured output.
 pub struct Env {
     pub user_ctx: Rc<Context>,
     pub call_stack: Vec<CallFrame>,
-    pub natives: HashMap<Symbol, NativeFn>,
+    pub natives: HashMap<Symbol, Rc<FuncDef>>,
+    pub out: Box<dyn Write>,
 }
 
 impl Env {
-    /// Empty environment: fresh user context, no call frames, no natives.
+    /// Empty environment: fresh user context, no call frames, no natives,
+    /// output going to `stdout`.
     pub fn new(user_ctx: Rc<Context>) -> Self {
+        Self::new_with_output(user_ctx, Box::new(io::stdout()))
+    }
+
+    /// Build an environment with a custom output sink (used by tests to
+    /// capture native output into an in-memory buffer).
+    pub fn new_with_output(user_ctx: Rc<Context>, out: Box<dyn Write>) -> Self {
         Self {
             user_ctx,
             call_stack: Vec::new(),
             natives: HashMap::new(),
+            out,
         }
     }
 }

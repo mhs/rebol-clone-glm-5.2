@@ -1,0 +1,1 @@
+Red [] print "Hello, World!"

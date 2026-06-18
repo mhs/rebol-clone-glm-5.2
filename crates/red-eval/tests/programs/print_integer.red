@@ -1,0 +1,1 @@
+Red [] print 5

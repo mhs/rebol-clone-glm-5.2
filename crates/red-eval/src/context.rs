@@ -6,6 +6,4 @@
 //! re-exports them and contributes the evaluation algorithm (`interp`) and,
 //! in later milestones, the native implementations.
 
-pub use red_core::{
-    Binding, CallFrame, Context, Env, EvalError, FuncDef, NativeFn,
-};
+pub use red_core::{Binding, CallFrame, Context, Env, EvalError, FuncDef, NativeFn};
