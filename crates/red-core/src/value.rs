@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::context::Context;
+use crate::env::NativeFn;
 
 /// Byte-offset span into the original source. Carried through lex → parse →
 /// eval so errors can point at the offending bytes.
@@ -67,21 +68,20 @@ impl Default for Series {
     }
 }
 
-/// How a word is attached to a context. Milestone 2 stubs `Local`/`Func` as
-/// unit variants; Milestone 5 fills in `Local(Rc<Context>, usize)` and
-/// Milestone 9 fills in `Func(Rc<FuncDef>, usize)`.
+/// How a word is attached to a context.
+/// - `Unbound`: no binding attached yet; resolved at eval time via the
+///   user context or native registry.
+/// - `Local(Rc<Context>, usize)`: bound to a slot in the given context.
+///   Attached by `bind_pass` (M5) for script-level words and by `func`/
+///   `does` creation (M9) for function bodies.
+/// - `Func`: reserved for function-parameter binding (M9); unused in M5.
 #[derive(Clone, Debug, Default)]
 pub enum Binding {
     #[default]
     Unbound,
-    Local,
+    Local(Rc<Context>, usize),
     Func,
 }
-
-/// Placeholder native signature. Replaced in Milestone 5 with the real
-/// `fn(&[Value], &mut Env) -> Result<Value, EvalError>` once `Env`/`EvalError`
-/// exist in `red-eval`. Kept here so `FuncDef` has its full field set up front.
-pub type NativeFn = fn(&[Value]) -> Result<Value, ()>;
 
 /// Function definition shared by `Value::Func`. Fields stubbed for Milestone 2:
 /// `params` empty, `body`/`ctx` default-constructed, `native` `None`. Real

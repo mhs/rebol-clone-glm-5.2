@@ -119,34 +119,34 @@ on the one above unless noted.
 
 ## Milestone 5 — Env, Context, minimal eval
 
-- [ ] Create `red-eval/src/context.rs`
-- [ ] Re-export `Context`, `Binding`, `FuncDef` from `red-core`
-- [ ] Implement `Context::new()` with empty slots + name map
-- [ ] Implement `Context::slot_mut(&mut self, sym: Symbol) -> &mut RefCell<Value>` (allocate if absent)
-- [ ] Implement `Context::get(&self, sym: Symbol) -> Option<Value>`
-- [ ] Implement `Context::set(&mut self, sym: Symbol, val: Value)`
-- [ ] Define `Env { user_ctx: Context, call_stack: Vec<CallFrame>, natives: HashMap<Symbol, NativeFn> }`
-- [ ] Define `CallFrame { ctx: Context, func: Option<Rc<FuncDef>> }`
-- [ ] Define `EvalError` enum (UnboundWord, TypeError, Arity, Return, Native)
-- [ ] Create `red-eval/src/interp.rs`
-- [ ] Implement `pub fn eval(block: &Value, env: &mut Env) -> Result<Value, EvalError>`
-- [ ] Eval arm: literals return self
-- [ ] Eval arm: `Block` returns as-is (data)
-- [ ] Eval arm: `Paren` walks eagerly
-- [ ] Eval arm: `Word` resolves via binding or native lookup
-- [ ] Eval arm: `SetWord` evals next value, writes to bound slot
-- [ ] Eval arm: `GetWord` returns slot value without calling
-- [ ] Eval arm: `LitWord` returns as-is
-- [ ] Implement `resolve_word(sym, binding, env, span)`
-- [ ] Implement `write_setword(sym, binding, val, env, span)`
-- [ ] Implement binding pass: walk parsed tree, attach `Local(user_ctx, slot)` to top-level SetWords and matching Words
-- [ ] Expose `pub fn run_source(src: &str) -> Result<Value, Error>` combining load + bind + eval
-- [ ] Inline `#[test]`: `5` evaluates to `Integer(5)`
-- [ ] Inline `#[test]`: `foo: 5 foo` evaluates to `Integer(5)`
-- [ ] Inline `#[test]`: unbound word errors
-- [ ] Inline `#[test]`: paren evaluates eagerly
-- [ ] Inline `#[test]`: block returns as-is
-- [ ] `cargo test -p red-eval` passes
+- [x] Create `red-eval/src/context.rs`
+- [x] Re-export `Context`, `Binding`, `FuncDef` from `red-core`
+- [x] Implement `Context::new()` with empty slots + name map
+- [x] Implement `Context::slot_mut(&mut self, sym: Symbol) -> &mut RefCell<Value>` (allocate if absent)
+- [x] Implement `Context::get(&self, sym: Symbol) -> Option<Value>`
+- [x] Implement `Context::set(&mut self, sym: Symbol, val: Value)`
+- [x] Define `Env { user_ctx: Context, call_stack: Vec<CallFrame>, natives: HashMap<Symbol, NativeFn> }`
+- [x] Define `CallFrame { ctx: Context, func: Option<Rc<FuncDef>> }`
+- [x] Define `EvalError` enum (UnboundWord, TypeError, Arity, Return, Native)
+- [x] Create `red-eval/src/interp.rs`
+- [x] Implement `pub fn eval(block: &Value, env: &mut Env) -> Result<Value, EvalError>`
+- [x] Eval arm: literals return self
+- [x] Eval arm: `Block` returns as-is (data)
+- [x] Eval arm: `Paren` walks eagerly
+- [x] Eval arm: `Word` resolves via binding or native lookup
+- [x] Eval arm: `SetWord` evals next value, writes to bound slot
+- [x] Eval arm: `GetWord` returns slot value without calling
+- [x] Eval arm: `LitWord` returns as-is
+- [x] Implement `resolve_word(sym, binding, env, span)`
+- [x] Implement `write_setword(sym, binding, val, env, span)`
+- [x] Implement binding pass: walk parsed tree, attach `Local(user_ctx, slot)` to top-level SetWords and matching Words
+- [x] Expose `pub fn run_source(src: &str) -> Result<Value, Error>` combining load + bind + eval
+- [x] Inline `#[test]`: `5` evaluates to `Integer(5)`
+- [x] Inline `#[test]`: `foo: 5 foo` evaluates to `Integer(5)`
+- [x] Inline `#[test]`: unbound word errors
+- [x] Inline `#[test]`: paren evaluates eagerly
+- [x] Inline `#[test]`: block returns as-is
+- [x] `cargo test -p red-eval` passes
 
 ## Milestone 6 — print/prin + hello world
 
