@@ -45,6 +45,9 @@ enum LineAction {
     /// A parse/lex error. Carries the rendered message for the driver to
     /// write to stderr; the buffer should be cleared.
     Failed(String),
+    /// The evaluated code called `exit`/`quit` — the driver should stop the
+    /// session.
+    Quit,
 }
 
 /// Parse + bind + eval one accumulated line buffer against `env`. The molded
@@ -60,6 +63,7 @@ fn eval_repl_line(buffer: &str, env: &mut Env) -> LineAction {
             bind_pass_into(&body, &env.user_ctx);
             match eval(&Value::block(body), env) {
                 Err(EvalError::Return(_)) => LineAction::Evaluated,
+                Err(EvalError::Quit(_)) => LineAction::Quit,
                 Err(e) => LineAction::Failed(render_error(None, buffer, &Error::Eval(e))),
                 Ok(Value::None) => LineAction::Evaluated,
                 Ok(v) => {
@@ -75,9 +79,10 @@ fn eval_repl_line(buffer: &str, env: &mut Env) -> LineAction {
 
 /// Handle one physical input line against the accumulating `buffer` and
 /// `env`. Returns `false` if the REPL should exit (saw `quit`/`exit` at a
-/// fresh prompt), `true` to continue. Owns quit-detection, buffer
-/// accumulation, multi-line continuation, eval, and result/error printing —
-/// shared by the interactive (rustyline) and piped-stdin drivers.
+/// fresh prompt, or the evaluated code called `exit`/`quit`), `true` to
+/// continue. Owns quit-detection, buffer accumulation, multi-line
+/// continuation, eval, and result/error printing — shared by the interactive
+/// (rustyline) and piped-stdin drivers.
 fn handle_line(line: &str, buffer: &mut String, env: &mut Env) -> bool {
     if buffer.is_empty() {
         let t = line.trim();
@@ -95,14 +100,18 @@ fn handle_line(line: &str, buffer: &mut String, env: &mut Env) -> bool {
     buffer.push_str(line);
 
     match eval_repl_line(buffer, env) {
-        LineAction::NeedMoreInput => {}
-        LineAction::Evaluated => buffer.clear(),
+        LineAction::NeedMoreInput => true,
+        LineAction::Evaluated => {
+            buffer.clear();
+            true
+        }
         LineAction::Failed(msg) => {
             eprintln!("{msg}");
             buffer.clear();
+            true
         }
+        LineAction::Quit => false,
     }
-    true
 }
 
 /// Entry point for `red` invoked with no file argument.

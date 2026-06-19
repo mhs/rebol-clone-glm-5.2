@@ -89,29 +89,29 @@ Deferred to v0.3+ (acknowledged but not built here): `char!`, `map!`, `pair!`,
 
 ## Milestone 16 — Control flow expansion
 
-- [ ] Implement `switch` (and `/default`, `/case` refinements)
-- [ ] Implement `case` (and `/default`, `/all`)
-- [ ] Implement `default 'word value` (set if unset/none)
-- [ ] Implement `all [block]` (short-circuit, returns last truthy or `none`)
-- [ ] Implement `any [block]` (short-circuit, returns first truthy or `none`)
-- [ ] Implement `try [block]` (catch any error → error value or none)
-- [ ] Implement `attempt [block]` (alias/variant of `try` returning none on error)
-- [ ] Implement `catch [block]` / `throw value` pair
-- [ ] Implement `cause-error` placeholder (until error values exist; map to
+- [x] Implement `switch` (and `/default`, `/case` refinements)
+- [x] Implement `case` (and `/default`, `/all`)
+- [x] Implement `default 'word value` (set if unset/none)
+- [x] Implement `all [block]` (short-circuit, returns last truthy or `none`)
+- [x] Implement `any [block]` (short-circuit, returns first truthy or `none`)
+- [x] Implement `try [block]` (catch any error → error value or none)
+- [x] Implement `attempt [block]` (alias/variant of `try` returning none on error)
+- [x] Implement `catch [block]` / `throw value` pair
+- [x] Implement `cause-error` placeholder (until error values exist; map to
       `EvalError::Native`)
-- [ ] Implement `function` (auto-locals) variant distinct from `func`:
+- [x] Implement `function` (auto-locals) variant distinct from `func`:
       `function [x][local: 5 ...]` declares `local` as a local word
-- [ ] Implement `comment` (skip block/string arg)
-- [ ] Implement `exit`/`quit` from script (already in REPL; extend to script
+- [x] Implement `comment` (skip block/string arg)
+- [x] Implement `exit`/`quit` from script (already in REPL; extend to script
       exit code)
-- [ ] Inline `#[test]`: `switch 2 [1 ["a"] 2 ["b"]]` → "b"
-- [ ] Inline `#[test]`: `case [1 > 2 ["a"] 2 > 1 ["b"]]` → "b"
-- [ ] Inline `#[test]`: `all [true 1 2]` → 2; `all [true false]` → none
-- [ ] Inline `#[test]`: `any [false 5 6]` → 5
-- [ ] Inline `#[test]`: `try [1 + "a"]` returns error value, doesn't propagate
-- [ ] Inline `#[test]`: `catch [throw 42]` → 42
-- [ ] Add golden fixtures
-- [ ] `cargo test --workspace` passes
+- [x] Inline `#[test]`: `switch 2 [1 ["a"] 2 ["b"]]` → "b"
+- [x] Inline `#[test]`: `case [1 > 2 ["a"] 2 > 1 ["b"]]` → "b"
+- [x] Inline `#[test]`: `all [true 1 2]` → 2; `all [true false]` → none
+- [x] Inline `#[test]`: `any [false 5 6]` → 5
+- [x] Inline `#[test]`: `try [1 + "a"]` returns error value, doesn't propagate
+- [x] Inline `#[test]`: `catch [throw 42]` → 42
+- [x] Add golden fixtures
+- [x] `cargo test --workspace` passes
 
 ## Milestone 17 — Math + bitwise
 

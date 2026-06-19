@@ -62,8 +62,14 @@ fn run_file(path: &str) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    match red_eval::run_source(&src) {
-        Ok(_) => ExitCode::SUCCESS,
+    match red_eval::run_source_with_exit(&src) {
+        Ok((_, code)) => {
+            if code == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(code as u8)
+            }
+        }
         Err(e) => {
             // Render with `file:line:col:` location using the source we
             // already hold + the error's byte-offset span.

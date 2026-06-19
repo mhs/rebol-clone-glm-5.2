@@ -64,6 +64,13 @@ pub fn mold(value: &Value, out: &mut String) {
             out.push(')');
         }
         Value::Func(_) => out.push_str("#[function]"),
+        Value::Error(err) => {
+            // Mold as `make error! "..."` — reparseable shape (the `make`
+            // native constructs an error value from a string). The message
+            // is quoted/escaped via the standard string mold.
+            out.push_str("make error! ");
+            mold_string(&err.message, out);
+        }
         Value::Path { parts, .. } => {
             for (i, p) in parts.iter().enumerate() {
                 if i > 0 {
@@ -130,6 +137,7 @@ pub fn form(value: &Value, out: &mut String) {
             }
         }
         Value::Func(_) => out.push_str("#[function]"),
+        Value::Error(err) => out.push_str(&err.message),
         Value::Path { parts, .. } => {
             for (i, p) in parts.iter().enumerate() {
                 if i > 0 {

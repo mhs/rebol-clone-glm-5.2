@@ -134,6 +134,13 @@ pub enum EvalError {
     /// `continue` unwind — caught by the enclosing loop native; advances to
     /// the next iteration.
     Continue,
+    /// `throw value` unwind — caught by an enclosing `catch` native. Carries
+    /// the thrown value. Like `Return`/`Break`/`Continue`, this is a control-
+    /// flow unwind, not a user error, and carries no span.
+    Throw(Value),
+    /// `exit`/`quit` unwind — caught at the top-level script entry point.
+    /// Carries the requested process exit code. Not a user error.
+    Quit(i32),
     /// Generic native-reported error with a message.
     Native { message: String, span: Span },
 }
@@ -167,6 +174,10 @@ impl fmt::Display for EvalError {
             EvalError::Return(_) => write!(f, "return used outside a function"),
             EvalError::Break(_) => write!(f, "break used outside a loop"),
             EvalError::Continue => write!(f, "continue used outside a loop"),
+            EvalError::Throw(_) => {
+                write!(f, "throw used outside a catch")
+            }
+            EvalError::Quit(code) => write!(f, "quit with exit code {code}"),
             EvalError::Native { message, .. } => write!(f, "{message}"),
         }
     }
@@ -183,7 +194,11 @@ impl EvalError {
             | EvalError::TypeError { span, .. }
             | EvalError::Arity { span, .. }
             | EvalError::Native { span, .. } => Some(*span),
-            EvalError::Return(_) | EvalError::Break(_) | EvalError::Continue => None,
+            EvalError::Return(_)
+            | EvalError::Break(_)
+            | EvalError::Continue
+            | EvalError::Throw(_)
+            | EvalError::Quit(_) => None,
         }
     }
 }

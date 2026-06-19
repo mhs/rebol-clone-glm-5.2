@@ -122,6 +122,7 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Func(_) => "function!",
         Value::Path { .. } => "path!",
         Value::Refinement { .. } => "refinement!",
+        Value::Error(_) => "error!",
     }
 }
 
@@ -246,6 +247,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::String { s: x, .. }, Value::String { s: y, .. }) => x == y,
         (Value::None, Value::None) => true,
         (Value::Logic(x), Value::Logic(y)) => x == y,
+        (Value::Error(a), Value::Error(b)) => a.message == b.message,
         _ => false,
     }
 }
@@ -494,6 +496,329 @@ fn continue_native(
 }
 
 // ---------------------------------------------------------------------------
+// Control flow expansion (M16): switch, case, default, all, any, try,
+// attempt, catch, throw, cause-error, comment, exit, quit
+// ---------------------------------------------------------------------------
+
+/// `switch value cases-block` — walks `cases-block` in pairs: each candidate
+/// is evaluated (as a full expression) and compared to `value`; on match, the
+/// following value (typically a block) is evaluated and its result returned.
+/// Refinements:
+/// - `/default block` — runs if no candidate matched.
+/// - `/case` — case-sensitive string comparison (POC: string equality is
+///   already case-sensitive by default; the flag is accepted for parity).
+fn switch_native(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity_err(args, "switch", 2, args.len()));
+    }
+    let value = args[0].clone();
+    let cases = expect_block(args, 1, "switch")?;
+    let series = match &cases {
+        Value::Block { series, .. } => series.clone(),
+        _ => unreachable!("expect_block guarantees Block"),
+    };
+    let data = series.data.borrow();
+    let mut i = series.index;
+    while i < data.len() {
+        // Candidate is a full expression (so `1 + 1` works as a case).
+        let candidate = eval_expression(&data, &mut i, env)?;
+        if i >= data.len() {
+            break;
+        }
+        let body = data[i].clone();
+        i += 1;
+        if values_equal(&candidate, &value) {
+            return match &body {
+                Value::Block { .. } | Value::Paren { .. } => {
+                    drop(data);
+                    eval(&body, env)
+                }
+                _ => Ok(body),
+            };
+        }
+    }
+    drop(data);
+    if let Some(default_args) = refs.get(&Symbol::new("default")) {
+        if let Some(body) = default_args.first() {
+            if let Value::Block { .. } | Value::Paren { .. } = body {
+                return eval(body, env);
+            }
+            return Ok(body.clone());
+        }
+    }
+    Ok(Value::None)
+}
+
+/// `case cases-block` — walks `cases-block` in pairs: each condition is
+/// evaluated (as a full expression); if truthy, the following value
+/// (typically a block) is evaluated and its result returned. Refinements:
+/// - `/all` — evaluate *every* matching branch (default: stop at first).
+/// - `/default block` — runs if no condition matched.
+fn case_native(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "case", 1, args.len()));
+    }
+    let cases = expect_block(args, 0, "case")?;
+    let all = refs.has(&Symbol::new("all"));
+    let series = match &cases {
+        Value::Block { series, .. } => series.clone(),
+        _ => unreachable!(),
+    };
+    let data = series.data.borrow();
+    let mut i = series.index;
+    let mut last = Value::None;
+    let mut matched = false;
+    while i < data.len() {
+        let cond_val = eval_expression(&data, &mut i, env)?;
+        if i >= data.len() {
+            break;
+        }
+        let body = data[i].clone();
+        i += 1;
+        if truthy(&cond_val) {
+            matched = true;
+            last = match &body {
+                Value::Block { .. } | Value::Paren { .. } => eval(&body, env)?,
+                _ => body.clone(),
+            };
+            if !all {
+                return Ok(last);
+            }
+        }
+    }
+    drop(data);
+    if matched {
+        Ok(last)
+    } else if let Some(default_args) = refs.get(&Symbol::new("default")) {
+        if let Some(body) = default_args.first() {
+            if let Value::Block { .. } | Value::Paren { .. } = body {
+                return eval(body, env);
+            }
+            return Ok(body.clone());
+        }
+        Ok(Value::None)
+    } else {
+        Ok(Value::None)
+    }
+}
+
+/// `default 'word value` — set `word` to `value` if it currently holds `none`
+/// (or has no slot — treated as unset). Returns the (possibly new) value.
+/// First argument is taken unevaluated (a word/lit-word name).
+///
+/// Note: like `set`, the word must have a slot pre-allocated by `bind_pass`
+/// (i.e. a `word:` declaration appears somewhere in the script). If the word
+/// has no slot, this errors as `UnboundWord` — runtime slot allocation
+/// wouldn't make existing body references resolve, since binding is frozen at
+/// load time.
+fn default_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity_err(args, "default", 2, args.len()));
+    }
+    let sym = match &args[0] {
+        Value::LitWord { sym, .. } => sym.clone(),
+        Value::Word { sym, .. } => sym.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "word!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            })
+        }
+    };
+    let new_val = args[1].clone();
+    let idx = env
+        .user_ctx
+        .index_of(&sym)
+        .ok_or_else(|| EvalError::UnboundWord {
+            sym: sym.clone(),
+            span: args[0].span_or_default(),
+        })?;
+    let current = env.user_ctx.slot_value(idx);
+    if matches!(current, Value::None) {
+        env.user_ctx.set_slot(idx, new_val.clone());
+        Ok(new_val)
+    } else {
+        Ok(current)
+    }
+}
+
+/// `all [block]` — evaluates each expression in `block`; short-circuits to
+/// `none` on the first falsy value, otherwise returns the last value.
+fn all_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    let body = expect_block(args, 0, "all")?;
+    let series = match &body {
+        Value::Block { series, .. } | Value::Paren { series, .. } => series.clone(),
+        _ => return Ok(Value::None),
+    };
+    let data = series.data.borrow();
+    let mut i = series.index;
+    let mut last = Value::Logic(true);
+    while i < data.len() {
+        let v = eval_expression(&data, &mut i, env)?;
+        if !truthy(&v) {
+            return Ok(Value::None);
+        }
+        last = v;
+    }
+    drop(data);
+    Ok(last)
+}
+
+/// `any [block]` — evaluates each expression in `block`; returns the first
+/// truthy value, or `none` if all are falsy.
+fn any_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    let body = expect_block(args, 0, "any")?;
+    let series = match &body {
+        Value::Block { series, .. } | Value::Paren { series, .. } => series.clone(),
+        _ => return Ok(Value::None),
+    };
+    let data = series.data.borrow();
+    let mut i = series.index;
+    while i < data.len() {
+        let v = eval_expression(&data, &mut i, env)?;
+        if truthy(&v) {
+            return Ok(v);
+        }
+    }
+    drop(data);
+    Ok(Value::None)
+}
+
+/// `try [block]` — evaluate `block`; on success return the value; on a
+/// catchable error, return a `Value::Error` carrying the message. Control-
+/// flow unwinds (`Return`/`Break`/`Continue`/`Throw`/`Quit`) propagate.
+fn try_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    let body = expect_block(args, 0, "try")?;
+    match eval(&body, env) {
+        Ok(v) => Ok(v),
+        Err(
+            e @ (EvalError::Return(_)
+            | EvalError::Break(_)
+            | EvalError::Continue
+            | EvalError::Throw(_)
+            | EvalError::Quit(_)),
+        ) => Err(e),
+        Err(e) => Ok(Value::error(e.to_string())),
+    }
+}
+
+/// `attempt [block]` — like `try` but returns `none` on error instead of an
+/// error value.
+fn attempt_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    let body = expect_block(args, 0, "attempt")?;
+    match eval(&body, env) {
+        Ok(v) => Ok(v),
+        Err(
+            e @ (EvalError::Return(_)
+            | EvalError::Break(_)
+            | EvalError::Continue
+            | EvalError::Throw(_)
+            | EvalError::Quit(_)),
+        ) => Err(e),
+        Err(_) => Ok(Value::None),
+    }
+}
+
+/// `catch [block]` — evaluate `block`; on `throw value`, return the thrown
+/// value. Other errors propagate.
+fn catch_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    let body = expect_block(args, 0, "catch")?;
+    match eval(&body, env) {
+        Ok(v) => Ok(v),
+        Err(EvalError::Throw(v)) => Ok(v),
+        Err(e) => Err(e),
+    }
+}
+
+/// `throw value` — unwinds via `EvalError::Throw(value)`, caught by `catch`.
+fn throw_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let v = args.first().cloned().unwrap_or(Value::None);
+    Err(EvalError::Throw(v))
+}
+
+/// `cause-error err-type err-code args-block` (POC: variadic; builds a
+/// message and raises `EvalError::Native`). Real Red constructs a structured
+/// error value; the full error-value model is deferred to v0.3.
+fn cause_error(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let mut parts: Vec<String> = Vec::new();
+    for a in args {
+        parts.push(mold_to_string(a));
+    }
+    let message = if parts.is_empty() {
+        "cause-error".to_string()
+    } else {
+        parts.join(" ")
+    };
+    Err(EvalError::Native {
+        message,
+        span: args
+            .first()
+            .map(|v| v.span_or_default())
+            .unwrap_or_default(),
+    })
+}
+
+/// `comment <block-or-string>` — discards its single argument, returns
+/// `none`. Takes one arg (a block or string) so trailing expressions in the
+/// enclosing block are not consumed.
+fn comment_native(_args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    Ok(Value::None)
+}
+
+/// `exit [code]` / `quit [code]` — unwind via `EvalError::Quit(code)`,
+/// caught at the top-level script entry point. Default exit code is 0.
+fn exit_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let code = match args.first() {
+        Some(Value::Integer { n, .. }) => *n as i32,
+        Some(Value::None) | None => 0,
+        Some(other) => {
+            return Err(EvalError::TypeError {
+                expected: "integer!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            })
+        }
+    };
+    Err(EvalError::Quit(code))
+}
+
+// ---------------------------------------------------------------------------
+// Functions: `function` (auto-locals) — M16
+// ---------------------------------------------------------------------------
+
+/// `function [spec] [body]` — like `func` but the spec block recognizes a
+/// `<local>` marker: any words following it (until the next refinement or
+/// end) are declared as explicit function-local words. They get slots even
+/// if never assigned by a body `SetWord`, so the body can reference them
+/// before assignment without an unbound-word error. Body SetWords also still
+/// auto-local (same as `func`).
+fn function_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity_err(args, "function", 2, args.len()));
+    }
+    let spec_block = expect_block(args, 0, "function")?;
+    let body_block = expect_block(args, 1, "function")?;
+    let spec = extract_spec(&spec_block)?;
+    let body_series = match &body_block {
+        Value::Block { series, .. } => series.clone(),
+        _ => unreachable!("expect_block guarantees Block"),
+    };
+    let mut fd = FuncDef {
+        params: spec.params,
+        refinements: spec.refinements,
+        locals: spec.locals,
+        body: body_series,
+        native: None,
+        variadic: false,
+        infix: false,
+        ..Default::default()
+    };
+    crate::binding::bind_function_body(&mut fd, &env.user_ctx);
+    Ok(Value::Func(Rc::new(fd)))
+}
+
+// ---------------------------------------------------------------------------
 // Eval: do, reduce
 // ---------------------------------------------------------------------------
 
@@ -583,26 +908,34 @@ fn does_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
 // `make <type> <spec>` and `to <type> <value>` live in `crate::convert`
 // (M14). `function?` and `return` remain here.
 
-/// Result of parsing a `func`/`does` spec block: positional parameter
-/// names plus declared refinements (each a name + its argument-word names).
+/// Result of parsing a `func`/`does`/`function` spec block: positional
+/// parameter names, declared refinements (each a name + its argument-word
+/// names), and explicit `<local>` words (recognized by `function` — `func`
+/// ignores them).
 struct FuncSpec {
     params: Vec<Symbol>,
     refinements: Vec<(Symbol, Vec<Symbol>)>,
+    locals: Vec<Symbol>,
 }
 
 /// Extract parameter symbols and refinements from a func spec block.
 ///
 /// Spec grammar (POC subset):
 ///   spec := item*
-///   item := word | lit-word | refinement
+///   item := word | lit-word | refinement | <local>
 ///   refinement := `/name` word*    — `/name` introduces a refinement; the
 ///                                     following words (until the next
-///                                     refinement or end) are its argument
-///                                     words.
+///                                     refinement, `<local>`, or end) are
+///                                     its argument words.
+///   <local> := `<local>` word*     — the `<local>` marker (a Word whose
+///                                     symbol is `<local>`) introduces
+///                                     function-local words; following words
+///                                     (until the next refinement, another
+///                                     `<local>`, or end) are collected as
+///                                     locals.
 ///
-/// Words become positional params (in order). A refinement and its args are
-/// recorded in `refinements` in declaration order. Type annotations and
-/// locals markers (e.g. `<local>`) are skipped.
+/// Words become positional params (in order) unless inside a refinement or
+/// `<local>` section. Type annotations are skipped.
 fn extract_spec(spec_block: &Value) -> Result<FuncSpec, EvalError> {
     let series = match spec_block {
         Value::Block { series, .. } => series.clone(),
@@ -617,26 +950,42 @@ fn extract_spec(spec_block: &Value) -> Result<FuncSpec, EvalError> {
     let data = series.data.borrow();
     let mut params = Vec::new();
     let mut refinements: Vec<(Symbol, Vec<Symbol>)> = Vec::new();
+    let mut locals: Vec<Symbol> = Vec::new();
+    // Section state: which collector following words go into.
+    #[derive(Clone, Copy)]
+    enum Section {
+        Params,
+        Refinement,
+        Local,
+    }
+    let mut section = Section::Params;
     for v in data.iter() {
         match v {
-            Value::Word { sym, .. } | Value::LitWord { sym, .. } => {
-                if let Some(last) = refinements.last_mut() {
-                    last.1.push(sym.clone());
-                } else {
-                    params.push(sym.clone());
-                }
+            Value::Word { sym, .. } if sym.as_str() == "<local>" => {
+                section = Section::Local;
             }
             Value::Refinement { sym, .. } => {
                 refinements.push((sym.clone(), Vec::new()));
+                section = Section::Refinement;
             }
+            Value::Word { sym, .. } | Value::LitWord { sym, .. } => match section {
+                Section::Params => params.push(sym.clone()),
+                Section::Refinement => {
+                    if let Some(last) = refinements.last_mut() {
+                        last.1.push(sym.clone());
+                    }
+                }
+                Section::Local => locals.push(sym.clone()),
+            },
             _ => {
-                // Skip type annotations / locals markers.
+                // Skip type annotations / other markers.
             }
         }
     }
     Ok(FuncSpec {
         params,
         refinements,
+        locals,
     })
 }
 
@@ -886,6 +1235,37 @@ fn variadic_native(f: NativeFn) -> Rc<FuncDef> {
     })
 }
 
+/// Register a native that declares refinements. `refines` is a list of
+/// `(refinement_name, refinement_arity)`; each refinement's argument words
+/// are synthetic placeholders (the count drives dispatch). Mirrors the
+/// `reg_refined` closures in `series.rs`/`strings.rs`; lifted here so M16's
+/// `switch`/`case` can use the same pattern without re-defining it.
+fn reg_refined(env: &mut Env, name: &str, f: NativeFn, arity: usize, refines: &[(&str, usize)]) {
+    let params: Vec<Symbol> = (0..arity)
+        .map(|i| Symbol::new(&format!("__arg{i}")))
+        .collect();
+    let refinements: Vec<(Symbol, Vec<Symbol>)> = refines
+        .iter()
+        .map(|(rname, rarity)| {
+            let rargs: Vec<Symbol> = (0..*rarity)
+                .map(|i| Symbol::new(&format!("__{rname}_arg{i}")))
+                .collect();
+            (Symbol::new(rname), rargs)
+        })
+        .collect();
+    env.natives.insert(
+        Symbol::new(name),
+        Rc::new(FuncDef {
+            params,
+            refinements,
+            native: Some(f),
+            variadic: false,
+            infix: false,
+            ..Default::default()
+        }),
+    );
+}
+
 /// Register all native words (M6 I/O + M7 arithmetic/comparison/logic/
 /// control-flow/loops/eval) into `env.natives`.
 pub fn register_natives(env: &mut Env) {
@@ -961,6 +1341,60 @@ pub fn register_natives(env: &mut Env) {
         fixed_native(continue_native as NativeFn, 0),
     );
 
+    // Control flow expansion (M16)
+    reg_refined(
+        env,
+        "switch",
+        switch_native as NativeFn,
+        2,
+        &[("default", 1), ("case", 0)],
+    );
+    reg_refined(
+        env,
+        "case",
+        case_native as NativeFn,
+        1,
+        &[("default", 1), ("all", 0)],
+    );
+    env.natives.insert(
+        Symbol::new("default"),
+        fixed_native(default_native as NativeFn, 2),
+    );
+    env.natives
+        .insert(Symbol::new("all"), fixed_native(all_native as NativeFn, 1));
+    env.natives
+        .insert(Symbol::new("any"), fixed_native(any_native as NativeFn, 1));
+    env.natives
+        .insert(Symbol::new("try"), fixed_native(try_native as NativeFn, 1));
+    env.natives.insert(
+        Symbol::new("attempt"),
+        fixed_native(attempt_native as NativeFn, 1),
+    );
+    env.natives.insert(
+        Symbol::new("catch"),
+        fixed_native(catch_native as NativeFn, 1),
+    );
+    env.natives.insert(
+        Symbol::new("throw"),
+        fixed_native(throw_native as NativeFn, 1),
+    );
+    env.natives.insert(
+        Symbol::new("cause-error"),
+        variadic_native(cause_error as NativeFn),
+    );
+    env.natives.insert(
+        Symbol::new("comment"),
+        fixed_native(comment_native as NativeFn, 1),
+    );
+    env.natives.insert(
+        Symbol::new("exit"),
+        variadic_native(exit_native as NativeFn),
+    );
+    env.natives.insert(
+        Symbol::new("quit"),
+        variadic_native(exit_native as NativeFn),
+    );
+
     // Eval (M7)
     env.natives
         .insert(Symbol::new("do"), fixed_native(do_native as NativeFn, 1));
@@ -975,6 +1409,10 @@ pub fn register_natives(env: &mut Env) {
     env.natives.insert(
         Symbol::new("does"),
         fixed_native(does_native as NativeFn, 1),
+    );
+    env.natives.insert(
+        Symbol::new("function"),
+        fixed_native(function_native as NativeFn, 2),
     );
     env.natives.insert(
         Symbol::new("function?"),
@@ -1065,7 +1503,14 @@ mod tests {
         let mut env = Env::new_with_output(ctx_rc, Box::new(BufferWriter(Rc::clone(&buf))));
         register_natives(&mut env);
         let block = Value::block(body);
-        let val = eval(&block, &mut env).map_err(|e| e.to_string())?;
+        // Catch `Quit` (from `exit`/`quit`) as a normal termination so tests
+        // can assert on the output captured before the exit. Other errors
+        // propagate as strings.
+        let val = match eval(&block, &mut env) {
+            Ok(v) => v,
+            Err(EvalError::Quit(_)) => Value::None,
+            Err(e) => return Err(e.to_string()),
+        };
         let out = buf.borrow().clone();
         Ok((val, out))
     }
@@ -1407,5 +1852,252 @@ mod tests {
         "#;
         let out = run_capture(src).unwrap();
         assert_eq!(s(&out), "5\n10\n8\n13\n");
+    }
+
+    // --- M16 control flow expansion ---
+
+    #[test]
+    fn switch_matches_value() {
+        assert_eq!(
+            mold_to_string(&val("switch 2 [1 [\"a\"] 2 [\"b\"]]")),
+            "\"b\""
+        );
+    }
+
+    #[test]
+    fn switch_no_match_returns_none() {
+        assert_eq!(
+            mold_to_string(&val("switch 3 [1 [\"a\"] 2 [\"b\"]]")),
+            "none"
+        );
+    }
+
+    #[test]
+    fn switch_default_runs_when_no_match() {
+        assert_eq!(
+            mold_to_string(&val("switch/default 3 [1 [\"a\"]] [\"d\"]")),
+            "\"d\""
+        );
+    }
+
+    #[test]
+    fn switch_case_refinement_accepted() {
+        // `/case` is accepted (POC: string equality is already case-sensitive,
+        // so the flag is a no-op — but it must parse without error).
+        assert_eq!(
+            mold_to_string(&val(
+                "switch/case \"A\" [\"a\" [\"lower\"] \"A\" [\"upper\"]]"
+            )),
+            "\"upper\""
+        );
+    }
+
+    #[test]
+    fn case_returns_first_matching_branch() {
+        assert_eq!(
+            mold_to_string(&val("case [1 > 2 [\"a\"] 2 > 1 [\"b\"]]")),
+            "\"b\""
+        );
+    }
+
+    #[test]
+    fn case_no_match_returns_none() {
+        assert_eq!(
+            mold_to_string(&val("case [1 > 2 [\"a\"] 2 > 3 [\"b\"]]")),
+            "none"
+        );
+    }
+
+    #[test]
+    fn case_default_runs_when_no_match() {
+        assert_eq!(
+            mold_to_string(&val("case/default [1 > 2 [\"a\"]] [\"d\"]")),
+            "\"d\""
+        );
+    }
+
+    #[test]
+    fn case_all_evaluates_every_match() {
+        // `/all` runs every matching branch; returns the last.
+        let out = run_capture("case/all [true [print 1] true [print 2]]").unwrap();
+        assert_eq!(s(&out), "1\n2\n");
+    }
+
+    #[test]
+    fn all_short_circuits_on_false() {
+        assert_eq!(mold_to_string(&val("all [true 1 2]")), "2");
+        assert_eq!(mold_to_string(&val("all [true false]")), "none");
+        // Short-circuit: the failing expression after `false` would error if
+        // evaluated.
+        assert_eq!(mold_to_string(&val("all [false 1 + \"a\"]")), "none");
+    }
+
+    #[test]
+    fn any_returns_first_truthy() {
+        assert_eq!(mold_to_string(&val("any [false 5 6]")), "5");
+        assert_eq!(mold_to_string(&val("any [false false]")), "none");
+        // Short-circuit: the expression after the truthy value isn't eval'd.
+        assert_eq!(mold_to_string(&val("any [5 1 + \"a\"]")), "5");
+    }
+
+    #[test]
+    fn default_sets_when_none() {
+        // `x: none default 'x 10 x` → x becomes 10.
+        assert_eq!(mold_to_string(&val("x: none default 'x 10 x")), "10");
+    }
+
+    #[test]
+    fn default_keeps_existing_value() {
+        // `x: 5 default 'x 10 x` → x stays 5.
+        assert_eq!(mold_to_string(&val("x: 5 default 'x 10 x")), "5");
+    }
+
+    #[test]
+    fn try_returns_error_value_on_failure() {
+        // `try [1 + "a"]` catches the type error → an error value (molds as
+        // `make error! "..."`).
+        let v = val("try [1 + \"a\"]");
+        match v {
+            Value::Error(ev) => {
+                assert!(
+                    ev.message.contains("expected") || ev.message.contains("integer"),
+                    "unexpected error message: {}",
+                    ev.message
+                );
+            }
+            other => panic!("expected Value::Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn try_returns_value_on_success() {
+        assert_eq!(mold_to_string(&val("try [1 + 2]")), "3");
+    }
+
+    #[test]
+    fn attempt_returns_none_on_error() {
+        assert_eq!(mold_to_string(&val("attempt [1 + \"a\"]")), "none");
+    }
+
+    #[test]
+    fn attempt_returns_value_on_success() {
+        assert_eq!(mold_to_string(&val("attempt [1 + 2]")), "3");
+    }
+
+    #[test]
+    fn try_does_not_catch_throw() {
+        // `throw` is control-flow; `try` must let it propagate to `catch`.
+        let err = run_capture("try [throw 42]").unwrap_err();
+        assert!(err.contains("throw"));
+    }
+
+    #[test]
+    fn catch_catches_throw_value() {
+        assert_eq!(mold_to_string(&val("catch [throw 42]")), "42");
+    }
+
+    #[test]
+    fn catch_returns_block_value_when_no_throw() {
+        assert_eq!(mold_to_string(&val("catch [1 + 2]")), "3");
+    }
+
+    #[test]
+    fn catch_lets_errors_propagate() {
+        let err = run_capture("catch [1 + \"a\"]").unwrap_err();
+        assert!(err.contains("expected") || err.contains("integer"));
+    }
+
+    #[test]
+    fn cause_error_raises_native_error() {
+        let err = run_capture("cause-error \"bad-thing\"").unwrap_err();
+        assert!(err.contains("bad-thing"));
+    }
+
+    #[test]
+    fn comment_returns_none_and_discards_arg() {
+        assert_eq!(mold_to_string(&val("comment [this is ignored] 42")), "42");
+        assert_eq!(mold_to_string(&val("comment \"ignored\" 7")), "7");
+    }
+
+    #[test]
+    fn function_auto_locals_with_local_marker() {
+        // `function [x <local> y][y: x + 1 y]` — `y` is declared as a local
+        // via `<local>`; the body assigns it. Returns the local's value.
+        assert_eq!(
+            mold_to_string(&val("f: function [x <local> y][y: x + 1 y] f 5")),
+            "6"
+        );
+    }
+
+    #[test]
+    fn function_local_referenced_before_assignment() {
+        // Without `<local>`, referencing `y` before assignment would be an
+        // unbound-word error. With `<local>`, `y` starts as `none`.
+        assert_eq!(
+            mold_to_string(&val("f: function [x <local> y][y] f 5")),
+            "none"
+        );
+    }
+
+    #[test]
+    fn function_with_params_and_locals() {
+        // Combined params + locals + a refinement.
+        let src = r#"
+            f: function [a b <local> sum][
+                sum: a + b
+                sum
+            ]
+            print f 3 4
+        "#;
+        let out = run_capture(src).unwrap();
+        assert_eq!(s(&out), "7\n");
+    }
+
+    #[test]
+    fn function_body_setword_does_not_leak_to_global() {
+        // `function [x][local: 5 ...]` — `local` is a function-local word,
+        // NOT a global. After the call, `value? 'local` must be false.
+        let src = r#"
+            f: function [x][local: 5 x + local]
+            print f 10
+            print value? 'local
+        "#;
+        let out = run_capture(src).unwrap();
+        assert_eq!(s(&out), "15\nfalse\n");
+    }
+
+    #[test]
+    fn func_body_setword_does_not_leak_to_global() {
+        // Same isolation applies to `func` (bind_pass skips func bodies).
+        let src = r#"
+            f: func [x][local: 5 x + local]
+            print f 10
+            print value? 'local
+        "#;
+        let out = run_capture(src).unwrap();
+        assert_eq!(s(&out), "15\nfalse\n");
+    }
+
+    #[test]
+    fn exit_halts_script_with_value_preserved() {
+        // `exit` stops eval; `print` after exit doesn't run. The captured
+        // stdout only has the pre-exit output.
+        let out = run_capture("print 1 exit print 2").unwrap();
+        assert_eq!(s(&out), "1\n");
+    }
+
+    #[test]
+    fn quit_alias_works() {
+        let out = run_capture("print 1 quit print 2").unwrap();
+        assert_eq!(s(&out), "1\n");
+    }
+
+    #[test]
+    fn exit_with_code_propagates() {
+        // The exit-code-aware runner returns the requested code.
+        let (val, code) =
+            crate::interp::run_source_with_exit("print 1 exit 3").expect("run failed");
+        assert_eq!(code, 3);
+        assert_eq!(mold_to_string(&val), "none");
     }
 }

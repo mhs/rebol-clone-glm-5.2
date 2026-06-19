@@ -143,7 +143,8 @@ fn eval_prefix(
         | Value::LitWord { .. }
         | Value::Block { .. }
         | Value::Func(_)
-        | Value::Refinement { .. } => Ok(cur),
+        | Value::Refinement { .. }
+        | Value::Error(_) => Ok(cur),
 
         // Path: a function-headed path is a refined call (`copy/part`,
         // `find/case`); anything else is a data-path select (`block/2`,
@@ -330,7 +331,7 @@ fn collect_call_args(
     let mut args: Vec<Value> = Vec::with_capacity(arity);
     let uneval_first = matches!(
         sym.as_str(),
-        "repeat" | "foreach" | "forall" | "make" | "to"
+        "repeat" | "foreach" | "forall" | "make" | "to" | "default"
     );
 
     // Positional params.
@@ -552,6 +553,28 @@ pub fn run_source_with_output(src: &str, out: Box<dyn std::io::Write>) -> Result
     run_series_with_output(body, out)
 }
 
+/// End-to-end run that also returns the requested exit code (from `exit`/
+/// `quit`). Mirrors `run_source` but yields `(last_value, exit_code)`. Used
+/// by the CLI to propagate the script's exit status to the process.
+pub fn run_source_with_exit(src: &str) -> Result<(Value, i32), Error> {
+    run_source_with_exit_output(src, Box::new(std::io::stdout()))
+}
+
+/// Like `run_source_with_exit` but with a custom output sink.
+pub fn run_source_with_exit_output(
+    src: &str,
+    out: Box<dyn std::io::Write>,
+) -> Result<(Value, i32), Error> {
+    let tokens = lexer::lex(src)?;
+    let body = if tokens.is_empty() {
+        Series::empty()
+    } else {
+        let (_header, body) = parse_program(&tokens)?;
+        body
+    };
+    run_series_with_exit_output(body, out)
+}
+
 /// Evaluate an already-parsed body series with a fresh environment.
 /// Constants (`none`/`true`/`false`/`newline`) are installed into the user
 /// context before the binding pass, and natives (`print`/`prin`/`probe`) are
@@ -562,6 +585,21 @@ pub fn run_series(body: Series) -> Result<Value, Error> {
 
 /// Like `run_series` but with a custom output sink.
 pub fn run_series_with_output(body: Series, out: Box<dyn std::io::Write>) -> Result<Value, Error> {
+    Ok(run_series_inner(body, out)?.0)
+}
+
+/// Like `run_series` but returns the exit code from `exit`/`quit`. The CLI
+/// uses this to set the process exit status.
+pub fn run_series_with_exit_output(
+    body: Series,
+    out: Box<dyn std::io::Write>,
+) -> Result<(Value, i32), Error> {
+    run_series_inner(body, out)
+}
+
+/// Shared core: runs the body, catching `EvalError::Quit(code)` as a normal
+/// termination with the given exit code. Other errors propagate as `Error`.
+fn run_series_inner(body: Series, out: Box<dyn std::io::Write>) -> Result<(Value, i32), Error> {
     let ctx = Context::new();
     crate::natives::install_constants(&ctx);
     let ctx_rc = bind_pass(&body, ctx);
@@ -571,7 +609,11 @@ pub fn run_series_with_output(body: Series, out: Box<dyn std::io::Write>) -> Res
         series: body,
         span: Span::new(0, 0),
     };
-    Ok(eval(&block, &mut env)?)
+    match eval(&block, &mut env) {
+        Ok(v) => Ok((v, 0)),
+        Err(EvalError::Quit(code)) => Ok((Value::None, code)),
+        Err(e) => Err(Error::Eval(e)),
+    }
 }
 
 #[cfg(test)]

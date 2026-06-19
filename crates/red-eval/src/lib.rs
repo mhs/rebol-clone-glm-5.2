@@ -16,7 +16,10 @@ pub mod strings;
 
 pub use binding::{bind_pass, bind_pass_into};
 pub use context::{Binding, CallFrame, Context, Env, EvalError, FuncDef, NativeFn, RefineArgs};
-pub use interp::{eval, run_series, run_series_with_output, run_source, run_source_with_output};
+pub use interp::{
+    eval, run_series, run_series_with_exit_output, run_series_with_output, run_source,
+    run_source_with_exit, run_source_with_exit_output, run_source_with_output,
+};
 pub use natives::{install_constants, register_natives};
 pub use series::register_series_natives;
 pub use strings::register_string_natives;

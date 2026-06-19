@@ -4,6 +4,8 @@
 //! Excluded variants (documented POC gaps):
 //! - `Func` — molds as `#[function]`, not reparseable.
 //! - `String8` — molds as `#{hex}`, not reparseable.
+//! - `Error` — molds as `make error! "..."`, not reparseable (the `make`
+//!   native runs at eval time, not parse time).
 //! - `NaN`/`inf` floats — no lexer literal for them.
 //! - Series with `index != 0` — mold renders from the cursor, so a positioned
 //!   series doesn't round-trip to its head form.

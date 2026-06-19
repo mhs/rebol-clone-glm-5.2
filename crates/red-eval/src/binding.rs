@@ -84,6 +84,52 @@ fn use_body_index(data: &[Value], i: usize) -> Option<usize> {
     }
 }
 
+/// If `data[i]` begins a `func`/`function`/`does` form, return the number of
+/// values the form consumes (so callers can skip the body block and avoid
+/// collecting its SetWords into the outer context). The body's locals are
+/// scoped to the function-local context built at runtime by `func_native`/
+/// `function_native`/`does_native` via `bind_function_body`.
+///
+/// Forms:
+/// - `func [spec] [body]` / `function [spec] [body]` → consumes 3 values.
+/// - `does [body]` → consumes 2 values.
+///
+/// `make function! [...]` is handled at eval time (not a bare word form) and
+/// is not skipped here — its body SetWords are collected, but since the
+/// body is deep-cloned and bound at `make` time this is harmless.
+fn func_form_skip(data: &[Value], i: usize) -> Option<usize> {
+    let Value::Word {
+        sym,
+        binding: Binding::Unbound,
+        ..
+    } = &data[i]
+    else {
+        return None;
+    };
+    match sym.as_str() {
+        "func" | "function" => {
+            // `func [spec] [body]` — need at least 3 values (word + spec + body).
+            if i + 2 < data.len()
+                && matches!(&data[i + 1], Value::Block { .. })
+                && matches!(&data[i + 2], Value::Block { .. })
+            {
+                Some(3)
+            } else {
+                None
+            }
+        }
+        "does" => {
+            // `does [body]` — need at least 2 values.
+            if i + 1 < data.len() && matches!(&data[i + 1], Value::Block { .. }) {
+                Some(2)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Phase 1: allocate a slot in `ctx` for every `SetWord` encountered anywhere
 /// in the tree — *except* inside `use` bodies, whose locals are scoped to the
 /// child context built at runtime by `use_native`. The slots are populated
@@ -97,6 +143,14 @@ pub(crate) fn collect_setwords(series: &Series, ctx: &Context) {
         // block) so use-locals don't get allocated into the user context.
         if use_body_index(&data, i).is_some() {
             i += 3;
+            continue;
+        }
+        // `func [spec] [body]` / `function [spec] [body]` / `does [body]` —
+        // skip the whole form so the body's SetWords don't leak into the
+        // user context (they're function-local, allocated by
+        // `bind_function_body` at creation time).
+        if let Some(skip) = func_form_skip(&data, i) {
+            i += skip;
             continue;
         }
         match &data[i] {
@@ -132,6 +186,10 @@ pub(crate) fn collect_loop_vars(series: &Series, ctx: &Context) {
     while i < n {
         if use_body_index(&data, i).is_some() {
             i += 3;
+            continue;
+        }
+        if let Some(skip) = func_form_skip(&data, i) {
+            i += skip;
             continue;
         }
         match &data[i] {
@@ -179,6 +237,10 @@ pub(crate) fn collect_parse_words(series: &Series, ctx: &Context) {
     while i < n {
         if use_body_index(&data, i).is_some() {
             i += 3;
+            continue;
+        }
+        if let Some(skip) = func_form_skip(&data, i) {
+            i += skip;
             continue;
         }
         // Detect `parse <input> <rules-block>`: the unbound `parse` word is
@@ -315,10 +377,16 @@ pub fn bind_function_body(fd: &mut FuncDef, user_ctx: &Rc<Context>) {
             fd.ctx.slot_index(arg.clone());
         }
     }
-    // 3. Body-local SetWords + loop vars become function-local slots.
+    // 3. Explicit `<local>` words (M16 `function`): slots after params +
+    //    refinements so `call_user_func` (which fills params then refinement
+    //    slots in order) leaves them as `none` defaults.
+    for local in &fd.locals {
+        fd.ctx.slot_index(local.clone());
+    }
+    // 4. Body-local SetWords + loop vars become function-local slots.
     collect_setwords(&fd.body, &fd.ctx);
     collect_loop_vars(&fd.body, &fd.ctx);
-    // 4. Attach bindings: function-local first, then outer user-ctx refs.
+    // 5. Attach bindings: function-local first, then outer user-ctx refs.
     attach_func_bindings(&fd.body, &fd.ctx, user_ctx);
 }
 

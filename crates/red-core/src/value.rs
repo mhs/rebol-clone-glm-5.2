@@ -115,6 +115,11 @@ pub struct FuncDef {
     /// `dispatch_call` walks params then this list in order, collecting
     /// caller-supplied refinements into a `RefineArgs`.
     pub refinements: Vec<(Symbol, Vec<Symbol>)>,
+    /// Explicit function-local words declared via `<local>` in a `function`
+    /// spec (M16). Empty for `func`/`does`. These get slots after params +
+    /// refinements but before body-local SetWords, so they're usable even if
+    /// the body never assigns them (they default to `none`).
+    pub locals: Vec<Symbol>,
     pub body: Series,
     pub ctx: Context,
     pub native: Option<NativeFn>,
@@ -190,6 +195,18 @@ pub enum Value {
     Refinement { sym: Symbol, span: Span },
     /// `binary!` (optional in brief; included for completeness). Synthetic.
     String8(Vec<u8>),
+    /// A caught error value (M16). Produced by `try` when an error is raised
+    /// inside its block; carries the error message body. Synthetic — no source
+    /// span of its own (the originating error's span is not preserved across
+    /// the catch boundary in the POC).
+    Error(Rc<ErrorValue>),
+}
+
+/// Payload of a `Value::Error`. POC keeps just the message body; a fuller
+/// error model (code/type/args) is deferred to v0.3 per `plan2.md`.
+#[derive(Clone, Debug)]
+pub struct ErrorValue {
+    pub message: String,
 }
 
 impl Value {
@@ -210,7 +227,11 @@ impl Value {
             | Value::Paren { span, .. }
             | Value::Path { span, .. }
             | Value::Refinement { span, .. } => Some(*span),
-            Value::None | Value::Logic(_) | Value::Func(_) | Value::String8(_) => None,
+            Value::None
+            | Value::Logic(_)
+            | Value::Func(_)
+            | Value::String8(_)
+            | Value::Error(_) => None,
         }
     }
 
@@ -312,6 +333,14 @@ impl Value {
             sym: Symbol::new(s),
             span: Span::new(0, 0),
         }
+    }
+
+    /// Constructor shorthand for an error value carrying `message` (zero span,
+    /// synthetic).
+    pub fn error(message: impl Into<String>) -> Self {
+        Value::Error(Rc::new(ErrorValue {
+            message: message.into(),
+        }))
     }
 }
 
