@@ -91,19 +91,28 @@ runnable via `cargo run -p red-cli -- examples/<name>.red`:
 | `arith.red` | arithmetic, mixed int/float promotion |
 | `assign.red` | set-word + word lookup |
 | `conditionals.red` | `if` / `either` / comparisons |
+| `truthiness.red` | truthiness rules (`0`, `""`, `[]` are truthy; only `false`/`none` falsy), `and`/`or`/`not`, nested `either` chains |
 | `loops.red` | `loop` / `repeat` / `until` / `while` / `break` |
 | `foreach.red` | iteration over blocks |
 | `func.red` | `func` definition and call |
 | `recursion.red` | recursive factorial |
 | `use.red` | local contexts via `use` |
+| `higher-order.red` | functions as values, `get`/`set`/`value?`/`function?`, `does`, passing funcs to funcs |
+| `word-kinds.red` | the four word forms (`word`/`set-word`/`get-word`/`lit-word`) and their evaluation rules |
 | `series.red` | `first` / `next` / `append` / etc. |
+| `mutation.red` | `insert` / `change` / `remove` / `take` / `clear` / `poke`, shared-storage aliasing, `copy` |
 | `shared.red` | shared-storage semantics via aliases |
-| `sort.red` | series ops |
+| `blocks.red` | blocks as data (homoiconicity), `mold`/`do`/`reduce`, nested blocks |
+| `strings.red` | `"..."` escapes and `{...}` multi-line braced strings, `prin` |
+| `sort.red` | insertion sort with `forall`/`insert` |
 | `map.red` | `reduce`-style mapping |
 | `filter.red` | filtering with series ops |
 | `lookup.red` | `pick` / `select` / `find` |
 | `reduce.red` | `reduce` collecting results |
 | `parse.red` | `parse` dialect on string + block input |
+| `parse-csv.red` | `parse` applied to a CSV string with `copy`/`to`/`skip`/`some` + paren side-effects |
+| `calculator.red` | cursor-based `take`/`append` queue calculator with `does` and `func` |
+| `tree-walk.red` | recursive walk of a nested-block tree (leaf count, flatten, depth) |
 | `probe.red` | `probe` debug output |
 
 ## Repository layout
