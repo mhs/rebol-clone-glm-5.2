@@ -178,6 +178,6 @@ the authoritative list. Headlines:
 
 ## License
 
-Unspecified — this is a personal POC. See the upstream
-[Red project](https://www.red-lang.org/) for the language's license and
-canonical spec.
+Licensed under the Apache License, Version 2.0 — see
+[`LICENSE`](./LICENSE). The upstream [Red project](https://www.red-lang.org/)
+holds its own license for the language and canonical spec.
