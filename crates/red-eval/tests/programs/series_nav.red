@@ -1,0 +1,7 @@
+Red []
+print first [10 20 30]
+print second [10 20 30]
+print last [10 20 30]
+print first next [10 20 30]
+print index? next [10 20 30]
+print length? next [10 20 30]

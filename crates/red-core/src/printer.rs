@@ -40,8 +40,12 @@ pub fn mold(value: &Value, out: &mut String) {
         Value::Block { series, .. } => {
             out.push('[');
             let data = series.data.borrow();
-            for (i, v) in data.iter().enumerate() {
-                if i > 0 {
+            // Red molds a positioned series from its cursor to the tail, so
+            // `mold next [1 2 3]` renders `[2 3]`. Parsed blocks always start
+            // at index 0, so this only affects series produced by navigation
+            // natives (`next`/`skip`/`find`/etc.).
+            for (n, v) in data.iter().enumerate().skip(series.index) {
+                if n > series.index {
                     out.push(' ');
                 }
                 mold(v, out);
@@ -51,8 +55,8 @@ pub fn mold(value: &Value, out: &mut String) {
         Value::Paren { series, .. } => {
             out.push('(');
             let data = series.data.borrow();
-            for (i, v) in data.iter().enumerate() {
-                if i > 0 {
+            for (n, v) in data.iter().enumerate().skip(series.index) {
+                if n > series.index {
                     out.push(' ');
                 }
                 mold(v, out);

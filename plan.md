@@ -172,64 +172,64 @@ on the one above unless noted.
 
 ## Milestone 7 — Arithmetic, conditionals, loops
 
-- [ ] Implement `+` native: Integer/Float, mixed promotes to Float
-- [ ] Implement `-`, `*`, `/` (division by zero → EvalError)
-- [ ] Implement `=` `<>` `<` `>` `<=` `>=` returning `Logic`
-- [ ] Implement `and`, `or`, `not` for `Logic`
-- [ ] Implement `if cond block` → evaluates block if cond is truthy, else `None`
-- [ ] Implement `either cond t-block f-block`
-- [ ] Implement `loop block` — infinite loop until `break` (return `none` for now)
-- [ ] Implement `repeat 'word count block` — binds counter, runs block N times
-- [ ] Implement `until block` — runs block until it returns truthy
-- [ ] Implement `while cond-block body-block`
-- [ ] Implement `break`/`continue` via `EvalError` variants caught by loop natives
-- [ ] Implement `do block` — walks block, returns last value
-- [ ] Implement `reduce block` — evals each value, returns block of results
-- [ ] Truthiness rule: only `false` and `none` are falsy; everything else truthy
-- [ ] Inline `#[test]`: `1 + 2 = 3`
-- [ ] Inline `#[test]`: `10 / 0` errors
-- [ ] Inline `#[test]`: `if true [42]` → 42
-- [ ] Inline `#[test]`: `if false [42]` → none
-- [ ] Inline `#[test]`: `either 1 > 0 ["y"]["n"]` → "y"
-- [ ] Inline `#[test]`: `repeat i 3 [print i]` → "1\n2\n3\n"
-- [ ] Inline `#[test]`: `until [i: i + 1 i > 3]` → true, i == 4
-- [ ] Inline `#[test]`: `while [a < 3][a: a + 1]` → terminates
-- [ ] Inline `#[test]`: `reduce [1 + 1 2 + 2]` → `[2 4]`
-- [ ] Add 3-4 golden program fixtures exercising arithmetic + loops
-- [ ] `cargo test --workspace` passes
+- [x] Implement `+` native: Integer/Float, mixed promotes to Float
+- [x] Implement `-`, `*`, `/` (division by zero → EvalError)
+- [x] Implement `=` `<>` `<` `>` `<=` `>=` returning `Logic`
+- [x] Implement `and`, `or`, `not` for `Logic`
+- [x] Implement `if cond block` → evaluates block if cond is truthy, else `None`
+- [x] Implement `either cond t-block f-block`
+- [x] Implement `loop block` — infinite loop until `break` (return `none` for now)
+- [x] Implement `repeat 'word count block` — binds counter, runs block N times
+- [x] Implement `until block` — runs block until it returns truthy
+- [x] Implement `while cond-block body-block`
+- [x] Implement `break`/`continue` via `EvalError` variants caught by loop natives
+- [x] Implement `do block` — walks block, returns last value
+- [x] Implement `reduce block` — evals each value, returns block of results
+- [x] Truthiness rule: only `false` and `none` are falsy; everything else truthy
+- [x] Inline `#[test]`: `1 + 2 = 3`
+- [x] Inline `#[test]`: `10 / 0` errors
+- [x] Inline `#[test]`: `if true [42]` → 42
+- [x] Inline `#[test]`: `if false [42]` → none
+- [x] Inline `#[test]`: `either 1 > 0 ["y"]["n"]` → "y"
+- [x] Inline `#[test]`: `repeat i 3 [print i]` → "1\n2\n3\n"
+- [x] Inline `#[test]`: `until [i: i + 1 i > 3]` → true, i == 4
+- [x] Inline `#[test]`: `while [a < 3][a: a + 1]` → terminates
+- [x] Inline `#[test]`: `reduce [1 + 1 2 + 2]` → `[2 4]`
+- [x] Add 3-4 golden program fixtures exercising arithmetic + loops
+- [x] `cargo test --workspace` passes
 
 ## Milestone 8 — Series model
 
-- [ ] Create `red-eval/src/series.rs`
-- [ ] Implement `block?`, `paren?`, `series?`, `any-block?`, `empty?`
-- [ ] Implement `first`, `second`, `third`, `last`
-- [ ] Implement `next`, `back` (return new Series with adjusted index)
-- [ ] Implement `at`, `skip` (index-based navigation)
-- [ ] Implement `head`, `tail` (index 0 / index == len)
-- [ ] Implement `index?`, `length?`
-- [ ] Implement `pick` (by 1-based index)
-- [ ] Implement `poke` (mutate by index)
-- [ ] Implement `select` (linear search, return value after match)
-- [ ] Implement `find` (return positioned series or none)
-- [ ] Implement `append` (mutate shared storage)
-- [ ] Implement `insert` (at cursor)
-- [ ] Implement `change` (replace at cursor)
-- [ ] Implement `remove` (at cursor, optional /part)
-- [ ] Implement `clear` (truncate from cursor)
-- [ ] Implement `take` (remove + return)
-- [ ] Implement `copy` (shallow; /part optional)
-- [ ] Implement `foreach 'word series block` — iterate, bind word, do block
-- [ ] Implement `forall 'word series block` — advance series cursor between iterations
-- [ ] Register all series natives in `register_natives`
-- [ ] Inline `#[test]`: `first [1 2 3]` → 1
-- [ ] Inline `#[test]`: `next [1 2 3]` then `first` → 2
-- [ ] Inline `#[test]`: `append [1 2] 3` → `[1 2 3]` and original mutated
-- [ ] Inline `#[test]`: `select [a 1 b 2] 'b` → 1
-- [ ] Inline `#[test]`: `find [1 2 3] 2` returns positioned series
-- [ ] Inline `#[test]`: `foreach x [1 2 3][print x]` → "1\n2\n3\n"
-- [ ] Inline `#[test]`: shared storage mutation visible via aliases
-- [ ] Add 4-5 golden fixtures exercising series ops
-- [ ] `cargo test --workspace` passes
+- [x] Create `red-eval/src/series.rs`
+- [x] Implement `block?`, `paren?`, `series?`, `any-block?`, `empty?`
+- [x] Implement `first`, `second`, `third`, `last`
+- [x] Implement `next`, `back` (return new Series with adjusted index)
+- [x] Implement `at`, `skip` (index-based navigation)
+- [x] Implement `head`, `tail` (index 0 / index == len)
+- [x] Implement `index?`, `length?`
+- [x] Implement `pick` (by 1-based index)
+- [x] Implement `poke` (mutate by index)
+- [x] Implement `select` (linear search, return value after match)
+- [x] Implement `find` (return positioned series or none)
+- [x] Implement `append` (mutate shared storage)
+- [x] Implement `insert` (at cursor)
+- [x] Implement `change` (replace at cursor)
+- [x] Implement `remove` (at cursor, optional /part)
+- [x] Implement `clear` (truncate from cursor)
+- [x] Implement `take` (remove + return)
+- [x] Implement `copy` (shallow; /part optional)
+- [x] Implement `foreach 'word series block` — iterate, bind word, do block
+- [x] Implement `forall 'word series block` — advance series cursor between iterations
+- [x] Register all series natives in `register_natives`
+- [x] Inline `#[test]`: `first [1 2 3]` → 1
+- [x] Inline `#[test]`: `next [1 2 3]` then `first` → 2
+- [x] Inline `#[test]`: `append [1 2] 3` → `[1 2 3]` and original mutated
+- [x] Inline `#[test]`: `select [a 1 b 2] 'b` → 1
+- [x] Inline `#[test]`: `find [1 2 3] 2` returns positioned series
+- [x] Inline `#[test]`: `foreach x [1 2 3][print x]` → "1\n2\n3\n"
+- [x] Inline `#[test]`: shared storage mutation visible via aliases
+- [x] Add 4-5 golden fixtures exercising series ops
+- [x] `cargo test --workspace` passes
 
 ## Milestone 9 — Functions + binding
 

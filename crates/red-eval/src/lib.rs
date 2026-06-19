@@ -8,9 +8,11 @@
 pub mod context;
 pub mod interp;
 pub mod natives;
+pub mod series;
 
 pub use context::{Binding, CallFrame, Context, Env, EvalError, FuncDef, NativeFn};
 pub use interp::{
     bind_pass, eval, run_series, run_series_with_output, run_source, run_source_with_output,
 };
 pub use natives::{install_constants, register_natives};
+pub use series::register_series_natives;

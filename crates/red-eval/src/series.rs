@@ -1,0 +1,906 @@
+//! Series natives (Milestone 8): type predicates, navigation, access,
+//! mutation, and iteration over the `Series` cursor model.
+//!
+//! All natives operate on `Value::Block`/`Value::Paren` (both carry a
+//! `Series`). Navigation natives (`next`/`back`/`head`/`tail`/`at`/`skip`)
+//! return a *new* `Value::Block`/`Paren` whose `Series` clones the shared
+//! `Rc<RefCell<Vec<Value>>>` (so mutations are visible to all aliases) and
+//! adjusts `.index`. Mutation natives (`append`/`insert`/`poke`/`remove`/
+//! `clear`/`take`/`change`) write through `borrow_mut`, so the change is
+//! visible to every alias of the same storage — Red's reference semantics.
+//! `copy` is the one native that breaks sharing: it allocates fresh storage
+//! holding a shallow clone of the values from cursor to tail.
+//!
+//! Indexing convention (matches Red):
+//! - `first`/`pick n`/`select`/`find` are 1-based and relative to the cursor.
+//! - `at n` is absolute 1-based from the head; `skip n` is relative to the
+//!   current cursor.
+//! - `index?` returns the 1-based cursor position; `length?` returns the
+//!   count of values from cursor to tail.
+//!
+//! Out-of-range *access* (`first []`, `pick` past end) yields `none` or an
+//! error per Red: `first`/`pick` on an empty/at-tail series errors; `pick`
+//! past the end returns `none`. Mutation past the range errors.
+
+use red_core::value::{Series, Span, Symbol, Value};
+use red_core::{Env, EvalError};
+
+use crate::interp::eval;
+use crate::natives::{type_name, values_equal};
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Extract the shared storage + original span + whether the value is a paren.
+/// Returned `Series` is an Rc-clone (shares storage with the argument).
+fn extract_series(v: &Value) -> Result<(Series, Span, bool), EvalError> {
+    match v {
+        Value::Block { series, span } => Ok((series.clone(), *span, false)),
+        Value::Paren { series, span } => Ok((series.clone(), *span, true)),
+        other => Err(EvalError::TypeError {
+            expected: "series!",
+            found: type_name(other),
+            span: Span::new(0, 0),
+        }),
+    }
+}
+
+/// Reconstruct a series value preserving the original block/paren kind.
+fn mk_series(series: Series, span: Span, is_paren: bool) -> Value {
+    if is_paren {
+        Value::Paren { series, span }
+    } else {
+        Value::Block { series, span }
+    }
+}
+
+/// Read-only length of the shared storage (independent of cursor).
+fn storage_len(series: &Series) -> usize {
+    series.data.borrow().len()
+}
+
+/// `n`-th value from the cursor (1-based). Returns `None` if out of range.
+fn pick_value(series: &Series, n: i64) -> Option<Value> {
+    let data = series.data.borrow();
+    let idx = pick_index(series.index, data.len(), n)?;
+    Some(data[idx].clone())
+}
+
+/// Resolve a 1-based (positive from cursor, negative from tail) index to a
+/// storage index. Returns `None` if out of range.
+fn pick_index(cursor: usize, len: usize, n: i64) -> Option<usize> {
+    let idx = if n >= 1 {
+        (cursor as i64 + (n - 1)).max(-1) as usize
+    } else if n <= -1 {
+        // `-1` is the last element, `-2` second-to-last, etc.
+        match (len as i64) + n {
+            i if i >= 0 => i as usize,
+            _ => return None,
+        }
+    } else {
+        return None;
+    };
+    if idx < len {
+        Some(idx)
+    } else {
+        None
+    }
+}
+
+/// Loop-variable name: `'word` or bare `word` form.
+fn loop_word(v: &Value) -> Result<Symbol, EvalError> {
+    match v {
+        Value::LitWord(s) => Ok(s.clone()),
+        Value::Word { sym, .. } => Ok(sym.clone()),
+        other => Err(EvalError::TypeError {
+            expected: "word!",
+            found: type_name(other),
+            span: Span::new(0, 0),
+        }),
+    }
+}
+
+/// Pre-declared slot for a loop word (allocated by the binding pass).
+fn loop_slot(sym: &Symbol, env: &Env) -> Result<usize, EvalError> {
+    env.user_ctx
+        .index_of(sym)
+        .ok_or_else(|| EvalError::UnboundWord {
+            sym: sym.clone(),
+            span: Span::new(0, 0),
+        })
+}
+
+fn arity(native: &str, expected: usize, got: usize) -> EvalError {
+    EvalError::Arity {
+        native: Symbol::new(native),
+        expected,
+        got,
+        span: Span::new(0, 0),
+    }
+}
+
+fn type_err(expected: &'static str, found: &Value) -> EvalError {
+    EvalError::TypeError {
+        expected,
+        found: type_name(found),
+        span: Span::new(0, 0),
+    }
+}
+
+/// Extract the body block arg at `idx`, returning a cloned `Value` to eval.
+fn body_block(args: &[Value], idx: usize, native: &str) -> Result<Value, EvalError> {
+    match args.get(idx) {
+        Some(v @ Value::Block { .. }) => Ok(v.clone()),
+        Some(other) => Err(type_err("block!", other)),
+        None => Err(arity(native, idx + 1, args.len())),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Type predicates
+// ---------------------------------------------------------------------------
+
+fn block_q(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    Ok(Value::Logic(matches!(args[0], Value::Block { .. })))
+}
+
+fn paren_q(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    Ok(Value::Logic(matches!(args[0], Value::Paren { .. })))
+}
+
+fn series_q(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    Ok(Value::Logic(matches!(
+        args[0],
+        Value::Block { .. } | Value::Paren { .. }
+    )))
+}
+
+fn any_block_q(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    // POC has only `block!` and `paren!` as series types; both qualify.
+    Ok(Value::Logic(matches!(
+        args[0],
+        Value::Block { .. } | Value::Paren { .. }
+    )))
+}
+
+fn empty_q(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    let (series, _, _) = extract_series(&args[0])?;
+    // Empty when the cursor is at or past the tail.
+    Ok(Value::Logic(series.index >= storage_len(&series)))
+}
+
+// ---------------------------------------------------------------------------
+// Accessors
+// ---------------------------------------------------------------------------
+
+fn value_at(series: &Series, offset: usize, native: &str) -> Result<Value, EvalError> {
+    let data = series.data.borrow();
+    let idx = series.index + offset;
+    if idx >= data.len() {
+        return Err(EvalError::Native {
+            message: format!("{native}: index out of range"),
+            span: Span::new(0, 0),
+        });
+    }
+    Ok(data[idx].clone())
+}
+
+fn first(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    value_at(&extract_series(&args[0])?.0, 0, "first")
+}
+
+fn second(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    value_at(&extract_series(&args[0])?.0, 1, "second")
+}
+
+fn third(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    value_at(&extract_series(&args[0])?.0, 2, "third")
+}
+
+fn last(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    let (series, _, _) = extract_series(&args[0])?;
+    let data = series.data.borrow();
+    let Some(v) = data.last() else {
+        return Err(EvalError::Native {
+            message: "last: empty series".into(),
+            span: Span::new(0, 0),
+        });
+    };
+    Ok(v.clone())
+}
+
+// ---------------------------------------------------------------------------
+// Navigation (return positioned series)
+// ---------------------------------------------------------------------------
+
+fn next(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    let (mut series, span, is_paren) = extract_series(&args[0])?;
+    if series.index < storage_len(&series) {
+        series.index += 1;
+    }
+    Ok(mk_series(series, span, is_paren))
+}
+
+fn back(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    let (mut series, span, is_paren) = extract_series(&args[0])?;
+    series.index = series.index.saturating_sub(1);
+    Ok(mk_series(series, span, is_paren))
+}
+
+fn head(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    let (mut series, span, is_paren) = extract_series(&args[0])?;
+    series.index = 0;
+    Ok(mk_series(series, span, is_paren))
+}
+
+fn tail(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    let (mut series, span, is_paren) = extract_series(&args[0])?;
+    series.index = storage_len(&series);
+    Ok(mk_series(series, span, is_paren))
+}
+
+/// `at series n` — absolute 1-based position from the head.
+fn at(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    let (mut series, span, is_paren) = extract_series(&args[0])?;
+    let n = as_int(&args[1], "at")?;
+    let len = storage_len(&series) as i64;
+    // 1-based from head; clamp to [0, len].
+    let idx = ((n - 1).max(0) as usize).min(len.max(0) as usize);
+    series.index = idx;
+    Ok(mk_series(series, span, is_paren))
+}
+
+/// `skip series n` — relative offset from the current cursor.
+fn skip(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    let (mut series, span, is_paren) = extract_series(&args[0])?;
+    let n = as_int(&args[1], "skip")?;
+    let len = storage_len(&series) as i64;
+    let new_idx = (series.index as i64 + n).clamp(0, len);
+    series.index = new_idx as usize;
+    Ok(mk_series(series, span, is_paren))
+}
+
+fn index_q(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    let (series, _, _) = extract_series(&args[0])?;
+    // 1-based cursor position.
+    Ok(Value::Integer(series.index as i64 + 1))
+}
+
+fn length_q(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    let (series, _, _) = extract_series(&args[0])?;
+    let len = storage_len(&series);
+    let count = len.saturating_sub(series.index);
+    Ok(Value::Integer(count as i64))
+}
+
+// ---------------------------------------------------------------------------
+// Access: pick, poke, select, find
+// ---------------------------------------------------------------------------
+
+/// `pick series n` — 1-based from cursor (negative from tail). Returns `none`
+/// when out of range.
+fn pick(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    let (series, _, _) = extract_series(&args[0])?;
+    let n = as_int(&args[1], "pick")?;
+    Ok(pick_value(&series, n).unwrap_or(Value::None))
+}
+
+/// `poke series n value` — mutate the value at 1-based index (negative from
+/// tail). Returns the written value. Errors if out of range.
+fn poke(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(arity("poke", 3, args.len()));
+    }
+    let (series, _, _) = extract_series(&args[0])?;
+    let n = as_int(&args[1], "poke")?;
+    let len = storage_len(&series);
+    let Some(idx) = pick_index(series.index, len, n) else {
+        return Err(EvalError::Native {
+            message: "poke: index out of range".into(),
+            span: Span::new(0, 0),
+        });
+    };
+    let val = args[2].clone();
+    series.data.borrow_mut()[idx] = val.clone();
+    Ok(val)
+}
+
+/// Equality used by `select`/`find`. Extends `values_equal` with word-family
+/// matching by symbol name, so a lit-word needle (`'b`) matches a `word!`
+/// element (`b`) in the series — matches Red's `select`/`find` behavior for
+/// the common `'word` needle form.
+fn series_match(needle: &Value, candidate: &Value) -> bool {
+    match (word_sym(needle), word_sym(candidate)) {
+        (Some(a), Some(b)) => a == b,
+        _ => values_equal(needle, candidate),
+    }
+}
+
+/// Symbol of any word-family value (`Word`/`SetWord`/`GetWord`/`LitWord`).
+fn word_sym(v: &Value) -> Option<&Symbol> {
+    match v {
+        Value::Word { sym, .. } | Value::SetWord { sym, .. } | Value::GetWord { sym, .. } => {
+            Some(sym)
+        }
+        Value::LitWord(s) => Some(s),
+        _ => None,
+    }
+}
+
+/// `select series value` — find `value` from the cursor; return the value
+/// *after* the match, or `none` if not found / match is last.
+fn select(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    let (series, _, _) = extract_series(&args[0])?;
+    let needle = &args[1];
+    let data = series.data.borrow();
+    let mut i = series.index;
+    while i + 1 < data.len() {
+        if series_match(needle, &data[i]) {
+            return Ok(data[i + 1].clone());
+        }
+        i += 1;
+    }
+    Ok(Value::None)
+}
+
+/// `find series value` — linear search from the cursor; returns a positioned
+/// series at the match, or `none`.
+fn find(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    let (mut series, span, is_paren) = extract_series(&args[0])?;
+    let needle = &args[1];
+    let data = series.data.borrow();
+    let mut i = series.index;
+    while i < data.len() {
+        if series_match(needle, &data[i]) {
+            drop(data);
+            series.index = i;
+            return Ok(mk_series(series, span, is_paren));
+        }
+        i += 1;
+    }
+    Ok(Value::None)
+}
+
+// ---------------------------------------------------------------------------
+// Mutation
+// ---------------------------------------------------------------------------
+
+/// `append series value` — push `value` at the tail. Mutates shared storage.
+/// Returns the series at its current cursor.
+fn append(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity("append", 2, args.len()));
+    }
+    let (series, span, is_paren) = extract_series(&args[0])?;
+    series.data.borrow_mut().push(args[1].clone());
+    Ok(mk_series(series, span, is_paren))
+}
+
+/// `insert series value` — insert `value` at the cursor.
+fn insert(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity("insert", 2, args.len()));
+    }
+    let (series, span, is_paren) = extract_series(&args[0])?;
+    series
+        .data
+        .borrow_mut()
+        .insert(series.index, args[1].clone());
+    Ok(mk_series(series, span, is_paren))
+}
+
+/// `change series value` — replace the value at the cursor.
+fn change(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity("change", 2, args.len()));
+    }
+    let (series, span, is_paren) = extract_series(&args[0])?;
+    let len = storage_len(&series);
+    if series.index >= len {
+        return Err(EvalError::Native {
+            message: "change: at tail".into(),
+            span: Span::new(0, 0),
+        });
+    }
+    series.data.borrow_mut()[series.index] = args[1].clone();
+    Ok(mk_series(series, span, is_paren))
+}
+
+/// `remove series` — remove the value at the cursor.
+fn remove(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    if !args.is_empty() && args.len() != 1 {
+        return Err(arity("remove", 1, args.len()));
+    }
+    let (series, span, is_paren) = extract_series(&args[0])?;
+    let len = storage_len(&series);
+    if series.index < len {
+        series.data.borrow_mut().remove(series.index);
+    }
+    Ok(mk_series(series, span, is_paren))
+}
+
+/// `clear series` — truncate from the cursor to the tail.
+fn clear(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    let (series, span, is_paren) = extract_series(&args[0])?;
+    {
+        let mut data = series.data.borrow_mut();
+        data.truncate(series.index);
+    }
+    Ok(mk_series(series, span, is_paren))
+}
+
+/// `take series` — remove and return the value at the cursor; `none` if at
+/// tail.
+fn take(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    let (series, _, _) = extract_series(&args[0])?;
+    let len = storage_len(&series);
+    if series.index >= len {
+        return Ok(Value::None);
+    }
+    let v = series.data.borrow_mut().remove(series.index);
+    Ok(v)
+}
+
+/// `copy series` — fresh storage holding a shallow clone of the values from
+/// the cursor to the tail. Index reset to 0.
+fn copy(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    let (series, _, is_paren) = extract_series(&args[0])?;
+    let cloned: Vec<Value> = {
+        let data = series.data.borrow();
+        data[series.index.min(data.len())..].to_vec()
+    };
+    let fresh = Series::new(cloned);
+    Ok(mk_series(fresh, Span::new(0, 0), is_paren))
+}
+
+// ---------------------------------------------------------------------------
+// Iteration: foreach, forall
+// ---------------------------------------------------------------------------
+
+/// `foreach 'word series body` — iterate the values from cursor to tail,
+/// binding `word` to each in the user context, evaluating `body`. Returns the
+/// last body value (or `none` if the body never ran).
+fn foreach(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(arity("foreach", 3, args.len()));
+    }
+    let sym = loop_word(&args[0])?;
+    let idx = loop_slot(&sym, env)?;
+    let (series, _, _) = extract_series(&args[1])?;
+    let body = body_block(args, 2, "foreach")?;
+
+    let mut last = Value::None;
+    let mut i = series.index;
+    loop {
+        let v = {
+            let data = series.data.borrow();
+            if i >= data.len() {
+                break;
+            }
+            data[i].clone()
+        };
+        env.user_ctx.set_slot(idx, v);
+        match eval(&body, env) {
+            Ok(v) => last = v,
+            Err(EvalError::Break(bv)) => return Ok(bv.unwrap_or(Value::None)),
+            Err(EvalError::Continue) => {}
+            Err(e) => return Err(e),
+        }
+        i += 1;
+    }
+    Ok(last)
+}
+
+/// `forall 'word series body` — `word` holds the positioned series; each
+/// iteration evaluates `body` with `word` at the current cursor, then advances
+/// the cursor. Terminates when the series reaches its tail.
+fn forall(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(arity("forall", 3, args.len()));
+    }
+    let sym = loop_word(&args[0])?;
+    let idx = loop_slot(&sym, env)?;
+    let (mut series, span, is_paren) = extract_series(&args[1])?;
+    let body = body_block(args, 2, "forall")?;
+
+    env.user_ctx
+        .set_slot(idx, mk_series(series.clone(), span, is_paren));
+    let mut last = Value::None;
+    loop {
+        if series.index >= storage_len(&series) {
+            break;
+        }
+        // Refresh the word so the body sees the current cursor.
+        env.user_ctx
+            .set_slot(idx, mk_series(series.clone(), span, is_paren));
+        match eval(&body, env) {
+            Ok(v) => last = v,
+            Err(EvalError::Break(bv)) => return Ok(bv.unwrap_or(Value::None)),
+            Err(EvalError::Continue) => {}
+            Err(e) => return Err(e),
+        }
+        series.index += 1;
+    }
+    Ok(last)
+}
+
+// ---------------------------------------------------------------------------
+// Small numeric helper
+// ---------------------------------------------------------------------------
+
+fn as_int(v: &Value, _native: &str) -> Result<i64, EvalError> {
+    match v {
+        Value::Integer(n) => Ok(*n),
+        other => Err(type_err("integer!", other)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
+type NF = fn(&[Value], &mut Env) -> Result<Value, EvalError>;
+
+/// Register all series natives (M8) into `env.natives`. Arity-1 natives take
+/// just the series; `at`/`skip`/`pick`/`select`/`find`/`append`/`insert`/
+/// `change` take a series + index/value; `poke` takes series + index + value;
+/// `foreach`/`forall` take a word + series + body.
+pub fn register_series_natives(env: &mut Env) {
+    use red_core::value::FuncDef;
+    use std::rc::Rc;
+
+    let reg = |env: &mut Env, name: &str, f: NF, arity: usize| {
+        let params: Vec<Symbol> = (0..arity)
+            .map(|i| Symbol::new(&format!("__arg{i}")))
+            .collect();
+        env.natives.insert(
+            Symbol::new(name),
+            Rc::new(FuncDef {
+                params,
+                native: Some(f),
+                variadic: false,
+                infix: false,
+                ..Default::default()
+            }),
+        );
+    };
+
+    // Predicates (arity 1)
+    reg(env, "block?", block_q as NF, 1);
+    reg(env, "paren?", paren_q as NF, 1);
+    reg(env, "series?", series_q as NF, 1);
+    reg(env, "any-block?", any_block_q as NF, 1);
+    reg(env, "empty?", empty_q as NF, 1);
+
+    // Accessors (arity 1)
+    reg(env, "first", first as NF, 1);
+    reg(env, "second", second as NF, 1);
+    reg(env, "third", third as NF, 1);
+    reg(env, "last", last as NF, 1);
+
+    // Navigation
+    reg(env, "next", next as NF, 1);
+    reg(env, "back", back as NF, 1);
+    reg(env, "head", head as NF, 1);
+    reg(env, "tail", tail as NF, 1);
+    reg(env, "at", at as NF, 2);
+    reg(env, "skip", skip as NF, 2);
+    reg(env, "index?", index_q as NF, 1);
+    reg(env, "length?", length_q as NF, 1);
+
+    // Access
+    reg(env, "pick", pick as NF, 2);
+    reg(env, "poke", poke as NF, 3);
+    reg(env, "select", select as NF, 2);
+    reg(env, "find", find as NF, 2);
+
+    // Mutation
+    reg(env, "append", append as NF, 2);
+    reg(env, "insert", insert as NF, 2);
+    reg(env, "change", change as NF, 2);
+    reg(env, "remove", remove as NF, 1);
+    reg(env, "clear", clear as NF, 1);
+    reg(env, "take", take as NF, 1);
+    reg(env, "copy", copy as NF, 1);
+
+    // Iteration
+    reg(env, "foreach", foreach as NF, 3);
+    reg(env, "forall", forall as NF, 3);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::interp::bind_pass;
+    use crate::natives::{install_constants, register_natives};
+    use red_core::context::Context;
+    use red_core::parser::load_source;
+    use red_core::printer::mold_to_string;
+    use std::cell::RefCell;
+    use std::io::Write;
+    use std::rc::Rc;
+
+    struct BufferWriter(Rc<RefCell<Vec<u8>>>);
+    impl Write for BufferWriter {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn run_capture_val(src: &str) -> Result<(Value, Vec<u8>), String> {
+        let body = load_source(src).map_err(|e| e.to_string())?;
+        let mut ctx = Context::new();
+        install_constants(&mut ctx);
+        let ctx_rc = bind_pass(&body, ctx);
+        let buf = Rc::new(RefCell::new(Vec::<u8>::new()));
+        let mut env = Env::new_with_output(ctx_rc, Box::new(BufferWriter(Rc::clone(&buf))));
+        register_natives(&mut env);
+        let block = Value::block(body);
+        let val = eval(&block, &mut env).map_err(|e| e.to_string())?;
+        let out = buf.borrow().clone();
+        Ok((val, out))
+    }
+
+    fn val(src: &str) -> Value {
+        run_capture_val(src).unwrap().0
+    }
+
+    fn s(b: &[u8]) -> String {
+        String::from_utf8_lossy(b).into_owned()
+    }
+
+    fn run_capture(src: &str) -> Vec<u8> {
+        run_capture_val(src).unwrap().1
+    }
+
+    fn mold_val(v: &Value) -> String {
+        mold_to_string(v)
+    }
+
+    // --- Plan-required inline tests ---
+
+    #[test]
+    fn first_of_block() {
+        assert_eq!(mold_val(&val("first [1 2 3]")), "1");
+    }
+
+    #[test]
+    fn next_then_first() {
+        assert_eq!(mold_val(&val("first next [1 2 3]")), "2");
+    }
+
+    #[test]
+    fn append_mutates_and_returns() {
+        assert_eq!(mold_val(&val("append [1 2] 3")), "[1 2 3]");
+    }
+
+    #[test]
+    fn append_visible_to_alias() {
+        // Shared storage: appending through `b` is visible in `a`.
+        let out = run_capture("a: [1 2] b: a append b 3 print a");
+        assert_eq!(s(&out), "[1 2 3]\n");
+    }
+
+    #[test]
+    fn select_returns_value_after_match() {
+        // `select [a 1 b 2] 'b` → 2 (Red returns the value after the match).
+        assert_eq!(mold_val(&val("select [a 1 b 2] 'b")), "2");
+    }
+
+    #[test]
+    fn find_returns_positioned_series() {
+        // `find [1 2 3] 2` → positioned series at index 1; mold renders `[2 3]`.
+        assert_eq!(mold_val(&val("find [1 2 3] 2")), "[2 3]");
+    }
+
+    #[test]
+    fn find_not_found_returns_none() {
+        assert_eq!(mold_val(&val("find [1 2 3] 9")), "none");
+    }
+
+    #[test]
+    fn foreach_prints_each() {
+        let out = run_capture("foreach x [1 2 3][print x]");
+        assert_eq!(s(&out), "1\n2\n3\n");
+    }
+
+    #[test]
+    fn foreach_litword_form() {
+        let out = run_capture("foreach 'x [1 2 3][print x]");
+        assert_eq!(s(&out), "1\n2\n3\n");
+    }
+
+    #[test]
+    fn forall_advances_cursor() {
+        // forall binds word to the positioned series and prints each value.
+        let out = run_capture("forall 'x [1 2 3][print first x]");
+        assert_eq!(s(&out), "1\n2\n3\n");
+    }
+
+    // --- Predicates ---
+
+    #[test]
+    fn type_predicates() {
+        // Parens evaluate eagerly, so to test `paren?`/`series?` on a paren
+        // value we extract one from inside a block (where it's data).
+        assert_eq!(mold_val(&val("block? [1 2]")), "true");
+        assert_eq!(mold_val(&val("block? 5")), "false");
+        assert_eq!(mold_val(&val("paren? first [(1 2)]")), "true");
+        assert_eq!(mold_val(&val("series? [1]")), "true");
+        assert_eq!(mold_val(&val("series? first [(1)]")), "true");
+        assert_eq!(mold_val(&val("series? 5")), "false");
+        assert_eq!(mold_val(&val("any-block? [1]")), "true");
+        assert_eq!(mold_val(&val("empty? []")), "true");
+        assert_eq!(mold_val(&val("empty? [1]")), "false");
+    }
+
+    // --- Accessors ---
+
+    #[test]
+    fn second_third_last() {
+        assert_eq!(mold_val(&val("second [1 2 3 4]")), "2");
+        assert_eq!(mold_val(&val("third [1 2 3 4]")), "3");
+        assert_eq!(mold_val(&val("last [1 2 3 4]")), "4");
+    }
+
+    #[test]
+    fn first_of_empty_errors() {
+        assert!(run_capture_val("first []").is_err());
+    }
+
+    // --- Navigation ---
+
+    #[test]
+    fn navigation_cursors() {
+        assert_eq!(mold_val(&val("next [1 2 3]")), "[2 3]");
+        assert_eq!(mold_val(&val("head next [1 2 3]")), "[1 2 3]");
+        assert_eq!(mold_val(&val("tail [1 2 3]")), "[]");
+        assert_eq!(mold_val(&val("back next [1 2 3]")), "[1 2 3]");
+        assert_eq!(mold_val(&val("skip [1 2 3] 2")), "[3]");
+    }
+
+    #[test]
+    fn at_is_absolute_one_based() {
+        assert_eq!(mold_val(&val("at [1 2 3] 2")), "[2 3]");
+        assert_eq!(mold_val(&val("first at [1 2 3] 3")), "3");
+    }
+
+    #[test]
+    fn index_and_length() {
+        assert_eq!(mold_val(&val("index? [1 2 3]")), "1");
+        assert_eq!(mold_val(&val("index? next [1 2 3]")), "2");
+        assert_eq!(mold_val(&val("length? [1 2 3]")), "3");
+        assert_eq!(mold_val(&val("length? next [1 2 3]")), "2");
+    }
+
+    // --- Pick / poke ---
+
+    #[test]
+    fn pick_positive_and_negative() {
+        assert_eq!(mold_val(&val("pick [a b c] 2")), "b");
+        assert_eq!(mold_val(&val("pick [a b c] -1")), "c");
+        assert_eq!(mold_val(&val("pick [a b c] 9")), "none");
+    }
+
+    #[test]
+    fn poke_mutates_shared_storage() {
+        let out = run_capture("a: [1 2 3] poke a 2 9 print a");
+        assert_eq!(s(&out), "[1 9 3]\n");
+    }
+
+    // --- Mutation ---
+
+    #[test]
+    fn insert_at_cursor() {
+        // `insert` mutates shared storage; check via an alias since the
+        // returned series is positioned at the inserted element.
+        let out = run_capture("a: [1 2 3] insert a 9 print a");
+        assert_eq!(s(&out), "[9 1 2 3]\n");
+    }
+
+    #[test]
+    fn change_at_cursor() {
+        let out = run_capture("a: [1 2 3] change a 9 print a");
+        assert_eq!(s(&out), "[9 2 3]\n");
+    }
+
+    #[test]
+    fn remove_at_cursor() {
+        let out = run_capture("a: [1 2 3] remove a print a");
+        assert_eq!(s(&out), "[2 3]\n");
+    }
+
+    #[test]
+    fn clear_truncates_from_cursor() {
+        let out = run_capture("a: [1 2 3] clear next a print a");
+        assert_eq!(s(&out), "[1]\n");
+    }
+
+    #[test]
+    fn take_removes_and_returns() {
+        assert_eq!(mold_val(&val("take [1 2 3]")), "1");
+        let out = run_capture("a: [1 2 3] take a print a");
+        assert_eq!(s(&out), "[2 3]\n");
+    }
+
+    #[test]
+    fn take_at_tail_returns_none() {
+        assert_eq!(mold_val(&val("take tail [1 2 3]")), "none");
+    }
+
+    // --- Copy breaks sharing ---
+
+    #[test]
+    fn copy_is_independent() {
+        let out = run_capture("a: [1 2] b: copy a append b 3 print a print b");
+        assert_eq!(s(&out), "[1 2]\n[1 2 3]\n");
+    }
+
+    #[test]
+    fn copy_from_cursor() {
+        assert_eq!(mold_val(&val("copy next [1 2 3]")), "[2 3]");
+    }
+
+    // --- foreach / forall semantics ---
+
+    #[test]
+    fn foreach_break() {
+        assert_eq!(
+            s(&run_capture(
+                "foreach x [1 2 3 4][if x = 3 [break] print x]"
+            )),
+            "1\n2\n"
+        );
+    }
+
+    #[test]
+    fn foreach_continue() {
+        assert_eq!(
+            s(&run_capture(
+                "foreach x [1 2 3][if x = 2 [continue] print x]"
+            )),
+            "1\n3\n"
+        );
+    }
+
+    #[test]
+    fn forall_break() {
+        // Parenthesize `first x` so `=` applies to its result, not to `x`
+        // (our M7 evaluator treats native args as full expressions).
+        assert_eq!(
+            s(&run_capture(
+                "forall 'x [1 2 3 4][if (first x) = 3 [break] print first x]"
+            )),
+            "1\n2\n"
+        );
+    }
+
+    #[test]
+    fn select_returns_none_when_not_found() {
+        assert_eq!(mold_val(&val("select [1 2 3] 9")), "none");
+    }
+
+    #[test]
+    fn select_returns_none_when_match_is_last() {
+        // `b` is last → no value after it.
+        assert_eq!(mold_val(&val("select [a 1 b] 'b")), "none");
+    }
+
+    // --- Shared storage aliasing (plan-required) ---
+
+    #[test]
+    fn shared_storage_mutation_via_aliases() {
+        // Multiple aliases of the same storage see appends.
+        let out = run_capture("a: [1] b: a append a 2 append b 3 print a");
+        assert_eq!(s(&out), "[1 2 3]\n");
+    }
+}

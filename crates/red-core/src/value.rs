@@ -90,6 +90,11 @@ pub enum Binding {
 /// `variadic` marks natives (like `print`/`prin`/`probe`) that collect all
 /// remaining args in the enclosing block up to the next native word. Fixed
 /// natives ignore it and use `params.len()` for arity.
+///
+/// `infix` marks natives that participate in left-to-right infix chaining
+/// (Milestone 7): an infix native consumes the already-evaluated left value
+/// as its first operand plus one trailing prefix value as its second. Used
+/// for `+`/`-`/`*`/`/`/`=`/`<>`/`<`/`>`/`<=`/`>=`/`and`/`or`.
 #[derive(Clone, Debug, Default)]
 pub struct FuncDef {
     pub params: Vec<Symbol>,
@@ -97,6 +102,7 @@ pub struct FuncDef {
     pub ctx: Context,
     pub native: Option<NativeFn>,
     pub variadic: bool,
+    pub infix: bool,
 }
 
 /// The single runtime value type. Covers every variant from the brief, even

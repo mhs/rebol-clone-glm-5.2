@@ -7,18 +7,30 @@
 //! `GetWord` reads the slot without calling. Native *calls* (collecting
 //! arguments and invoking `f`) land in M6 — for now `resolve_word` may
 //! produce a `Value::Func`, but nothing dispatches it.
+//!
+//! Milestone 7 adds *expression-based* evaluation: a single step evaluates a
+//! prefix value followed by any chain of infix natives (`1 + 2 * 3` →
+//! `((1 + 2) * 3)` = 9, Red's left-to-right no-precedence rule). SetWord
+//! RHS and native arguments are both evaluated as expressions so that
+//! `x: 1 + 2` and `print 1 + 2` work. Loop-variable names (`repeat 'i ...`
+//! / `repeat i ...`) are pre-allocated by the binding pass so body
+//! references resolve to the counter slot.
+//!
+//! Index contract: every evaluator function (`eval`, `eval_expression`,
+//! `eval_prefix`, `dispatch_call`) leaves `*i` pointing at the *next*
+//! unprocessed value — one past whatever it consumed.
 
 use std::rc::Rc;
 
 use red_core::lexer;
 use red_core::parser::parse_program;
-use red_core::value::{Binding, Series, Span, Symbol, Value};
+use red_core::value::{Binding, FuncDef, Series, Span, Symbol, Value};
 use red_core::{Context, Env, Error, EvalError};
 
 /// Walk `body` and attach `Binding::Local` to every word whose name matches a
-/// slot allocated for a `SetWord`. Recurses into nested `Block`/`Paren`
-/// contents so that words inside data blocks are also bound (matches Red
-/// semantics: `foo: 5 [foo]` later `do`ne yields `[5]`).
+/// slot allocated for a `SetWord` or a `repeat` loop variable. Recurses into
+/// nested `Block`/`Paren` contents so that words inside data blocks are also
+/// bound (matches Red semantics: `foo: 5 [foo]` later `do`ne yields `[5]`).
 ///
 /// Returns the `Rc<Context>` shared by all attached bindings. The caller
 /// installs it into `Env.user_ctx` so eval-time writes flow through the same
@@ -26,6 +38,7 @@ use red_core::{Context, Env, Error, EvalError};
 pub fn bind_pass(body: &Series, user_ctx: Context) -> Rc<Context> {
     let mut ctx = user_ctx;
     collect_setwords(body, &mut ctx);
+    collect_loop_vars(body, &mut ctx);
     let ctx_rc = Rc::new(ctx);
     attach_bindings(body, &ctx_rc);
     ctx_rc
@@ -44,6 +57,51 @@ fn collect_setwords(series: &Series, ctx: &mut Context) {
                 collect_setwords(s, ctx);
             }
             _ => {}
+        }
+    }
+}
+
+/// Phase 1b: allocate a slot for every word introduced as a loop variable by
+/// `repeat`, `foreach`, or `forall`. Each is recognized in either of two
+/// forms:
+/// - `repeat 'i <count> <body>`  (lit-word counter, Red canonical form)
+/// - `repeat i <count> <body>`   (bare-word counter, accepted by the POC)
+/// - `foreach 'word <series> <body>` / `forall 'word <series> <body>`
+///
+/// The lit-word/bare-word value itself is *not* a SetWord, so without this
+/// pass the loop name would never get a slot and body references would
+/// resolve as unbound. Recurses into nested `Block`/`Paren`.
+fn collect_loop_vars(series: &Series, ctx: &mut Context) {
+    let data = series.data.borrow();
+    let n = data.len();
+    let mut i = 0;
+    while i < n {
+        match &data[i] {
+            Value::Word {
+                sym,
+                binding: Binding::Unbound,
+            } if matches!(sym.as_str(), "repeat" | "foreach" | "forall") => {
+                if i + 1 < n {
+                    let name = match &data[i + 1] {
+                        Value::LitWord(sym) => Some(sym.clone()),
+                        Value::Word {
+                            sym,
+                            binding: Binding::Unbound,
+                        } => Some(sym.clone()),
+                        _ => None,
+                    };
+                    if let Some(sym) = name {
+                        ctx.slot_index(sym);
+                    }
+                }
+                i += 1;
+            }
+            Value::Block { series: s, .. } | Value::Paren { series: s, .. } => {
+                let child = s.clone();
+                collect_loop_vars(&child, ctx);
+                i += 1;
+            }
+            _ => i += 1,
         }
     }
 }
@@ -77,8 +135,8 @@ fn attach_bindings(series: &Series, ctx: &Rc<Context>) {
 /// Evaluate a block/paren value: walk its contents in order, returning the
 /// last value. Non-block/paren values passed in are returned as-is (cloned).
 ///
-/// This is the *block-walker*. To evaluate a single value as if it were the
-/// sole element of a block (e.g. the RHS of a `SetWord`), use `eval_value`.
+/// This is the *block-walker*. Each step evaluates one *expression* (a
+/// prefix value plus any trailing infix chain) via [`eval_expression`].
 pub fn eval(block: &Value, env: &mut Env) -> Result<Value, EvalError> {
     let series = match block {
         Value::Block { series, .. } | Value::Paren { series, .. } => series.clone(),
@@ -89,66 +147,152 @@ pub fn eval(block: &Value, env: &mut Env) -> Result<Value, EvalError> {
     let data = series.data.borrow();
     let mut i = series.index;
     while i < data.len() {
-        let span = data[i].span().unwrap_or(Span::new(0, 0));
-        let cur = &data[i];
-        last = match cur {
-            // Data / literals: returned as-is.
-            Value::None
-            | Value::Logic(_)
-            | Value::Integer(_)
-            | Value::Float(_)
-            | Value::String(_)
-            | Value::String8(_)
-            | Value::LitWord(_)
-            | Value::Block { .. }
-            | Value::Func(_)
-            | Value::Path(_) => cur.clone(),
-
-            // Paren: walked eagerly in place. The recursion borrows the
-            // child series's `RefCell`, distinct from the outer borrow.
-            Value::Paren { series: p, .. } => {
-                let p = p.clone();
-                eval(&Value::Paren { series: p, span }, env)?
-            }
-
-            Value::Word { sym, binding } => {
-                let resolved = resolve_word(sym, binding, env, span)?;
-                dispatch_call(resolved, sym, &data, &mut i, env, span)?
-            }
-
-            Value::SetWord { sym, binding } => {
-                // Evaluate the next value as the RHS.
-                i += 1;
-                if i >= data.len() {
-                    return Err(EvalError::Arity {
-                        native: sym.clone(),
-                        expected: 1,
-                        got: 0,
-                        span,
-                    });
-                }
-                let rhs_span = data[i].span().unwrap_or(Span::new(0, 0));
-                let rhs = eval_value(&data[i], env)?;
-                write_setword(sym, binding, rhs.clone(), env, rhs_span)?;
-                // `foo: 5` evaluates to the written value (Red semantics).
-                rhs
-            }
-
-            Value::GetWord { sym, binding } => {
-                // GetWord returns the slot value (or native Func) without
-                // invoking it — no argument collection, no dispatch.
-                resolve_word(sym, binding, env, span)?
-            }
-        };
-        i += 1;
+        last = eval_expression(&data, &mut i, env)?;
     }
     Ok(last)
+}
+
+/// Evaluate a single expression starting at `data[*i]`: a prefix value
+/// followed by zero or more infix native applications (Red's left-to-right,
+/// no-precedence rule). Advances `*i` past the entire expression.
+///
+/// Examples (within a block):
+///   - `5`                → `Integer(5)`        (no trailing infix)
+///   - `1 + 2`            → `Integer(3)`        (one infix op)
+///   - `1 + 2 * 3`        → `Integer(9)`        (two infix ops, L-to-R)
+///   - `foo`              → slot value          (word resolves, no infix)
+///   - `print "hi"`       → `None`              (prefix native call)
+///   - `x: 1 + 2`         → `Integer(3)`        (SetWord RHS is an expression)
+pub(crate) fn eval_expression(
+    data: &std::cell::Ref<Vec<Value>>,
+    i: &mut usize,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
+    let mut value = eval_prefix(data, i, env)?;
+
+    // Chain infix natives left-to-right. Each infix native uses `value` as
+    // its left operand and consumes one prefix value as its right.
+    while *i < data.len() {
+        let infix = match infix_native_at(&data[*i], env) {
+            Some(fd) => fd,
+            None => break,
+        };
+        *i += 1; // consume the infix word itself; now *i points at the right operand
+        let arity = infix.params.len();
+        debug_assert!(
+            arity >= 1,
+            "infix native must take at least one operand (the left value)"
+        );
+        let mut args = Vec::with_capacity(arity);
+        args.push(value);
+        // The first operand (left value) is already evaluated; the remaining
+        // `arity - 1` operands are consumed as prefix values from the block.
+        for _ in 1..arity {
+            if *i >= data.len() {
+                return Err(EvalError::Arity {
+                    native: Symbol::new("<infix>"),
+                    expected: arity,
+                    got: args.len(),
+                    span: Span::new(0, 0),
+                });
+            }
+            args.push(eval_prefix(data, i, env)?);
+        }
+        let f = infix.native.unwrap();
+        value = f(&args, env)?;
+    }
+    Ok(value)
+}
+
+/// If `v` is an unbound `Word` naming an infix native, return its `FuncDef`.
+/// Infix natives are never invoked through the normal `dispatch_call` path —
+/// they're consumed by [`eval_expression`] before the prefix evaluator ever
+/// sees them.
+fn infix_native_at(v: &Value, env: &Env) -> Option<Rc<FuncDef>> {
+    let sym = match v {
+        Value::Word { sym, binding } | Value::GetWord { sym, binding } => {
+            if !matches!(binding, Binding::Unbound) {
+                return None;
+            }
+            sym
+        }
+        _ => return None,
+    };
+    env.natives.get(sym).filter(|fd| fd.infix).cloned()
+}
+
+/// Evaluate a single prefix value (no infix chaining): literals are cloned,
+/// `Paren` is walked eagerly, `Word` resolves and dispatches a native call,
+/// `SetWord` consumes one trailing expression as its RHS, `GetWord` reads
+/// the slot without invoking, `Block` is returned as data. Advances `*i`
+/// past the consumed value (and any native args / SetWord RHS).
+fn eval_prefix(
+    data: &std::cell::Ref<Vec<Value>>,
+    i: &mut usize,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
+    let span = data[*i].span().unwrap_or(Span::new(0, 0));
+    let cur = data[*i].clone();
+    *i += 1; // consume the prefix value itself
+    match &cur {
+        // Data / literals: returned as-is.
+        Value::None
+        | Value::Logic(_)
+        | Value::Integer(_)
+        | Value::Float(_)
+        | Value::String(_)
+        | Value::String8(_)
+        | Value::LitWord(_)
+        | Value::Block { .. }
+        | Value::Func(_)
+        | Value::Path(_) => Ok(cur),
+
+        // Paren: walked eagerly in place. The recursion borrows the child
+        // series's `RefCell`, distinct from the outer borrow.
+        Value::Paren { series: p, .. } => {
+            let p = p.clone();
+            eval(&Value::Paren { series: p, span }, env)
+        }
+
+        Value::Word { sym, binding } => {
+            let resolved = resolve_word(sym, binding, env, span)?;
+            // `dispatch_call` collects args starting at the new `*i`.
+            dispatch_call(resolved, sym, data, i, env, span)
+        }
+
+        Value::SetWord { sym, binding } => {
+            // Evaluate the next *expression* as the RHS (so `x: 1 + 2` works).
+            if *i >= data.len() {
+                return Err(EvalError::Arity {
+                    native: sym.clone(),
+                    expected: 1,
+                    got: 0,
+                    span,
+                });
+            }
+            let rhs = eval_expression(data, i, env)?;
+            write_setword(sym, binding, rhs.clone(), env, span)?;
+            // `foo: 5` evaluates to the written value (Red semantics).
+            Ok(rhs)
+        }
+
+        Value::GetWord { sym, binding } => {
+            // GetWord returns the slot value (or native Func) without
+            // invoking it — no argument collection, no dispatch.
+            resolve_word(sym, binding, env, span)
+        }
+    }
 }
 
 /// If `resolved` is a native-bearing `Func`, collect arguments from `data`
 /// (advancing `i`) and invoke the native. Otherwise return `resolved` as-is
 /// (user-defined funcs land in M9). `sym` is the calling word's symbol, used
 /// for arity-error messages.
+///
+/// Pre: `*i` points at the first potential argument (the calling word has
+/// already been consumed by [`eval_prefix`]). Each argument is evaluated as a
+/// full *expression* (so `print 1 + 2` passes `3`), not just a single prefix
+/// value. Post: `*i` points past the last consumed argument.
 fn dispatch_call(
     resolved: Value,
     sym: &Symbol,
@@ -164,15 +308,14 @@ fn dispatch_call(
     let f = fd.native.unwrap();
     let mut args = Vec::new();
     if fd.variadic {
-        // Consume remaining values until the next native word or end of block.
-        while *i + 1 < data.len() && !is_native_word(&data[*i + 1], env) {
-            *i += 1;
-            args.push(eval_value(&data[*i], env)?);
+        // Consume remaining expressions until the next native word or end of
+        // block.
+        while *i < data.len() && !is_native_word(&data[*i], env) {
+            args.push(eval_expression(data, i, env)?);
         }
     } else {
         let arity = fd.params.len();
-        for _ in 0..arity {
-            *i += 1;
+        for n in 0..arity {
             if *i >= data.len() {
                 return Err(EvalError::Arity {
                     native: sym.clone(),
@@ -181,7 +324,17 @@ fn dispatch_call(
                     span,
                 });
             }
-            args.push(eval_value(&data[*i], env)?);
+            // `repeat`/`foreach`/`forall`'s first argument is a word/lit-word
+            // *name*, not a value to evaluate. Pass it through unevaluated so
+            // the native can bind it as the loop counter / iterator. (Red uses
+            // a lit-word here; the POC also accepts a bare word for
+            // ergonomics.)
+            if n == 0 && matches!(sym.as_str(), "repeat" | "foreach" | "forall") {
+                args.push(data[*i].clone());
+                *i += 1;
+            } else {
+                args.push(eval_expression(data, i, env)?);
+            }
         }
     }
     f(&args, env)
@@ -200,20 +353,6 @@ fn is_native_word(v: &Value, env: &Env) -> bool {
         _ => return false,
     };
     env.natives.contains_key(sym)
-}
-
-/// Evaluate a single value as if it were the sole element of a block.
-/// `Block` → returned as data; `Paren` → walked eagerly; `Word`/`GetWord` →
-/// resolved; literals → cloned. Used for `SetWord` RHS and any other place
-/// we need to reduce one value.
-fn eval_value(v: &Value, env: &mut Env) -> Result<Value, EvalError> {
-    match v {
-        Value::Paren { .. } => eval(v, env),
-        Value::Word { sym, binding } | Value::GetWord { sym, binding } => {
-            resolve_word(sym, binding, env, v.span().unwrap_or(Span::new(0, 0)))
-        }
-        _ => Ok(v.clone()),
-    }
 }
 
 /// Resolve a `Word`/`GetWord` to its value via the binding, or via the native
@@ -415,5 +554,30 @@ mod tests {
             Error::Eval(EvalError::Arity { native, expected: 1, got: 0, .. })
             if native.as_str() == "foo"
         ));
+    }
+
+    // --- Milestone 7: expression / infix evaluation ---
+
+    #[test]
+    fn infix_addition() {
+        assert_eq!(mold_to_string(&run("1 + 2")), "3");
+    }
+
+    #[test]
+    fn infix_left_to_right_no_precedence() {
+        // Red: `1 + 2 * 3` = `(1 + 2) * 3` = 9.
+        assert_eq!(mold_to_string(&run("1 + 2 * 3")), "9");
+    }
+
+    #[test]
+    fn setword_rhs_is_full_expression() {
+        assert_eq!(mold_to_string(&run("x: 1 + 2 x")), "3");
+    }
+
+    #[test]
+    fn native_arg_is_full_expression() {
+        // `print 1 + 2` should pass 3 to print. The block's last value is
+        // print's return: none.
+        assert_eq!(mold_to_string(&run("print 1 + 2")), "none");
     }
 }

@@ -1,7 +1,16 @@
-//! Native (Rust-implemented) operations. Milestone 6 registers the I/O
-//! natives `print`, `prin`, and `probe`, plus the constant words `none`,
-//! `true`, `false`, `newline` (installed into the user context so they
-//! resolve during eval).
+//! Native (Rust-implemented) operations.
+//!
+//! Milestone 6 registered the I/O natives `print`, `prin`, `probe`, plus the
+//! constant words `none`, `true`, `false`, `newline`.
+//!
+//! Milestone 7 adds:
+//!   - Arithmetic (infix): `+ - * /`
+//!   - Comparison (infix): `= <> < > <= >=`
+//!   - Logic: `and`, `or` (infix), `not` (prefix)
+//!   - Conditionals: `if`, `either`
+//!   - Loops: `loop`, `repeat`, `until`, `while`
+//!   - Control flow: `break`, `continue` (via `EvalError` unwinds)
+//!   - Eval: `do`, `reduce`
 //!
 //! String rendering note: `print`/`prin`/`probe` mold every argument
 //! uniformly (including strings, which appear quoted). This diverges from
@@ -13,12 +22,17 @@ use std::rc::Rc;
 
 use red_core::context::Context;
 use red_core::printer::mold_to_string;
-use red_core::value::{FuncDef, Symbol, Value};
+use red_core::value::{FuncDef, Series, Span, Symbol, Value};
 use red_core::{Env, EvalError, NativeFn};
 
+use crate::interp::{eval, eval_expression};
+
+// ---------------------------------------------------------------------------
+// I/O natives (M6)
+// ---------------------------------------------------------------------------
+
 /// `print`: mold each arg, join with a single space, append a newline.
-/// Variadic — consumes all remaining args in the enclosing block up to the
-/// next native word. Returns `Value::None`.
+/// Returns `Value::None`.
 fn print(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     let joined = join_molded(args);
     let _ = writeln!(env.out, "{joined}");
@@ -51,6 +65,449 @@ fn join_molded(args: &[Value]) -> String {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Truthiness rule: only `false` and `none` are falsy; everything else is
+/// truthy.
+fn truthy(v: &Value) -> bool {
+    !matches!(v, Value::None | Value::Logic(false))
+}
+
+/// A numeric value extracted from `Value::Integer` or `Value::Float`.
+enum Num {
+    Int(i64),
+    Float(f64),
+}
+
+fn as_number(v: &Value) -> Option<Num> {
+    match v {
+        Value::Integer(n) => Some(Num::Int(*n)),
+        Value::Float(f) => Some(Num::Float(*f)),
+        _ => None,
+    }
+}
+
+pub(crate) fn type_name(v: &Value) -> &'static str {
+    match v {
+        Value::None => "none!",
+        Value::Logic(_) => "logic!",
+        Value::Integer(_) => "integer!",
+        Value::Float(_) => "float!",
+        Value::String(_) => "string!",
+        Value::String8(_) => "binary!",
+        Value::Word { .. } => "word!",
+        Value::SetWord { .. } => "set-word!",
+        Value::GetWord { .. } => "get-word!",
+        Value::LitWord(_) => "lit-word!",
+        Value::Block { .. } => "block!",
+        Value::Paren { .. } => "paren!",
+        Value::Func(_) => "function!",
+        Value::Path(_) => "path!",
+    }
+}
+
+/// Extract a `Block` value from `args[idx]`, or raise a TypeError.
+fn expect_block(args: &[Value], idx: usize, native: &str) -> Result<Value, EvalError> {
+    match args.get(idx) {
+        Some(v @ Value::Block { .. }) => Ok(v.clone()),
+        Some(other) => Err(EvalError::TypeError {
+            expected: "block!",
+            found: type_name(other),
+            span: Span::new(0, 0),
+        }),
+        None => Err(EvalError::Arity {
+            native: Symbol::new(native),
+            expected: idx + 1,
+            got: args.len(),
+            span: Span::new(0, 0),
+        }),
+    }
+}
+
+/// Apply a numeric binary operator to `args[0]` (left) and `args[1]` (right).
+/// Int+Int → Int; any Float involved → Float. `op` names the operation for
+/// error messages.
+fn num_binop(
+    args: &[Value],
+    op: &str,
+    f_int: fn(i64, i64) -> Option<i64>,
+    f_float: fn(f64, f64) -> f64,
+) -> Result<Value, EvalError> {
+    let a = match as_number(&args[0]) {
+        Some(n) => n,
+        None => {
+            return Err(EvalError::TypeError {
+                expected: "integer! or float!",
+                found: type_name(&args[0]),
+                span: Span::new(0, 0),
+            })
+        }
+    };
+    let b = match as_number(&args[1]) {
+        Some(n) => n,
+        None => {
+            return Err(EvalError::TypeError {
+                expected: "integer! or float!",
+                found: type_name(&args[1]),
+                span: Span::new(0, 0),
+            })
+        }
+    };
+    match (a, b) {
+        (Num::Int(x), Num::Int(y)) => match f_int(x, y) {
+            Some(r) => Ok(Value::Integer(r)),
+            // `f_int` returns None to signal a domain error (e.g. div-by-zero).
+            None => Err(EvalError::Native {
+                message: format!("math error: {op} by zero"),
+                span: Span::new(0, 0),
+            }),
+        },
+        (Num::Int(x), Num::Float(y)) => Ok(Value::Float(f_float(x as f64, y))),
+        (Num::Float(x), Num::Int(y)) => Ok(Value::Float(f_float(x, y as f64))),
+        (Num::Float(x), Num::Float(y)) => Ok(Value::Float(f_float(x, y))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Arithmetic (infix): + - * /
+// ---------------------------------------------------------------------------
+
+fn add(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    num_binop(args, "division", |a, b| Some(a + b), |a, b| a + b)
+}
+
+fn subtract(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    num_binop(args, "division", |a, b| Some(a - b), |a, b| a - b)
+}
+
+fn multiply(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    num_binop(args, "division", |a, b| Some(a * b), |a, b| a * b)
+}
+
+fn divide(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    num_binop(
+        args,
+        "division",
+        |a, b| {
+            if b == 0 {
+                None
+            } else {
+                Some(a / b)
+            }
+        },
+        |a, b| a / b,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Comparison (infix): = <> < > <= >=
+// ---------------------------------------------------------------------------
+
+pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Integer(x), Value::Integer(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => x == y,
+        (Value::Integer(x), Value::Float(y)) => (*x as f64) == *y,
+        (Value::Float(x), Value::Integer(y)) => *x == (*y as f64),
+        (Value::String(x), Value::String(y)) => x == y,
+        (Value::None, Value::None) => true,
+        (Value::Logic(x), Value::Logic(y)) => x == y,
+        _ => false,
+    }
+}
+
+fn equal(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    Ok(Value::Logic(values_equal(&args[0], &args[1])))
+}
+
+fn not_equal(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    Ok(Value::Logic(!values_equal(&args[0], &args[1])))
+}
+
+fn compare(op: &str, ord: std::cmp::Ordering) -> bool {
+    matches!(
+        (op, ord),
+        ("<", std::cmp::Ordering::Less)
+            | (">", std::cmp::Ordering::Greater)
+            | ("<=", std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+            | (
+                ">=",
+                std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
+            )
+    )
+}
+
+fn less_than(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    Ok(Value::Logic(compare("<", num_cmp(&args[0], &args[1])?)))
+}
+
+fn greater_than(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    Ok(Value::Logic(compare(">", num_cmp(&args[0], &args[1])?)))
+}
+
+fn less_equal(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    Ok(Value::Logic(compare("<=", num_cmp(&args[0], &args[1])?)))
+}
+
+fn greater_equal(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    Ok(Value::Logic(compare(">=", num_cmp(&args[0], &args[1])?)))
+}
+
+/// Compare two numeric values, returning their `Ordering`.
+fn num_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalError> {
+    let x = match as_number(a) {
+        Some(n) => n,
+        None => {
+            return Err(EvalError::TypeError {
+                expected: "integer! or float!",
+                found: type_name(a),
+                span: Span::new(0, 0),
+            })
+        }
+    };
+    let y = match as_number(b) {
+        Some(n) => n,
+        None => {
+            return Err(EvalError::TypeError {
+                expected: "integer! or float!",
+                found: type_name(b),
+                span: Span::new(0, 0),
+            })
+        }
+    };
+    Ok(match (x, y) {
+        (Num::Int(x), Num::Int(y)) => x.cmp(&y),
+        (Num::Int(x), Num::Float(y)) => (x as f64)
+            .partial_cmp(&y)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        (Num::Float(x), Num::Int(y)) => x
+            .partial_cmp(&(y as f64))
+            .unwrap_or(std::cmp::Ordering::Equal),
+        (Num::Float(x), Num::Float(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Logic: and, or (infix), not (prefix)
+// ---------------------------------------------------------------------------
+
+fn and_op(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    Ok(Value::Logic(truthy(&args[0]) && truthy(&args[1])))
+}
+
+fn or_op(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    Ok(Value::Logic(truthy(&args[0]) || truthy(&args[1])))
+}
+
+fn not_op(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    Ok(Value::Logic(!truthy(&args[0])))
+}
+
+// ---------------------------------------------------------------------------
+// Conditionals: if, either
+// ---------------------------------------------------------------------------
+
+/// `if cond block` — evaluates `block` if `cond` is truthy, else returns `none`.
+fn if_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Arity {
+            native: Symbol::new("if"),
+            expected: 2,
+            got: args.len(),
+            span: Span::new(0, 0),
+        });
+    }
+    if truthy(&args[0]) {
+        let body = expect_block(args, 1, "if")?;
+        eval(&body, env)
+    } else {
+        Ok(Value::None)
+    }
+}
+
+/// `either cond t-block f-block`
+fn either(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Arity {
+            native: Symbol::new("either"),
+            expected: 3,
+            got: args.len(),
+            span: Span::new(0, 0),
+        });
+    }
+    let t = expect_block(args, 1, "either")?;
+    let f = expect_block(args, 2, "either")?;
+    if truthy(&args[0]) {
+        eval(&t, env)
+    } else {
+        eval(&f, env)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Loops: loop, repeat, until, while
+// ---------------------------------------------------------------------------
+
+/// `loop block` — evaluates `block` repeatedly until `break`. Returns the
+/// break-value (or `none` if `break` had no value).
+fn loop_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    let body = expect_block(args, 0, "loop")?;
+    loop {
+        match eval(&body, env) {
+            Ok(_) => {}
+            Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
+            Err(EvalError::Continue) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// `repeat 'word count block` — binds `word` to 1..=count, evaluates `block`
+/// each iteration. Accepts both lit-word (`'i`) and bare-word (`i`) forms.
+fn repeat(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(EvalError::Arity {
+            native: Symbol::new("repeat"),
+            expected: 3,
+            got: args.len(),
+            span: Span::new(0, 0),
+        });
+    }
+    let sym = match &args[0] {
+        Value::LitWord(s) => s.clone(),
+        Value::Word { sym, .. } => sym.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "word!",
+                found: type_name(other),
+                span: Span::new(0, 0),
+            })
+        }
+    };
+    let count = match &args[1] {
+        Value::Integer(n) => *n,
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "integer!",
+                found: type_name(other),
+                span: Span::new(0, 0),
+            })
+        }
+    };
+    let body = expect_block(args, 2, "repeat")?;
+    let idx = env
+        .user_ctx
+        .index_of(&sym)
+        .ok_or_else(|| EvalError::UnboundWord {
+            sym: sym.clone(),
+            span: Span::new(0, 0),
+        })?;
+    for n in 1..=count {
+        env.user_ctx.set_slot(idx, Value::Integer(n));
+        match eval(&body, env) {
+            Ok(_) => {}
+            Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
+            Err(EvalError::Continue) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(Value::None)
+}
+
+/// `until block` — evaluates `block` repeatedly until its last value is
+/// truthy. Returns `true`.
+fn until(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    let body = expect_block(args, 0, "until")?;
+    loop {
+        match eval(&body, env) {
+            Ok(v) => {
+                if truthy(&v) {
+                    return Ok(Value::Logic(true));
+                }
+            }
+            Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
+            Err(EvalError::Continue) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// `while cond-block body-block` — evaluates `cond-block`; if truthy,
+/// evaluates `body-block` and repeats. Returns `none`.
+fn while_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Arity {
+            native: Symbol::new("while"),
+            expected: 2,
+            got: args.len(),
+            span: Span::new(0, 0),
+        });
+    }
+    let cond = expect_block(args, 0, "while")?;
+    let body = expect_block(args, 1, "while")?;
+    loop {
+        let c = eval(&cond, env)?;
+        if !truthy(&c) {
+            return Ok(Value::None);
+        }
+        match eval(&body, env) {
+            Ok(_) => {}
+            Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
+            Err(EvalError::Continue) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Control flow: break, continue
+// ---------------------------------------------------------------------------
+
+/// `break` — unwinds out of the enclosing loop via `EvalError::Break`.
+fn break_native(_args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    Err(EvalError::Break(None))
+}
+
+/// `continue` — skips to the next iteration of the enclosing loop via
+/// `EvalError::Continue`.
+fn continue_native(_args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    Err(EvalError::Continue)
+}
+
+// ---------------------------------------------------------------------------
+// Eval: do, reduce
+// ---------------------------------------------------------------------------
+
+/// `do block` — evaluates a block, returning the last value.
+fn do_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    let body = expect_block(args, 0, "do")?;
+    eval(&body, env)
+}
+
+/// `reduce block` — evaluates each expression in the block, returning a new
+/// block of the results.
+fn reduce(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    let body = expect_block(args, 0, "reduce")?;
+    let series = match &body {
+        Value::Block { series, .. } | Value::Paren { series, .. } => series.clone(),
+        _ => return Ok(Value::None),
+    };
+    let data = series.data.borrow();
+    let mut results = Vec::new();
+    let mut i = series.index;
+    while i < data.len() {
+        results.push(eval_expression(&data, &mut i, env)?);
+    }
+    drop(data);
+    Ok(Value::block(Series::new(results)))
+}
+
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
 fn fixed_native(f: NativeFn, arity: usize) -> Rc<FuncDef> {
     let params: Vec<Symbol> = (0..arity)
         .map(|i| Symbol::new(&format!("__arg{i}")))
@@ -59,21 +516,107 @@ fn fixed_native(f: NativeFn, arity: usize) -> Rc<FuncDef> {
         params,
         native: Some(f),
         variadic: false,
+        infix: false,
         ..Default::default()
     })
 }
 
-/// Register the M6 native words into `env.natives`. Each takes exactly one
-/// argument (Red's real arity for `print`/`prin`/`probe`). Constants
-/// (`none`/`true`/`false`/`newline`) are installed separately into the user
-/// context via [`install_constants`] before the binding pass runs.
+fn infix_native(f: NativeFn, arity: usize) -> Rc<FuncDef> {
+    let params: Vec<Symbol> = (0..arity)
+        .map(|i| Symbol::new(&format!("__arg{i}")))
+        .collect();
+    Rc::new(FuncDef {
+        params,
+        native: Some(f),
+        variadic: false,
+        infix: true,
+        ..Default::default()
+    })
+}
+
+/// Register all native words (M6 I/O + M7 arithmetic/comparison/logic/
+/// control-flow/loops/eval) into `env.natives`.
 pub fn register_natives(env: &mut Env) {
+    // I/O (M6)
     env.natives
         .insert(Symbol::new("print"), fixed_native(print as NativeFn, 1));
     env.natives
         .insert(Symbol::new("prin"), fixed_native(prin as NativeFn, 1));
     env.natives
         .insert(Symbol::new("probe"), fixed_native(probe as NativeFn, 1));
+
+    // Arithmetic (M7, infix)
+    env.natives
+        .insert(Symbol::new("+"), infix_native(add as NativeFn, 2));
+    env.natives
+        .insert(Symbol::new("-"), infix_native(subtract as NativeFn, 2));
+    env.natives
+        .insert(Symbol::new("*"), infix_native(multiply as NativeFn, 2));
+    env.natives
+        .insert(Symbol::new("/"), infix_native(divide as NativeFn, 2));
+
+    // Comparison (M7, infix)
+    env.natives
+        .insert(Symbol::new("="), infix_native(equal as NativeFn, 2));
+    env.natives
+        .insert(Symbol::new("<>"), infix_native(not_equal as NativeFn, 2));
+    env.natives
+        .insert(Symbol::new("<"), infix_native(less_than as NativeFn, 2));
+    env.natives
+        .insert(Symbol::new(">"), infix_native(greater_than as NativeFn, 2));
+    env.natives
+        .insert(Symbol::new("<="), infix_native(less_equal as NativeFn, 2));
+    env.natives.insert(
+        Symbol::new(">="),
+        infix_native(greater_equal as NativeFn, 2),
+    );
+
+    // Logic (M7)
+    env.natives
+        .insert(Symbol::new("and"), infix_native(and_op as NativeFn, 2));
+    env.natives
+        .insert(Symbol::new("or"), infix_native(or_op as NativeFn, 2));
+    env.natives
+        .insert(Symbol::new("not"), fixed_native(not_op as NativeFn, 1));
+
+    // Conditionals (M7)
+    env.natives
+        .insert(Symbol::new("if"), fixed_native(if_native as NativeFn, 2));
+    env.natives
+        .insert(Symbol::new("either"), fixed_native(either as NativeFn, 3));
+
+    // Loops (M7)
+    env.natives.insert(
+        Symbol::new("loop"),
+        fixed_native(loop_native as NativeFn, 1),
+    );
+    env.natives
+        .insert(Symbol::new("repeat"), fixed_native(repeat as NativeFn, 3));
+    env.natives
+        .insert(Symbol::new("until"), fixed_native(until as NativeFn, 1));
+    env.natives.insert(
+        Symbol::new("while"),
+        fixed_native(while_native as NativeFn, 2),
+    );
+
+    // Control flow (M7)
+    env.natives.insert(
+        Symbol::new("break"),
+        fixed_native(break_native as NativeFn, 0),
+    );
+    env.natives.insert(
+        Symbol::new("continue"),
+        fixed_native(continue_native as NativeFn, 0),
+    );
+
+    // Eval (M7)
+    env.natives
+        .insert(Symbol::new("do"), fixed_native(do_native as NativeFn, 1));
+    env.natives
+        .insert(Symbol::new("reduce"), fixed_native(reduce as NativeFn, 1));
+
+    // Series (M8)
+    crate::series::register_series_natives(env);
 }
 
 /// Install the predefined constant words (`none`, `true`, `false`, `newline`)
@@ -111,7 +654,11 @@ mod tests {
 
     /// Run `src` with a fresh env (constants + natives) and capture stdout.
     fn run_capture(src: &str) -> Result<Vec<u8>, String> {
-        use crate::interp::{bind_pass, eval};
+        run_capture_val(src).map(|(_, out)| out)
+    }
+
+    fn run_capture_val(src: &str) -> Result<(Value, Vec<u8>), String> {
+        use crate::interp::bind_pass;
         let body = load_source(src).map_err(|e| e.to_string())?;
         let mut ctx = Context::new();
         install_constants(&mut ctx);
@@ -120,14 +667,20 @@ mod tests {
         let mut env = Env::new_with_output(ctx_rc, Box::new(BufferWriter(Rc::clone(&buf))));
         register_natives(&mut env);
         let block = Value::block(body);
-        let _ = eval(&block, &mut env).map_err(|e| e.to_string())?;
+        let val = eval(&block, &mut env).map_err(|e| e.to_string())?;
         let out = buf.borrow().clone();
-        Ok(out)
+        Ok((val, out))
     }
 
     fn s(b: &[u8]) -> String {
         String::from_utf8_lossy(b).into_owned()
     }
+
+    fn val(src: &str) -> Value {
+        run_capture_val(src).unwrap().0
+    }
+
+    // --- M6 I/O tests (preserved) ---
 
     #[test]
     fn print_integer() {
@@ -164,24 +717,214 @@ mod tests {
 
     #[test]
     fn print_returns_none() {
-        // `print` always returns none; the surrounding block's last value
-        // after `print 5` is none.
-        let (val, _) = run_capture_val("print 5").unwrap();
-        assert_eq!(mold_to_string(&val), "none");
+        let (v, _) = run_capture_val("print 5").unwrap();
+        assert_eq!(mold_to_string(&v), "none");
     }
 
-    fn run_capture_val(src: &str) -> Result<(Value, Vec<u8>), String> {
-        use crate::interp::{bind_pass, eval};
-        let body = load_source(src).map_err(|e| e.to_string())?;
-        let mut ctx = Context::new();
-        install_constants(&mut ctx);
-        let ctx_rc = bind_pass(&body, ctx);
-        let buf = Rc::new(RefCell::new(Vec::<u8>::new()));
-        let mut env = Env::new_with_output(ctx_rc, Box::new(BufferWriter(Rc::clone(&buf))));
-        register_natives(&mut env);
-        let block = Value::block(body);
-        let val = eval(&block, &mut env).map_err(|e| e.to_string())?;
-        let out = buf.borrow().clone();
-        Ok((val, out))
+    // --- M7 arithmetic ---
+
+    #[test]
+    fn add_integers() {
+        assert_eq!(mold_to_string(&val("1 + 2")), "3");
+    }
+
+    #[test]
+    fn subtract_integers() {
+        assert_eq!(mold_to_string(&val("10 - 4")), "6");
+    }
+
+    #[test]
+    fn multiply_integers() {
+        assert_eq!(mold_to_string(&val("3 * 4")), "12");
+    }
+
+    #[test]
+    fn divide_integers() {
+        assert_eq!(mold_to_string(&val("10 / 3")), "3");
+    }
+
+    #[test]
+    fn division_by_zero_errors() {
+        let err = run_capture("10 / 0").unwrap_err();
+        assert!(err.contains("division by zero"));
+    }
+
+    #[test]
+    fn mixed_int_float_promotes_to_float() {
+        assert_eq!(mold_to_string(&val("1 + 2.0")), "3.0");
+    }
+
+    #[test]
+    fn left_to_right_no_precedence() {
+        // `1 + 2 * 3` = `(1 + 2) * 3` = 9
+        assert_eq!(mold_to_string(&val("1 + 2 * 3")), "9");
+    }
+
+    // --- M7 comparison ---
+
+    #[test]
+    fn equal_returns_logic() {
+        assert_eq!(mold_to_string(&val("3 = 3")), "true");
+        assert_eq!(mold_to_string(&val("3 = 4")), "false");
+    }
+
+    #[test]
+    fn not_equal_returns_logic() {
+        assert_eq!(mold_to_string(&val("3 <> 4")), "true");
+    }
+
+    #[test]
+    fn less_than() {
+        assert_eq!(mold_to_string(&val("1 < 2")), "true");
+        assert_eq!(mold_to_string(&val("2 < 1")), "false");
+    }
+
+    #[test]
+    fn greater_than() {
+        assert_eq!(mold_to_string(&val("2 > 1")), "true");
+    }
+
+    #[test]
+    fn less_equal() {
+        assert_eq!(mold_to_string(&val("2 <= 2")), "true");
+    }
+
+    #[test]
+    fn greater_equal() {
+        assert_eq!(mold_to_string(&val("3 >= 2")), "true");
+    }
+
+    #[test]
+    fn one_plus_two_equals_three() {
+        // The milestone test: `1 + 2 = 3` evaluates left-to-right to `true`.
+        assert_eq!(mold_to_string(&val("1 + 2 = 3")), "true");
+    }
+
+    // --- M7 logic ---
+
+    #[test]
+    fn and_or_not() {
+        assert_eq!(mold_to_string(&val("true and false")), "false");
+        assert_eq!(mold_to_string(&val("true or false")), "true");
+        assert_eq!(mold_to_string(&val("not true")), "false");
+        assert_eq!(mold_to_string(&val("not false")), "true");
+    }
+
+    #[test]
+    fn none_is_falsy() {
+        assert_eq!(mold_to_string(&val("not none")), "true");
+    }
+
+    // --- M7 conditionals ---
+
+    #[test]
+    fn if_true_evaluates_block() {
+        assert_eq!(mold_to_string(&val("if true [42]")), "42");
+    }
+
+    #[test]
+    fn if_false_returns_none() {
+        assert_eq!(mold_to_string(&val("if false [42]")), "none");
+    }
+
+    #[test]
+    fn either_true_branch() {
+        assert_eq!(mold_to_string(&val("either 1 > 0 [\"y\"][\"n\"]")), "\"y\"");
+    }
+
+    #[test]
+    fn either_false_branch() {
+        assert_eq!(mold_to_string(&val("either 1 < 0 [\"y\"][\"n\"]")), "\"n\"");
+    }
+
+    // --- M7 loops ---
+
+    #[test]
+    fn repeat_prints_counter() {
+        let out = run_capture("repeat i 3 [print i]").unwrap();
+        assert_eq!(s(&out), "1\n2\n3\n");
+    }
+
+    #[test]
+    fn repeat_litword_form() {
+        let out = run_capture("repeat 'i 3 [print i]").unwrap();
+        assert_eq!(s(&out), "1\n2\n3\n");
+    }
+
+    #[test]
+    fn until_terminates() {
+        // `i: 0 until [i: i + 1 i > 3]` → true, i == 4
+        let v = val("i: 0 until [i: i + 1 i > 3]");
+        assert_eq!(mold_to_string(&v), "true");
+        // Verify i ended at 4.
+        assert_eq!(mold_to_string(&val("i: 0 until [i: i + 1 i > 3] i")), "4");
+    }
+
+    #[test]
+    fn while_terminates() {
+        // `a: 0 while [a < 3][a: a + 1]` → terminates; a == 3
+        let v = val("a: 0 while [a < 3][a: a + 1]");
+        assert_eq!(mold_to_string(&v), "none");
+        assert_eq!(mold_to_string(&val("a: 0 while [a < 3][a: a + 1] a")), "3");
+    }
+
+    #[test]
+    fn loop_with_break() {
+        // `i: 0 loop [i: i + 1 if i > 3 [break]] i` → i == 4
+        let v = val("i: 0 loop [i: i + 1 if i > 3 [break]] i");
+        assert_eq!(mold_to_string(&v), "4");
+    }
+
+    #[test]
+    fn loop_break_returns_none() {
+        assert_eq!(mold_to_string(&val("loop [break]")), "none");
+    }
+
+    #[test]
+    fn continue_skips_rest() {
+        // Sum 1..5 skipping 3: i: 0 sum: 0 repeat 5 [if i = 2 [continue] sum: sum + i] sum
+        // Actually with continue, the `sum: sum + i` after `continue` won't run.
+        // i goes 1..5. When i=2, continue skips the rest. sum = 0+1+3+4+5 = 13.
+        // Wait, i=2 is skipped but the repeat counter is the loop var...
+        // Let me use a clearer test: repeat 5 [if i = 3 [continue] print i]
+        // → prints 1, 2, 4, 5 (skips 3)
+        let out = run_capture("repeat i 5 [if i = 3 [continue] print i]").unwrap();
+        assert_eq!(s(&out), "1\n2\n4\n5\n");
+    }
+
+    // --- M7 eval ---
+
+    #[test]
+    fn do_evaluates_block() {
+        assert_eq!(mold_to_string(&val("do [1 + 2]")), "3");
+    }
+
+    #[test]
+    fn reduce_collects_results() {
+        assert_eq!(mold_to_string(&val("reduce [1 + 1 2 + 2]")), "[2 4]");
+    }
+
+    #[test]
+    fn reduce_empty_block() {
+        assert_eq!(mold_to_string(&val("reduce []")), "[]");
+    }
+
+    // --- M7 truthiness edge cases ---
+
+    #[test]
+    fn if_with_integer_condition() {
+        // Non-false, non-none values are truthy.
+        assert_eq!(mold_to_string(&val("if 5 [42]")), "42");
+    }
+
+    #[test]
+    fn if_with_zero_is_truthy() {
+        // In Red, 0 is truthy (only false and none are falsy).
+        assert_eq!(mold_to_string(&val("if 0 [42]")), "42");
+    }
+
+    #[test]
+    fn if_with_none_is_falsy() {
+        assert_eq!(mold_to_string(&val("if none [42]")), "none");
     }
 }

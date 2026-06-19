@@ -59,9 +59,10 @@ pub struct CallFrame {
 }
 
 /// Evaluation failure. Every variant that originates from a value carries a
-/// `Span` so the CLI can later render `file:line:col:`. `Return` is a
-/// control-flow unwind caught by the function-call shim (M9), not a user
-/// error.
+/// `Span` so the CLI can later render `file:line:col:`. `Return`, `Break`,
+/// and `Continue` are control-flow unwinds caught by their respective
+/// shims (function-call shim for `Return`, loop natives for `Break`/
+/// `Continue`), not user errors.
 #[derive(Debug)]
 pub enum EvalError {
     /// Word has no binding and no native of that name exists.
@@ -81,6 +82,13 @@ pub enum EvalError {
     },
     /// `return` unwind — caught by the function-call shim (M9).
     Return(Value),
+    /// `break` unwind — caught by the enclosing loop native. Carries an
+    /// optional break-value (Red's `break/return`); the loop native decides
+    /// whether to use it or discard it.
+    Break(Option<Value>),
+    /// `continue` unwind — caught by the enclosing loop native; advances to
+    /// the next iteration.
+    Continue,
     /// Generic native-reported error with a message.
     Native { message: String, span: Span },
 }
@@ -107,6 +115,8 @@ impl fmt::Display for EvalError {
                 got
             ),
             EvalError::Return(_) => write!(f, "*** Error: return used outside a function"),
+            EvalError::Break(_) => write!(f, "*** Error: break used outside a loop"),
+            EvalError::Continue => write!(f, "*** Error: continue used outside a loop"),
             EvalError::Native { message, .. } => write!(f, "*** Error: {message}"),
         }
     }
