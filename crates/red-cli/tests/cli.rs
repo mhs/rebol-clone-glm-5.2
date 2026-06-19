@@ -64,6 +64,40 @@ fn missing_file_errors() {
         .stderr(predicates::str::contains("*** Error:"));
 }
 
+#[test]
+fn repl_reads_from_stdin() {
+    // No args → REPL. Piped stdin (non-tty) is read line-by-line; each
+    // line's molded result goes to stdout. `quit` ends the session.
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.write_stdin("5\nquit\n")
+        .assert()
+        .success()
+        .stdout("5\n");
+}
+
+#[test]
+fn repl_persists_state_via_stdin() {
+    // State set on one line is visible on the next: `x: 10` molds to 10
+    // (the assigned value), then `x` reads the persisted slot → 10.
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.write_stdin("x: 10\nx\nquit\n")
+        .assert()
+        .success()
+        .stdout("10\n10\n");
+}
+
+#[test]
+fn repl_multiline_block_via_stdin() {
+    // Unclosed `[` on line 1 → continuation; line 2 closes it; line 3
+    // reads the bound word. Both the assignment and the lookup mold to
+    // `[1 2]`.
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.write_stdin("x: [\n1 2\n]\nx\nquit\n")
+        .assert()
+        .success()
+        .stdout("[1 2]\n[1 2]\n");
+}
+
 /// A scratch directory for test fixtures. Reuses `std::env::temp_dir()`; each
 /// test picks a unique name to avoid collisions.
 fn tempfile_dir() -> PathBuf {

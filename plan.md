@@ -295,20 +295,20 @@ on the one above unless noted.
 
 ## Milestone 11 — REPL
 
-- [ ] Add `rustyline` to `red-cli` deps
-- [ ] Implement REPL loop: prompt → read line → `load_source` → `eval` → `mold` → print
-- [ ] Persist `Env` across lines (user context + natives carry over)
-- [ ] Handle multi-line blocks: if parse reports unclosed `[`/`(`, prompt for continuation
-- [ ] Handle empty input (just prompt again)
-- [ ] Print errors as `*** Error: <msg>` but don't exit REPL
-- [ ] Bind Ctrl-C / Ctrl-D to clean exit
-- [ ] Add `--repl` flag explicitly (or no-args = REPL)
-- [ ] Support `quit`/`exit` words as aliases for Ctrl-D
-- [ ] Mold result of each line unless it's `none` (matches Red REPL behavior)
-- [ ] Inline `#[test]` (or integration test) feeding "5\n" → captures "5\n"
-- [ ] Inline `#[test]` feeding `x: 10\n x\n` → captures `10`
-- [ ] CLI test: `assert_cmd` spawning REPL with piped stdin
-- [ ] `cargo test --workspace` passes
+- [x] Add `rustyline` to `red-cli` deps
+- [x] Implement REPL loop: prompt → read line → `load_source` → `eval` → `mold` → print
+- [x] Persist `Env` across lines (user context + natives carry over)
+- [x] Handle multi-line blocks: if parse reports unclosed `[`/`(`, prompt for continuation
+- [x] Handle empty input (just prompt again)
+- [x] Print errors as `*** Error: <msg>` but don't exit REPL
+- [x] Bind Ctrl-C / Ctrl-D to clean exit
+- [x] Add `--repl` flag explicitly (or no-args = REPL)
+- [x] Support `quit`/`exit` words as aliases for Ctrl-D
+- [x] Mold result of each line unless it's `none` (matches Red REPL behavior)
+- [x] Inline `#[test]` (or integration test) feeding "5\n" → captures "5\n"
+- [x] Inline `#[test]` feeding `x: 10\n x\n` → captures `10`
+- [x] CLI test: `assert_cmd` spawning REPL with piped stdin
+- [x] `cargo test --workspace` passes
 
 ## Milestone 12 — Golden suite + error polish
 

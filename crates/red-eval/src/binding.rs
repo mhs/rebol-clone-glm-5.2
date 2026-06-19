@@ -45,13 +45,22 @@ use red_core::value::{Binding, FuncDef, Series, Symbol, Value};
 /// installs it into `Env.user_ctx` so eval-time writes flow through the same
 /// slots.
 pub fn bind_pass(body: &Series, user_ctx: Context) -> Rc<Context> {
-    let mut ctx = user_ctx;
-    collect_setwords(body, &mut ctx);
-    collect_loop_vars(body, &mut ctx);
-    collect_parse_words(body, &mut ctx);
-    let ctx_rc = Rc::new(ctx);
-    attach_local_bindings(body, &ctx_rc);
+    let ctx_rc = Rc::new(user_ctx);
+    bind_pass_into(body, &ctx_rc);
     ctx_rc
+}
+
+/// Like `bind_pass` but grows an *existing* shared context in place instead
+/// of consuming an owned one. Used by the REPL to bind each new line's
+/// SetWords/loop-vars/parse-captures against the live `Env.user_ctx` so
+/// state persists across lines and functions defined earlier still see
+/// later mutations to globals (the binding's `Rc<Context>` is the same
+/// pointer the prior line's bindings already reference).
+pub fn bind_pass_into(body: &Series, user_ctx: &Rc<Context>) {
+    collect_setwords(body, user_ctx);
+    collect_loop_vars(body, user_ctx);
+    collect_parse_words(body, user_ctx);
+    attach_local_bindings(body, user_ctx);
 }
 
 /// True if `data[i]` begins a `use [words] body` form (an unbound `use` word
@@ -78,7 +87,7 @@ fn use_body_index(data: &[Value], i: usize) -> Option<usize> {
 /// in the tree — *except* inside `use` bodies, whose locals are scoped to the
 /// child context built at runtime by `use_native`. The slots are populated
 /// during eval, not here.
-pub(crate) fn collect_setwords(series: &Series, ctx: &mut Context) {
+pub(crate) fn collect_setwords(series: &Series, ctx: &Context) {
     let data = series.data.borrow();
     let n = data.len();
     let mut i = 0;
@@ -115,7 +124,7 @@ pub(crate) fn collect_setwords(series: &Series, ctx: &mut Context) {
 /// pass the loop name would never get a slot and body references would
 /// resolve as unbound. Recurses into nested `Block`/`Paren`, skipping `use`
 /// bodies (loop vars inside a use are use-locals).
-pub(crate) fn collect_loop_vars(series: &Series, ctx: &mut Context) {
+pub(crate) fn collect_loop_vars(series: &Series, ctx: &Context) {
     let data = series.data.borrow();
     let n = data.len();
     let mut i = 0;
@@ -161,7 +170,7 @@ pub(crate) fn collect_loop_vars(series: &Series, ctx: &mut Context) {
 /// (`[...]` groups inside the rules) are recursed into; `(...)` side-effects
 /// are *not* (they are Red code, not parse rules). `use` bodies are skipped
 /// (matches `collect_loop_vars`/`collect_setwords` scoping).
-pub(crate) fn collect_parse_words(series: &Series, ctx: &mut Context) {
+pub(crate) fn collect_parse_words(series: &Series, ctx: &Context) {
     let data = series.data.borrow();
     let n = data.len();
     let mut i = 0;
@@ -203,7 +212,7 @@ pub(crate) fn collect_parse_words(series: &Series, ctx: &mut Context) {
 /// Inner walker for `collect_parse_words`: scans a parse rules block and
 /// allocates a slot for each `copy`/`set` operand. Recurses into `[...]`
 /// sub-rule groups but not into `(...)` Red side-effects.
-fn collect_parse_capture_words(series: &Series, ctx: &mut Context) {
+fn collect_parse_capture_words(series: &Series, ctx: &Context) {
     let data = series.data.borrow();
     let n = data.len();
     let mut i = 0;
@@ -280,8 +289,8 @@ pub fn bind_function_body(fd: &mut FuncDef, user_ctx: &Rc<Context>) {
         fd.ctx.slot_index(p.clone());
     }
     // 2. Body-local SetWords + loop vars become function-local slots.
-    collect_setwords(&fd.body, &mut fd.ctx);
-    collect_loop_vars(&fd.body, &mut fd.ctx);
+    collect_setwords(&fd.body, &fd.ctx);
+    collect_loop_vars(&fd.body, &fd.ctx);
     // 3. Attach bindings: function-local first, then outer user-ctx refs.
     attach_func_bindings(&fd.body, &fd.ctx, user_ctx);
 }

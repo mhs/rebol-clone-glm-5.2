@@ -57,8 +57,9 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
         let start = i;
         let c = bytes[i];
 
-        // Whitespace: space, tab, CR, LF.
-        if c == b' ' || c == b'\t' || c == b'\r' || c == b'\n' {
+        // Whitespace: space, tab, CR, LF. In Red, `,` is also whitespace
+        // (so `1,2,3` reads as three values, like `1 2 3`).
+        if c == b' ' || c == b'\t' || c == b'\r' || c == b'\n' || c == b',' {
             i += 1;
             continue;
         }
@@ -341,11 +342,12 @@ fn scan_word(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError> {
     Ok((end, kind))
 }
 
-/// Delimiter set per architecture.md: whitespace, `[](){};",`.
+/// Delimiter set per architecture.md: whitespace, `[](){};"`. (`,` is
+/// whitespace, not a delimiter — handled in the main scan loop.)
 fn is_delimiter(c: u8) -> bool {
     matches!(
         c,
-        b' ' | b'\t' | b'\r' | b'\n' | b'[' | b']' | b'(' | b')' | b'{' | b'}' | b';' | b'"' | b','
+        b' ' | b'\t' | b'\r' | b'\n' | b'[' | b']' | b'(' | b')' | b'{' | b'}' | b';' | b'"'
     )
 }
 

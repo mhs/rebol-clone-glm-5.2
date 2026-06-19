@@ -808,7 +808,7 @@ fn use_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     // Build a fresh child context seeded from the current user ctx (so outer
     // words are visible), then allocate the listed locals (overriding any
     // inherited slots so writes go to the child, not the user ctx).
-    let mut child = (*env.user_ctx).clone();
+    let child = (*env.user_ctx).clone();
     for sym in &local_names {
         child.slot_index(sym.clone());
     }
@@ -819,8 +819,8 @@ fn use_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
         Value::Block { series, .. } => series.clone(),
         _ => unreachable!(),
     };
-    crate::binding::collect_setwords(&body_series, &mut child);
-    crate::binding::collect_loop_vars(&body_series, &mut child);
+    crate::binding::collect_setwords(&body_series, &child);
+    crate::binding::collect_loop_vars(&body_series, &child);
 
     let child_rc = Rc::new(child);
     // Deep-copy the body so rebinding doesn't mutate the shared source tree,
@@ -882,7 +882,7 @@ fn bind_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
         _ => unreachable!(),
     };
     let rebound = crate::binding::deep_clone_series(&series);
-    let all_names: Vec<Symbol> = env.user_ctx.names.keys().cloned().collect();
+    let all_names: Vec<Symbol> = env.user_ctx.names.borrow().keys().cloned().collect();
     crate::binding::rebind_to_context(&rebound, &env.user_ctx, &all_names);
     Ok(Value::Block {
         series: rebound,
@@ -1064,7 +1064,7 @@ pub fn register_natives(env: &mut Env) {
 /// Install the predefined constant words (`none`, `true`, `false`, `newline`)
 /// into a user context. Must be called before `bind_pass` so references to
 /// these words get `Local` bindings to the constant slots.
-pub fn install_constants(ctx: &mut Context) {
+pub fn install_constants(ctx: &Context) {
     ctx.set(Symbol::new("none"), Value::None);
     ctx.set(Symbol::new("true"), Value::Logic(true));
     ctx.set(Symbol::new("false"), Value::Logic(false));

@@ -1,8 +1,12 @@
 //! `red` — CLI entry point for the POC Red clone.
 //!
-//! Milestone 6 scope: run a single `.red` file via `run_source`. `--help`/
-//! `--version` print and exit. No-args / REPL is M11. Errors render via the
-//! `Error` `Display` (which already prefixes `*** Error:`) and exit 1.
+//! `red <file.red>` loads and evaluates a single source file. `red` (no
+//! args) drops into an interactive REPL (Milestone 11) using `rustyline`;
+//! state persists across lines and `quit`/`exit` or Ctrl-D exits.
+//! `--help`/`--version` print and exit. Errors render via the `Error`
+//! `Display` (which already prefixes `*** Error:`) and, in file mode, exit 1.
+
+mod repl;
 
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -14,26 +18,26 @@ red — a POC Red clone
 
 USAGE:
     red <file.red>      Load and evaluate a Red source file
+    red                 Interactive REPL (quit with `quit`/`exit` or Ctrl-D)
     red --help          Show this help message
     red --version       Print version
 
-The interpreter reads the file, evaluates it, and exits. Script output
-(native `print`/`prin`/`probe`) goes to stdout; the final value is not
-printed by the CLI (use `print` in the script). Errors print to stderr
-as `*** Error: <msg>` and exit with code 1.
+In file mode the interpreter reads the file, evaluates it, and exits.
+Script output (native `print`/`prin`/`probe`) goes to stdout; the final
+value is not printed by the CLI (use `print` in the script). Errors print
+to stderr as `*** Error: <msg>` and exit with code 1.
 
-REPL mode is not implemented in this milestone.
+In REPL mode each line is evaluated against the persistent user context;
+the molded result of each line is printed unless it is `none`. Multi-line
+blocks are supported: an unclosed `[` or `(` prompts for continuation
+lines. Ctrl-C abandons the current input; Ctrl-D exits.
 ";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     match args.as_slice() {
-        [] => {
-            // No-args: print usage to stderr, exit 1 (REPL is M11).
-            let _ = io::stderr().write_all(HELP.as_bytes());
-            ExitCode::from(1)
-        }
+        [] => repl::run_repl(),
         [flag] if flag == "--help" || flag == "-h" => {
             let _ = io::stdout().write_all(HELP.as_bytes());
             ExitCode::SUCCESS

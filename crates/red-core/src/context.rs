@@ -1,9 +1,12 @@
 //! Context: an ordered `Symbol → slot index` map plus a `Vec` of slots.
 //!
-//! The `names` map is populated during the binding pass (or via `set` at
-//! runtime) and frozen once shared via `Rc<Context>`. Slot *contents* remain
-//! mutable through their `RefCell` wrappers, so writes during eval flow
-//! through `set_slot`/`slot_value` on a shared `&Rc<Context>`.
+//! Both `names` and `slots` live behind `RefCell` so that a context shared
+//! via `Rc<Context>` can still grow — new `SetWord`s encountered after the
+//! initial binding pass (e.g. subsequent lines typed into the REPL) can
+//! allocate fresh slots without rebuilding the context. Slot *contents*
+//! remain independently mutable through their inner `RefCell<Value>`, so
+//! eval-time writes flow through `set_slot`/`slot_value` on a shared
+//! `&Rc<Context>`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -13,10 +16,14 @@ use crate::value::{Symbol, Value};
 /// A word context: ordered name → slot map plus a slot vector. Self-referential
 /// in general (a slot can hold a `Value` that references the same context),
 /// which is fine because slots are behind `RefCell`.
+///
+/// Both fields use interior mutability so the context can keep growing after
+/// being shared as `Rc<Context>` — this is what lets the REPL bind new
+/// top-level words against the live user context across lines.
 #[derive(Clone, Debug, Default)]
 pub struct Context {
-    pub names: HashMap<Symbol, usize>,
-    pub slots: Vec<RefCell<Value>>,
+    pub names: RefCell<HashMap<Symbol, usize>>,
+    pub slots: RefCell<Vec<RefCell<Value>>>,
 }
 
 impl Context {
@@ -25,59 +32,53 @@ impl Context {
         Self::default()
     }
 
-    /// Allocate (or reuse) a slot for `sym` and return its index. Mutates
-    /// `names`/`slots`; only callable while you own `&mut Context` (i.e.
-    /// before wrapping in `Rc` for sharing).
-    pub fn slot_index(&mut self, sym: Symbol) -> usize {
-        if let Some(&idx) = self.names.get(&sym) {
+    /// Allocate (or reuse) a slot for `sym` and return its index. Safe to
+    /// call on a shared `&Rc<Context>` — grows `names`/`slots` via their
+    /// `RefCell`s. Used both by the binding pass and at runtime (e.g. the
+    /// REPL binding a new line's SetWords against the live user context).
+    pub fn slot_index(&self, sym: Symbol) -> usize {
+        if let Some(&idx) = self.names.borrow().get(&sym) {
             return idx;
         }
-        let idx = self.slots.len();
-        self.slots.push(RefCell::new(Value::None));
-        self.names.insert(sym, idx);
+        let idx = self.slots.borrow().len();
+        self.slots.borrow_mut().push(RefCell::new(Value::None));
+        self.names.borrow_mut().insert(sym, idx);
         idx
     }
 
     /// True if `sym` has a slot in this context.
     pub fn has(&self, sym: &Symbol) -> bool {
-        self.names.contains_key(sym)
+        self.names.borrow().contains_key(sym)
     }
 
     /// Slot index for `sym` if present.
     pub fn index_of(&self, sym: &Symbol) -> Option<usize> {
-        self.names.get(sym).copied()
+        self.names.borrow().get(sym).copied()
     }
 
     /// Look up `sym` and clone its slot value. `None` if the name is unknown.
     pub fn get(&self, sym: &Symbol) -> Option<Value> {
-        let idx = *self.names.get(sym)?;
-        Some(self.slots[idx].borrow().clone())
+        let idx = *self.names.borrow().get(sym)?;
+        Some(self.slots.borrow()[idx].borrow().clone())
     }
 
-    /// Allocate (or reuse) a slot for `sym` and return a mutable reference
-    /// to its `RefCell`. Mutates `names`/`slots`; only callable while you
-    /// own `&mut Context` (i.e. before wrapping in `Rc` for sharing).
-    pub fn slot_mut(&mut self, sym: Symbol) -> &mut RefCell<Value> {
+    /// Allocate (if needed) and write `val` into `sym`'s slot. Safe to call
+    /// on a shared `&Rc<Context>` — only slot contents change, never the
+    /// name map (unless `sym` is new, in which case a slot is appended).
+    pub fn set(&self, sym: Symbol, val: Value) {
         let idx = self.slot_index(sym);
-        &mut self.slots[idx]
-    }
-
-    /// Allocate (if needed) and write `val` into `sym`'s slot. Mutates
-    /// `names`/`slots`; only callable with `&mut self` (pre-`Rc` sharing).
-    pub fn set(&mut self, sym: Symbol, val: Value) {
-        let idx = self.slot_index(sym);
-        self.slots[idx] = RefCell::new(val);
+        *self.slots.borrow()[idx].borrow_mut() = val;
     }
 
     /// Read a slot by index (clones the value). Used by `Binding::Local`
     /// resolution during eval.
     pub fn slot_value(&self, idx: usize) -> Value {
-        self.slots[idx].borrow().clone()
+        self.slots.borrow()[idx].borrow().clone()
     }
 
     /// Write a slot by index via `RefCell`. Safe to call on a shared
     /// `&Rc<Context>` — only slot contents change, never the name map.
     pub fn set_slot(&self, idx: usize, val: Value) {
-        *self.slots[idx].borrow_mut() = val;
+        *self.slots.borrow()[idx].borrow_mut() = val;
     }
 }
