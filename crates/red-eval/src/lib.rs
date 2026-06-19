@@ -7,6 +7,7 @@
 
 pub mod binding;
 pub mod context;
+pub mod convert;
 pub mod interp;
 pub mod natives;
 pub mod parse;
@@ -21,5 +22,6 @@ pub use series::register_series_natives;
 // Re-exports from red-core used by the CLI (REPL): parsing the next line,
 // molding the result, and matching on parse errors for multi-line input.
 pub use red_core::{
-    load_source, mold, mold_to_string, render_error, Error, ParseError, Series, Span, Symbol, Value,
+    form, form_to_string, load_source, mold, mold_to_string, render_error, Error, ParseError,
+    Series, Span, Symbol, Value,
 };

@@ -86,6 +86,68 @@ pub fn mold_to_string(value: &Value) -> String {
     out
 }
 
+/// `form`: human-readable rendering, distinct from `mold` (which is
+/// reparseable). Differences from `mold`:
+/// - `String` renders its raw contents (no surrounding quotes, no escapes).
+/// - Word-family values render their bare name (no `:`/`'`/`/` prefix/suffix).
+/// - `Block`/`Paren` render their elements space-joined from the cursor to
+///   the tail, with no surrounding `[]`/`()` delimiters.
+/// - `Path` renders parts (each `form`ed) slash-joined.
+///
+/// All other variants render the same as `mold` (integers, floats, logic,
+/// none, func placeholder, binary hex).
+pub fn form(value: &Value, out: &mut String) {
+    match value {
+        Value::None => out.push_str("none"),
+        Value::Logic(true) => out.push_str("true"),
+        Value::Logic(false) => out.push_str("false"),
+        Value::Integer { n, .. } => {
+            use std::fmt::Write;
+            let _ = write!(out, "{}", n);
+        }
+        Value::Float { f, .. } => mold_float(*f, out),
+        Value::String { s, .. } => out.push_str(s),
+        Value::String8(bytes) => {
+            out.push_str("#{");
+            for b in bytes {
+                use std::fmt::Write;
+                let _ = write!(out, "{:02X}", b);
+            }
+            out.push('}');
+        }
+        Value::Word { sym, .. }
+        | Value::SetWord { sym, .. }
+        | Value::GetWord { sym, .. }
+        | Value::LitWord { sym, .. } => out.push_str(sym.as_str()),
+        Value::Refinement { sym, .. } => out.push_str(sym.as_str()),
+        Value::Block { series, .. } | Value::Paren { series, .. } => {
+            let data = series.data.borrow();
+            for (n, v) in data.iter().enumerate().skip(series.index) {
+                if n > series.index {
+                    out.push(' ');
+                }
+                form(v, out);
+            }
+        }
+        Value::Func(_) => out.push_str("#[function]"),
+        Value::Path { parts, .. } => {
+            for (i, p) in parts.iter().enumerate() {
+                if i > 0 {
+                    out.push('/');
+                }
+                form(p, out);
+            }
+        }
+    }
+}
+
+/// Convenience: return the form as an owned `String`.
+pub fn form_to_string(value: &Value) -> String {
+    let mut out = String::new();
+    form(value, &mut out);
+    out
+}
+
 fn mold_float(f: f64, out: &mut String) {
     // `{:?}` prints `5.0` rather than `5`, and scientific notation only when
     // Rust thinks it's appropriate. We post-process to guarantee a `.` so the
@@ -366,5 +428,57 @@ mod tests {
         let b = a.clone();
         assert_eq!(a, b);
         assert_eq!(a.as_str(), "foo");
+    }
+
+    // --- form (M14) ---
+
+    #[test]
+    fn form_scalar_matches_mold() {
+        assert_eq!(form_to_string(&Value::None), "none");
+        assert_eq!(form_to_string(&Value::Logic(true)), "true");
+        assert_eq!(form_to_string(&Value::Logic(false)), "false");
+        assert_eq!(form_to_string(&Value::integer(42)), "42");
+        assert_eq!(form_to_string(&Value::float(3.5)), "3.5");
+    }
+
+    #[test]
+    fn form_string_is_raw() {
+        // form strips quotes/escapes — the key difference from mold.
+        assert_eq!(form_to_string(&s("hello")), "hello");
+        assert_eq!(form_to_string(&s("a\nb")), "a\nb");
+        assert_eq!(mold_to_string(&s("a\nb")), "\"a\\nb\"");
+    }
+
+    #[test]
+    fn form_word_family_strips_markers() {
+        assert_eq!(form_to_string(&Value::word("foo")), "foo");
+        assert_eq!(form_to_string(&Value::set_word("foo")), "foo");
+        assert_eq!(form_to_string(&Value::get_word("foo")), "foo");
+        assert_eq!(form_to_string(&Value::lit_word("foo")), "foo");
+        assert_eq!(form_to_string(&Value::refinement("part")), "part");
+    }
+
+    #[test]
+    fn form_block_is_space_joined_no_brackets() {
+        let v = Value::block(Series::new(vec![
+            Value::integer(1),
+            Value::integer(2),
+            Value::integer(3),
+        ]));
+        assert_eq!(form_to_string(&v), "1 2 3");
+        // mold still produces bracketed form.
+        assert_eq!(mold_to_string(&v), "[1 2 3]");
+    }
+
+    #[test]
+    fn form_block_with_strings_no_inner_quotes() {
+        let v = Value::block(Series::new(vec![s("a"), s("b"), s("c")]));
+        assert_eq!(form_to_string(&v), "a b c");
+    }
+
+    #[test]
+    fn form_path_is_slash_joined() {
+        let p = Value::path(vec![Value::word("foo"), Value::word("bar")]);
+        assert_eq!(form_to_string(&p), "foo/bar");
     }
 }

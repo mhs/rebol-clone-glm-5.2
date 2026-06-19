@@ -304,7 +304,7 @@ fn dispatch_path_call(
 /// collected arg values.
 ///
 /// The special-case natives that take their first argument unevaluated
-/// (`repeat`/`foreach`/`forall`/`make` — a word name, not a value) are
+/// (`repeat`/`foreach`/`forall`/`make`/`to` — a word/name, not a value) are
 /// honored only for the *positional* params; refinements on those natives
 /// aren't supported (none declare any).
 fn collect_call_args(
@@ -328,7 +328,10 @@ fn collect_call_args(
 
     let arity = fd.params.len();
     let mut args: Vec<Value> = Vec::with_capacity(arity);
-    let uneval_first = matches!(sym.as_str(), "repeat" | "foreach" | "forall" | "make");
+    let uneval_first = matches!(
+        sym.as_str(),
+        "repeat" | "foreach" | "forall" | "make" | "to"
+    );
 
     // Positional params.
     for n in 0..arity {

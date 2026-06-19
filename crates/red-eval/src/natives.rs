@@ -71,7 +71,7 @@ fn join_molded(args: &[Value]) -> String {
 
 /// Truthiness rule: only `false` and `none` are falsy; everything else is
 /// truthy.
-fn truthy(v: &Value) -> bool {
+pub(crate) fn truthy(v: &Value) -> bool {
     !matches!(v, Value::None | Value::Logic(false))
 }
 
@@ -79,7 +79,7 @@ fn truthy(v: &Value) -> bool {
 /// The span falls back to the first argument's source position (if any) so
 /// the user gets a `file:line:col:` pointer to the call site even though
 /// natives don't receive the calling word's span directly.
-fn arity_err(args: &[Value], native: &str, expected: usize, got: usize) -> EvalError {
+pub(crate) fn arity_err(args: &[Value], native: &str, expected: usize, got: usize) -> EvalError {
     EvalError::Arity {
         native: Symbol::new(native),
         expected,
@@ -128,7 +128,7 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
 /// Extract a `Block` value from `args[idx]`, or raise a TypeError. The error
 /// span is taken from the offending argument (its source position when
 /// available).
-fn expect_block(args: &[Value], idx: usize, native: &str) -> Result<Value, EvalError> {
+pub(crate) fn expect_block(args: &[Value], idx: usize, native: &str) -> Result<Value, EvalError> {
     match args.get(idx) {
         Some(v @ Value::Block { .. }) => Ok(v.clone()),
         Some(other) => Err(EvalError::TypeError {
@@ -522,7 +522,11 @@ fn reduce(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
 /// is bound at creation time to a fresh function-local context (params +
 /// body-local SetWords become `Binding::Func`), with outer user-context words
 /// (recursion, globals) bound as `Binding::Local`. Returns `Value::Func`.
-fn func_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn func_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "func", 2, args.len()));
     }
@@ -568,65 +572,8 @@ fn does_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
     Ok(Value::Func(Rc::new(fd)))
 }
 
-/// `make <type> <spec>` — currently only `make function! [[spec][body]]` is
-/// supported. The single spec block must contain exactly two sub-blocks:
-/// the parameter spec and the body.
-fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(arity_err(args, "make", 2, args.len()));
-    }
-    let type_sym = match &args[0] {
-        Value::LitWord { sym, .. } => sym.clone(),
-        Value::Word { sym, .. } => sym.clone(),
-        other => {
-            return Err(EvalError::TypeError {
-                expected: "word!",
-                found: type_name(other),
-                span: other.span_or_default(),
-            })
-        }
-    };
-    if type_sym.as_str() != "function!" && type_sym.as_str() != "function" {
-        return Err(EvalError::Native {
-            message: format!("make: {:?} type not supported in POC", type_sym.as_str()),
-            span: args[0].span_or_default(),
-        });
-    }
-    let packed = expect_block(args, 1, "make")?;
-    let packed_series = match &packed {
-        Value::Block { series, .. } => series.clone(),
-        _ => unreachable!("expect_block guarantees Block"),
-    };
-    let data = packed_series.data.borrow();
-    if data.len() != 2 {
-        return Err(EvalError::Native {
-            message: "make function!: packed block must be [[spec][body]]".to_string(),
-            span: args[1].span_or_default(),
-        });
-    }
-    let spec_block = match &data[0] {
-        Value::Block { .. } => data[0].clone(),
-        other => {
-            return Err(EvalError::TypeError {
-                expected: "block!",
-                found: type_name(other),
-                span: other.span_or_default(),
-            })
-        }
-    };
-    let body_block = match &data[1] {
-        Value::Block { .. } => data[1].clone(),
-        other => {
-            return Err(EvalError::TypeError {
-                expected: "block!",
-                found: type_name(other),
-                span: other.span_or_default(),
-            })
-        }
-    };
-    drop(data);
-    func_native(&[spec_block, body_block], &RefineArgs::empty(), env)
-}
+// `make <type> <spec>` and `to <type> <value>` live in `crate::convert`
+// (M14). `function?` and `return` remain here.
 
 /// Result of parsing a `func`/`does` spec block: positional parameter
 /// names plus declared refinements (each a name + its argument-word names).
@@ -1022,10 +969,6 @@ pub fn register_natives(env: &mut Env) {
         fixed_native(does_native as NativeFn, 1),
     );
     env.natives.insert(
-        Symbol::new("make"),
-        fixed_native(make_native as NativeFn, 2),
-    );
-    env.natives.insert(
         Symbol::new("function?"),
         fixed_native(function_predicate as NativeFn, 1),
     );
@@ -1058,6 +1001,9 @@ pub fn register_natives(env: &mut Env) {
         Symbol::new("parse"),
         fixed_native(crate::parse::parse_native as NativeFn, 2),
     );
+
+    // Type conversions + make/to/form (M14)
+    crate::convert::register_convert_natives(env);
 }
 
 /// Install the predefined constant words (`none`, `true`, `false`, `newline`)

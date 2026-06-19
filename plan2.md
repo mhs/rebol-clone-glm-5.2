@@ -15,54 +15,54 @@ Deferred to v0.3+ (acknowledged but not built here): `char!`, `map!`, `pair!`,
 
 ## Milestone 13 — Refinements
 
-- [ ] Extend `FuncDef` with `refinements: Vec<(Symbol, Vec<Symbol>)>` (refinement
+- [x] Extend `FuncDef` with `refinements: Vec<(Symbol, Vec<Symbol>)>` (refinement
       word + the words it introduces) parsed from the spec block
-- [ ] Update `func`/`does`/`make function!` to capture refinement slots + arg
+- [x] Update `func`/`does`/`make function!` to capture refinement slots + arg
       order from the spec
-- [ ] Define `ArgSpec` representation for native signatures (arity + refinement
+- [x] Define `ArgSpec` representation for native signatures (arity + refinement
       names + each refinement's arity)
-- [ ] Replace fixed-arity native dispatch with refinement-aware collector:
+- [x] Replace fixed-arity native dispatch with refinement-aware collector:
       caller may pass `/ref` flags and their args inline
-- [ ] At call site, build an `args: &[Value]` plus
+- [x] At call site, build an `args: &[Value]` plus
       `refinements: &[(Symbol, &[Value])]` map handed to the native
-- [ ] Change `NativeFn` signature to
+- [x] Change `NativeFn` signature to
       `fn(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError>`
-- [ ] Update `natives.rs` registration to declare refinements per native
-- [ ] Reimplement existing hard-coded `/part`/`/only`-style behaviors on
+- [x] Update `natives.rs` registration to declare refinements per native
+- [x] Reimplement existing hard-coded `/part`/`/only`-style behaviors on
       `copy`, `find`, `append` using the new mechanism
-- [ ] Lex/parse refinement words (`/foo`) — new `TokenKind::Refinement` and
+- [x] Lex/parse refinement words (`/foo`) — new `TokenKind::Refinement` and
       `Value::Refinement { sym, span }`; mold back to `/foo`
-- [ ] Support refinement words as values (`'foo`-style use, `/foo` as lit)
-- [ ] Inline `#[test]`: `copy/part [1 2 3] 2` → `[1 2]`
-- [ ] Inline `#[test]`: `find/case [a A b] 'A` returns positioned series
-- [ ] Inline `#[test]`: user `func [x /only][...]` callable with and without `/only`
-- [ ] Inline `#[test]`: refinement arg passing `func [x /with y][...]`
-- [ ] Update golden fixtures for refinement-using programs
-- [ ] `cargo test --workspace` passes
+- [x] Support refinement words as values (`'foo`-style use, `/foo` as lit)
+- [x] Inline `#[test]`: `copy/part [1 2 3] 2` → `[1 2]`
+- [x] Inline `#[test]`: `find/case [a A b] 'A` returns positioned series
+- [x] Inline `#[test]`: user `func [x /only][...]` callable with and without `/only`
+- [x] Inline `#[test]`: refinement arg passing `func [x /with y][...]`
+- [x] Update golden fixtures for refinement-using programs
+- [x] `cargo test --workspace` passes
 
 ## Milestone 14 — Type conversions + `make`/`to`
 
-- [ ] Implement `to-integer` (from float, string, logic, char)
-- [ ] Implement `to-float` (from integer, string)
-- [ ] Implement `to-string` (from integer, float, logic, block via `form`
+- [x] Implement `to-integer` (from float, string, logic, char)
+- [x] Implement `to-float` (from integer, string)
+- [x] Implement `to-string` (from integer, float, logic, block via `form`
       semantics, word via mold)
-- [ ] Implement `to-block` (from string via `load`, from word → `[word]`)
-- [ ] Implement `to-word`, `to-set-word`, `to-get-word`, `to-lit-word` (from
+- [x] Implement `to-block` (from string via `load`, from word → `[word]`)
+- [x] Implement `to-word`, `to-set-word`, `to-get-word`, `to-lit-word` (from
       string/word)
-- [ ] Implement `to-logic` (from any value via truthiness rule)
-- [ ] Implement `to-integer`/`to-float` error on unparseable string with span
-- [ ] Implement `make <type-spec> <value>` general dispatcher:
+- [x] Implement `to-logic` (from any value via truthiness rule)
+- [x] Implement `to-integer`/`to-float` error on unparseable string with span
+- [x] Implement `make <type-spec> <value>` general dispatcher:
       - `make integer! 3.5` → 3 (truncates)
       - `make string! 5` → `"     "` (or empty per Red; pick documented behavior)
       - `make block! 3` → `[]` with capacity hint
-- [ ] Implement `to <type> <value>` as alias covering `to-*` family
-- [ ] Implement `form` (human-readable, space-joined, no delimiters) distinct
+- [x] Implement `to <type> <value>` as alias covering `to-*` family
+- [x] Implement `form` (human-readable, space-joined, no delimiters) distinct
       from `mold` (reparseable)
-- [ ] Inline `#[test]`: each `to-*` round-trips for in-range inputs
-- [ ] Inline `#[test]`: `make` constructor for each supported type
-- [ ] Inline `#[test]`: `form [1 2 3]` → `"1 2 3"` (string, not block)
-- [ ] Add golden fixtures for conversions
-- [ ] `cargo test --workspace` passes
+- [x] Inline `#[test]`: each `to-*` round-trips for in-range inputs
+- [x] Inline `#[test]`: `make` constructor for each supported type
+- [x] Inline `#[test]`: `form [1 2 3]` → `"1 2 3"` (string, not block)
+- [x] Add golden fixtures for conversions
+- [x] `cargo test --workspace` passes
 
 ## Milestone 15 — String manipulation natives
 
@@ -169,7 +169,7 @@ Deferred to v0.3+ (acknowledged but not built here): `char!`, `map!`, `pair!`,
 
 ## Milestone 19 — Real paths
 
-- [ ] Replace `Value::Path(Vec<Value>)` with
+- [x] Replace `Value::Path(Vec<Value>)` with
       `Value::Path { parts: Vec<Value>, span: Span }`
 - [ ] Lex/parse paths: `foo/bar/baz`, `:foo/bar` (get-path), `'foo/bar` (lit-path)
 - [ ] Add `GetPath` and `LitPath` value variants
