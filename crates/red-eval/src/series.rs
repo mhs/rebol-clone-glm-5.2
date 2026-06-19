@@ -310,7 +310,7 @@ fn poke(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
 /// matching by symbol name, so a lit-word needle (`'b`) matches a `word!`
 /// element (`b`) in the series — matches Red's `select`/`find` behavior for
 /// the common `'word` needle form.
-fn series_match(needle: &Value, candidate: &Value) -> bool {
+pub(crate) fn series_match(needle: &Value, candidate: &Value) -> bool {
     match (word_sym(needle), word_sym(candidate)) {
         (Some(a), Some(b)) => a == b,
         _ => values_equal(needle, candidate),
@@ -318,7 +318,7 @@ fn series_match(needle: &Value, candidate: &Value) -> bool {
 }
 
 /// Symbol of any word-family value (`Word`/`SetWord`/`GetWord`/`LitWord`).
-fn word_sym(v: &Value) -> Option<&Symbol> {
+pub(crate) fn word_sym(v: &Value) -> Option<&Symbol> {
     match v {
         Value::Word { sym, .. } | Value::SetWord { sym, .. } | Value::GetWord { sym, .. } => {
             Some(sym)

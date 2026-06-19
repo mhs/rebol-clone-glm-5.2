@@ -9,6 +9,7 @@ pub mod binding;
 pub mod context;
 pub mod interp;
 pub mod natives;
+pub mod parse;
 pub mod series;
 
 pub use binding::bind_pass;

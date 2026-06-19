@@ -262,36 +262,36 @@ on the one above unless noted.
 
 ## Milestone 10 — `parse` dialect
 
-- [ ] Create `red-eval/src/parse.rs`
-- [ ] Implement `pub fn parse_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError>`
-- [ ] Input: `string!` or `block!` (Series); rules: `block!`
-- [ ] Maintain input cursor (string byte index or Series index)
-- [ ] Rule: literal value matches against current input, advances cursor
-- [ ] Rule: `skip` — advance one element/char
-- [ ] Rule: `to value` — advance until value found (cursor before match)
-- [ ] Rule: `thru value` — advance past value
-- [ ] Rule: `end` — assert cursor at end
-- [ ] Rule: `none` — always matches, no advance
-- [ ] Rule: `any rule` — zero-or-more
-- [ ] Rule: `some rule` — one-or-more
-- [ ] Rule: `opt rule` — zero-or-one
-- [ ] Rule: `while rule` — greedy like `any` but checks end condition
-- [ ] Rule: `|` — alternative (try left, on fail try right)
-- [ ] Rule: `copy 'word rule` — capture matched sub-input, bind word in user context
-- [ ] Rule: `set 'word rule` — bind word to single matched value
-- [ ] Rule: `[...]` — sub-rule group
-- [ ] Rule: `(...)` — Red code side-effect, evaluated via `eval`
-- [ ] Return `Logic` (true = matched entirely, false = failed)
-- [ ] Backtracking: save cursor before each alternative/repetition; restore on failure
-- [ ] Register `parse` in `register_natives`
-- [ ] Inline `#[test]`: `parse "abc" ["a" "b" "c"]` → true
-- [ ] Inline `#[test]`: `parse "abc" ["a" "z"]` → false
-- [ ] Inline `#[test]`: `parse [1 2 3] [1 2 3]` → true
-- [ ] Inline `#[test]`: `parse "hello" [copy w to end]` → true, w == "hello"
-- [ ] Inline `#[test]`: `parse "a;b;c" [some [skip to ";"]]` → true
-- [ ] Inline `#[test]`: `parse` with `(...)` side-effect runs
-- [ ] Add 4-5 golden fixtures for `parse` (string + block inputs)
-- [ ] `cargo test --workspace` passes
+- [x] Create `red-eval/src/parse.rs`
+- [x] Implement `pub fn parse_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError>`
+- [x] Input: `string!` or `block!` (Series); rules: `block!`
+- [x] Maintain input cursor (string byte index or Series index)
+- [x] Rule: literal value matches against current input, advances cursor
+- [x] Rule: `skip` — advance one element/char
+- [x] Rule: `to value` — advance until value found (cursor before match)
+- [x] Rule: `thru value` — advance past value
+- [x] Rule: `end` — assert cursor at end
+- [x] Rule: `none` — always matches, no advance
+- [x] Rule: `any rule` — zero-or-more
+- [x] Rule: `some rule` — one-or-more
+- [x] Rule: `opt rule` — zero-or-one
+- [x] Rule: `while rule` — greedy like `any` but checks end condition
+- [x] Rule: `|` — alternative (try left, on fail try right)
+- [x] Rule: `copy 'word rule` — capture matched sub-input, bind word in user context
+- [x] Rule: `set 'word rule` — bind word to single matched value
+- [x] Rule: `[...]` — sub-rule group
+- [x] Rule: `(...)` — Red code side-effect, evaluated via `eval`
+- [x] Return `Logic` (true = matched entirely, false = failed)
+- [x] Backtracking: save cursor before each alternative/repetition; restore on failure
+- [x] Register `parse` in `register_natives`
+- [x] Inline `#[test]`: `parse "abc" ["a" "b" "c"]` → true
+- [x] Inline `#[test]`: `parse "abc" ["a" "z"]` → false
+- [x] Inline `#[test]`: `parse [1 2 3] [1 2 3]` → true
+- [x] Inline `#[test]`: `parse "hello" [copy w to end]` → true, w == "hello"
+- [x] Inline `#[test]`: `parse "a;b;c" [some [skip to ";"]]` → true
+- [x] Inline `#[test]`: `parse` with `(...)` side-effect runs
+- [x] Add 4-5 golden fixtures for `parse` (string + block inputs)
+- [x] `cargo test --workspace` passes
 
 ## Milestone 11 — REPL
 

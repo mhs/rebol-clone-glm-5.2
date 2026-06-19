@@ -1053,6 +1053,12 @@ pub fn register_natives(env: &mut Env) {
 
     // Series (M8)
     crate::series::register_series_natives(env);
+
+    // Parse dialect (M10)
+    env.natives.insert(
+        Symbol::new("parse"),
+        fixed_native(crate::parse::parse_native as NativeFn, 2),
+    );
 }
 
 /// Install the predefined constant words (`none`, `true`, `false`, `newline`)

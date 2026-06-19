@@ -48,6 +48,7 @@ pub fn bind_pass(body: &Series, user_ctx: Context) -> Rc<Context> {
     let mut ctx = user_ctx;
     collect_setwords(body, &mut ctx);
     collect_loop_vars(body, &mut ctx);
+    collect_parse_words(body, &mut ctx);
     let ctx_rc = Rc::new(ctx);
     attach_local_bindings(body, &ctx_rc);
     ctx_rc
@@ -143,6 +144,92 @@ pub(crate) fn collect_loop_vars(series: &Series, ctx: &mut Context) {
             }
             _ => i += 1,
         }
+    }
+}
+
+/// Phase 1c: allocate a slot for every word introduced as a capture target by
+/// the `parse` dialect's `copy 'word rule` / `set 'word rule` forms. The
+/// `parse` native runs at the script level and writes captures into the
+/// **user context** (per the project brief), so each `copy`/`set` operand
+/// must already have a slot when the native runs — `env.user_ctx` is a shared
+/// `Rc<Context>` and can't allocate at runtime.
+///
+/// Recognizes `parse <input> <rules-block>` (unbound `parse` word followed by
+/// any input value and a block of rules), then walks the rules block looking
+/// for `copy <word> <rule>` / `set <word> <rule>` patterns. The operand may
+/// be a `LitWord` (`'w`) or a bare unbound `Word` (`w`). Sub-rule blocks
+/// (`[...]` groups inside the rules) are recursed into; `(...)` side-effects
+/// are *not* (they are Red code, not parse rules). `use` bodies are skipped
+/// (matches `collect_loop_vars`/`collect_setwords` scoping).
+pub(crate) fn collect_parse_words(series: &Series, ctx: &mut Context) {
+    let data = series.data.borrow();
+    let n = data.len();
+    let mut i = 0;
+    while i < n {
+        if use_body_index(&data, i).is_some() {
+            i += 3;
+            continue;
+        }
+        // Detect `parse <input> <rules-block>`: the unbound `parse` word is
+        // followed by any input value and a rules block. Walk the rules
+        // block for `copy`/`set` capture operands.
+        if let Value::Word {
+            sym,
+            binding: Binding::Unbound,
+        } = &data[i]
+        {
+            if sym.as_str() == "parse" && i + 2 < n {
+                if let Value::Block { series: rules, .. } = &data[i + 2] {
+                    let rules_clone = rules.clone();
+                    collect_parse_capture_words(&rules_clone, ctx);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        // Recurse into nested blocks/parens so `parse` forms nested inside
+        // other blocks/parens are also found.
+        match &data[i] {
+            Value::Block { series: s, .. } | Value::Paren { series: s, .. } => {
+                let child = s.clone();
+                collect_parse_words(&child, ctx);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+/// Inner walker for `collect_parse_words`: scans a parse rules block and
+/// allocates a slot for each `copy`/`set` operand. Recurses into `[...]`
+/// sub-rule groups but not into `(...)` Red side-effects.
+fn collect_parse_capture_words(series: &Series, ctx: &mut Context) {
+    let data = series.data.borrow();
+    let n = data.len();
+    let mut i = 0;
+    while i < n {
+        if let Value::Word {
+            sym,
+            binding: Binding::Unbound,
+        } = &data[i]
+        {
+            if matches!(sym.as_str(), "copy" | "set") && i + 1 < n {
+                if let Some(name) = loop_word_name(&data[i + 1]) {
+                    ctx.slot_index(name);
+                }
+                // Skip the operand; the following rule (1+ values) is walked
+                // normally below — its sub-blocks may contain nested
+                // copy/set forms we still want to find.
+                i += 2;
+                continue;
+            }
+        }
+        // Recurse into `[...]` sub-rule groups. Parens are Red code — skip.
+        if let Value::Block { series: s, .. } = &data[i] {
+            let child = s.clone();
+            collect_parse_capture_words(&child, ctx);
+        }
+        i += 1;
     }
 }
 
