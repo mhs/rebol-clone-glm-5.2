@@ -329,4 +329,4 @@ on the one above unless noted.
 - [x] Run `cargo fmt --all --check`
 - [x] Final `cargo test --workspace` green
 - [x] Update `project-brief.md` and `architecture.md` if any drift was discovered
-- [ ] Tag release `v0.1.0-poc`
+- [x] Tag release `v0.1.0-poc`
