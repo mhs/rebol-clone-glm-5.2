@@ -72,6 +72,7 @@ fn use_body_index(data: &[Value], i: usize) -> Option<usize> {
     let Value::Word {
         sym,
         binding: Binding::Unbound,
+        ..
     } = &data[i]
     else {
         return None;
@@ -137,6 +138,7 @@ pub(crate) fn collect_loop_vars(series: &Series, ctx: &Context) {
             Value::Word {
                 sym,
                 binding: Binding::Unbound,
+                ..
             } if matches!(sym.as_str(), "repeat" | "foreach" | "forall") => {
                 if i + 1 < n {
                     let name = loop_word_name(&data[i + 1]);
@@ -185,6 +187,7 @@ pub(crate) fn collect_parse_words(series: &Series, ctx: &Context) {
         if let Value::Word {
             sym,
             binding: Binding::Unbound,
+            ..
         } = &data[i]
         {
             if sym.as_str() == "parse" && i + 2 < n {
@@ -220,6 +223,7 @@ fn collect_parse_capture_words(series: &Series, ctx: &Context) {
         if let Value::Word {
             sym,
             binding: Binding::Unbound,
+            ..
         } = &data[i]
         {
             if matches!(sym.as_str(), "copy" | "set") && i + 1 < n {
@@ -256,9 +260,9 @@ fn attach_local_bindings(series: &Series, ctx: &Rc<Context>) {
                 // the outer `borrow_mut` above stays valid.
                 attach_local_bindings(&child, ctx);
             }
-            Value::Word { sym, binding }
-            | Value::SetWord { sym, binding }
-            | Value::GetWord { sym, binding } => {
+            Value::Word { sym, binding, .. }
+            | Value::SetWord { sym, binding, .. }
+            | Value::GetWord { sym, binding, .. } => {
                 if let Some(idx) = ctx.index_of(sym) {
                     *binding = Binding::Local(Rc::clone(ctx), idx);
                 }
@@ -319,9 +323,9 @@ fn attach_use_inner(data: &mut [Value], child_ctx: &Rc<Context>, user_ctx: &Rc<C
                 let mut child_data = series.data.borrow_mut();
                 attach_use_inner(&mut child_data, child_ctx, user_ctx);
             }
-            Value::Word { sym, binding }
-            | Value::SetWord { sym, binding }
-            | Value::GetWord { sym, binding } => {
+            Value::Word { sym, binding, .. }
+            | Value::SetWord { sym, binding, .. }
+            | Value::GetWord { sym, binding, .. } => {
                 if let Some(idx) = child_ctx.index_of(sym) {
                     *binding = Binding::Local(Rc::clone(child_ctx), idx);
                 } else if let Some(idx) = user_ctx.index_of(sym) {
@@ -344,9 +348,9 @@ fn attach_func_bindings(series: &Series, func_ctx: &Context, user_ctx: &Rc<Conte
                 let child = series.clone();
                 attach_func_bindings(&child, func_ctx, user_ctx);
             }
-            Value::Word { sym, binding }
-            | Value::SetWord { sym, binding }
-            | Value::GetWord { sym, binding } => {
+            Value::Word { sym, binding, .. }
+            | Value::SetWord { sym, binding, .. }
+            | Value::GetWord { sym, binding, .. } => {
                 if let Some(idx) = func_ctx.index_of(sym) {
                     *binding = Binding::Func(idx);
                 } else if let Some(idx) = user_ctx.index_of(sym) {
@@ -367,10 +371,11 @@ fn attach_func_bindings(series: &Series, func_ctx: &Context, user_ctx: &Rc<Conte
 /// `None` for any other shape.
 pub(crate) fn loop_word_name(v: &Value) -> Option<Symbol> {
     match v {
-        Value::LitWord(sym) => Some(sym.clone()),
+        Value::LitWord { sym, .. } => Some(sym.clone()),
         Value::Word {
             sym,
             binding: Binding::Unbound,
+            ..
         } => Some(sym.clone()),
         _ => None,
     }
@@ -433,9 +438,9 @@ fn rebind_inner(
                 let mut child_data = series.data.borrow_mut();
                 rebind_inner(&mut child_data, ctx, lookup);
             }
-            Value::Word { sym, binding }
-            | Value::SetWord { sym, binding }
-            | Value::GetWord { sym, binding } => {
+            Value::Word { sym, binding, .. }
+            | Value::SetWord { sym, binding, .. }
+            | Value::GetWord { sym, binding, .. } => {
                 if let Some(&idx) = lookup.get(sym) {
                     *binding = Binding::Local(Rc::clone(ctx), idx);
                 }
@@ -475,8 +480,8 @@ mod tests {
     /// Run `src` with a fresh env (constants + natives) and capture stdout.
     fn run_capture_val(src: &str) -> Result<(Value, Vec<u8>), String> {
         let body = load_source(src).map_err(|e| e.to_string())?;
-        let mut ctx = Context::new();
-        install_constants(&mut ctx);
+        let ctx = Context::new();
+        install_constants(&ctx);
         let ctx_rc = bind_pass(&body, ctx);
         let buf = Rc::new(RefCell::new(Vec::<u8>::new()));
         let mut env = Env::new_with_output(ctx_rc, Box::new(BufferWriter(Rc::clone(&buf))));
@@ -493,8 +498,8 @@ mod tests {
 
     fn run_err(src: &str) -> Error {
         let body = load_source(src).expect("parse failed");
-        let mut ctx = Context::new();
-        install_constants(&mut ctx);
+        let ctx = Context::new();
+        install_constants(&ctx);
         let ctx_rc = bind_pass(&body, ctx);
         let buf = Rc::new(RefCell::new(Vec::<u8>::new()));
         let mut env = Env::new_with_output(ctx_rc, Box::new(BufferWriter(Rc::clone(&buf))));

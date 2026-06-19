@@ -11,7 +11,7 @@ mod repl;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-const VERSION: &str = "red 0.0.1";
+const VERSION: &str = "red 0.1.0";
 
 const HELP: &str = "\
 red — a POC Red clone
@@ -65,8 +65,9 @@ fn run_file(path: &str) -> ExitCode {
     match red_eval::run_source(&src) {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
-            // `Error`/`EvalError` `Display` already prefixes `*** Error:`.
-            eprintln!("{e}");
+            // Render with `file:line:col:` location using the source we
+            // already hold + the error's byte-offset span.
+            eprintln!("{}", red_eval::render_error(Some(path), &src, &e));
             ExitCode::from(1)
         }
     }

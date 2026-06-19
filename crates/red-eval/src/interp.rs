@@ -74,6 +74,7 @@ pub(crate) fn eval_expression(
             Some(fd) => fd,
             None => break,
         };
+        let infix_span = data[*i].span_or_default();
         *i += 1; // consume the infix word itself; now *i points at the right operand
         let arity = infix.params.len();
         debug_assert!(
@@ -90,7 +91,7 @@ pub(crate) fn eval_expression(
                     native: Symbol::new("<infix>"),
                     expected: arity,
                     got: args.len(),
-                    span: Span::new(0, 0),
+                    span: infix_span,
                 });
             }
             args.push(eval_prefix(data, i, env)?);
@@ -107,7 +108,7 @@ pub(crate) fn eval_expression(
 /// sees them.
 fn infix_native_at(v: &Value, env: &Env) -> Option<Rc<FuncDef>> {
     let sym = match v {
-        Value::Word { sym, binding } | Value::GetWord { sym, binding } => {
+        Value::Word { sym, binding, .. } | Value::GetWord { sym, binding, .. } => {
             if !matches!(binding, Binding::Unbound) {
                 return None;
             }
@@ -128,18 +129,18 @@ fn eval_prefix(
     i: &mut usize,
     env: &mut Env,
 ) -> Result<Value, EvalError> {
-    let span = data[*i].span().unwrap_or(Span::new(0, 0));
+    let span = data[*i].span_or_default();
     let cur = data[*i].clone();
     *i += 1; // consume the prefix value itself
     match &cur {
         // Data / literals: returned as-is.
         Value::None
         | Value::Logic(_)
-        | Value::Integer(_)
-        | Value::Float(_)
-        | Value::String(_)
+        | Value::Integer { .. }
+        | Value::Float { .. }
+        | Value::String { .. }
         | Value::String8(_)
-        | Value::LitWord(_)
+        | Value::LitWord { .. }
         | Value::Block { .. }
         | Value::Func(_)
         | Value::Path(_) => Ok(cur),
@@ -151,13 +152,13 @@ fn eval_prefix(
             eval(&Value::Paren { series: p, span }, env)
         }
 
-        Value::Word { sym, binding } => {
+        Value::Word { sym, binding, .. } => {
             let resolved = resolve_word(sym, binding, env, span)?;
             // `dispatch_call` collects args starting at the new `*i`.
             dispatch_call(resolved, sym, data, i, env, span)
         }
 
-        Value::SetWord { sym, binding } => {
+        Value::SetWord { sym, binding, .. } => {
             // Evaluate the next *expression* as the RHS (so `x: 1 + 2` works).
             if *i >= data.len() {
                 return Err(EvalError::Arity {
@@ -173,7 +174,7 @@ fn eval_prefix(
             Ok(rhs)
         }
 
-        Value::GetWord { sym, binding } => {
+        Value::GetWord { sym, binding, .. } => {
             // GetWord returns the slot value (or native Func) without
             // invoking it — no argument collection, no dispatch.
             resolve_word(sym, binding, env, span)
@@ -295,7 +296,7 @@ fn call_user_func(fd: &Rc<FuncDef>, args: Vec<Value>, env: &mut Env) -> Result<V
 /// native. Used to stop variadic argument collection at the next native call.
 fn is_native_word(v: &Value, env: &Env) -> bool {
     let sym = match v {
-        Value::Word { sym, binding } | Value::GetWord { sym, binding } => {
+        Value::Word { sym, binding, .. } | Value::GetWord { sym, binding, .. } => {
             if !matches!(binding, Binding::Unbound) {
                 return false;
             }
@@ -408,8 +409,8 @@ pub fn run_series(body: Series) -> Result<Value, Error> {
 
 /// Like `run_series` but with a custom output sink.
 pub fn run_series_with_output(body: Series, out: Box<dyn std::io::Write>) -> Result<Value, Error> {
-    let mut ctx = Context::new();
-    crate::natives::install_constants(&mut ctx);
+    let ctx = Context::new();
+    crate::natives::install_constants(&ctx);
     let ctx_rc = bind_pass(&body, ctx);
     let mut env = Env::new_with_output(ctx_rc, out);
     crate::natives::register_natives(&mut env);

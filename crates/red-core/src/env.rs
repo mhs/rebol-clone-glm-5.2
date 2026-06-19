@@ -95,13 +95,18 @@ pub enum EvalError {
 
 impl fmt::Display for EvalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Note: renders just the message body (no `*** Error:` prefix and no
+        // `file:line:col:` location). The `render_error` function in
+        // `error.rs` wraps this with the full `*** Error: [loc: ]<msg>` form
+        // using a `LineMap`. The bare `Display` is used by test helpers that
+        // only care about the message body.
         match self {
             EvalError::UnboundWord { sym, .. } => {
-                write!(f, "*** Error: {:?} has no value", sym.as_str())
+                write!(f, "{:?} has no value", sym.as_str())
             }
             EvalError::TypeError {
                 expected, found, ..
-            } => write!(f, "*** Error: expected {expected}, found {found}"),
+            } => write!(f, "expected {expected}, found {found}"),
             EvalError::Arity {
                 native,
                 expected,
@@ -109,15 +114,31 @@ impl fmt::Display for EvalError {
                 ..
             } => write!(
                 f,
-                "*** Error: {:?} expects {} argument(s), got {}",
+                "{:?} expects {} argument(s), got {}",
                 native.as_str(),
                 expected,
                 got
             ),
-            EvalError::Return(_) => write!(f, "*** Error: return used outside a function"),
-            EvalError::Break(_) => write!(f, "*** Error: break used outside a loop"),
-            EvalError::Continue => write!(f, "*** Error: continue used outside a loop"),
-            EvalError::Native { message, .. } => write!(f, "*** Error: {message}"),
+            EvalError::Return(_) => write!(f, "return used outside a function"),
+            EvalError::Break(_) => write!(f, "break used outside a loop"),
+            EvalError::Continue => write!(f, "continue used outside a loop"),
+            EvalError::Native { message, .. } => write!(f, "{message}"),
+        }
+    }
+}
+
+impl EvalError {
+    /// Byte-offset span where this error originated, if any. Used by
+    /// `render_error` to produce `file:line:col:` prefixes. `Return`/
+    /// `Break`/`Continue` are control-flow unwinds, not user errors, and
+    /// carry no span.
+    pub fn span(&self) -> Option<Span> {
+        match self {
+            EvalError::UnboundWord { span, .. }
+            | EvalError::TypeError { span, .. }
+            | EvalError::Arity { span, .. }
+            | EvalError::Native { span, .. } => Some(*span),
+            EvalError::Return(_) | EvalError::Break(_) | EvalError::Continue => None,
         }
     }
 }

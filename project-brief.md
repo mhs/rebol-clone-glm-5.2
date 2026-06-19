@@ -63,8 +63,8 @@ struct Series {
 
 enum Binding {
     Unbound,
-    Local(Context, usize),   // context + slot index
-    Func(Rc<FuncDef>, usize),// function + param index
+    Local(Rc<Context>, usize),   // shared context + slot index
+    Func(usize),                 // function-local slot index (resolved via call frame)
 }
 
 struct FuncDef {
@@ -72,27 +72,30 @@ struct FuncDef {
     body: Series,
     ctx: Context,            // definition context (parent for lookups)
     native: Option<fn(&[Value], &mut Env) -> Result<Value, EvalError>>,
+    variadic: bool,
+    infix: bool,
 }
 
 enum Value {
     None,
     Logic(bool),
-    Integer(i64),
-    Float(f64),
-    String(Rc<str>),            // {"..."} and "..." alike
-    Word { sym: Symbol, binding: Binding },    // foo
-    SetWord { sym: Symbol, binding: Binding }, // foo:
-    GetWord { sym: Symbol, binding: Binding }, // :foo
-    LitWord(Symbol),            // 'foo
-    Block(Series),              // [...] — code is data; see "Red blocks" below
-    Paren(Series),              // (...)
+    Integer { n: i64, span: Span },
+    Float { f: f64, span: Span },
+    String { s: Rc<str>, span: Span },       // {"..."} and "..." alike
+    Word { sym: Symbol, binding: Binding, span: Span },    // foo
+    SetWord { sym: Symbol, binding: Binding, span: Span }, // foo:
+    GetWord { sym: Symbol, binding: Binding, span: Span }, // :foo
+    LitWord { sym: Symbol, span: Span },     // 'foo
+    Block { series: Series, span: Span },    // [...] — code is data
+    Paren { series: Series, span: Span },    // (...)
     Func(Rc<FuncDef>),
-    Path(Vec<Value>),           // foo/bar (simple select-on-block only in POC)
-    String8(Vec<u8>),           // binary #"..." (optional, skip in POC)
+    Path(Vec<Value>),                        // foo/bar (simple select-on-block only in POC)
+    String8(Vec<u8>),                        // binary #"..." (optional, skip in POC)
 }
 ```
 
-`Symbol` = interned string (use `string_cache` crate or roll a simple `Rc<str>` newtype to start).
+`Symbol` = an `Rc<str>` newtype (the `string_cache` crate was tried early on
+but dropped in favor of the simpler `Rc<str>`; no profiling need surfaced).
 
 `Context` is defined in `red-core/src/context.rs` (see Evaluator section):
 an ordered `Symbol -> slot index` map plus a `Vec<RefCell<Value>>` of slots.
@@ -291,8 +294,15 @@ Native calls are implemented in Rust directly against `&[Value]` and
 with a fresh child context.
 
 ## Error model
-- `EvalError { kind, span, message }`
-- Surface as `*** Error: <msg>` from CLI; tests assert against stderr.
+- `EvalError` enum: `UnboundWord`/`TypeError`/`Arity`/`Native` carry a `Span`;
+  `Return`/`Break`/`Continue` are control-flow unwinds. `LexError`/`ParseError`
+  also carry spans. All three are unified under `Error` (Lex/Parse/Eval).
+- `render_error(file, src, err)` produces
+  `*** Error: [file:line:col: ]<msg>` using a `LineMap` to translate the
+  error's byte-offset span into 1-based line/col. The CLI passes the file
+  path + source; the REPL passes `None` + the line buffer.
+- Tests assert against the message-body substring (error fixtures) or the
+  rendered `*** Error:` line (CLI tests).
 
 ## CLI (`red-cli/src/main.rs`)
 - `red file.red` — load, parse, do, exit code from last value
@@ -317,7 +327,7 @@ A small `tests/common/mod.rs` helper in each crate walks a directory and generat
 
 ## Dependencies (kept minimal)
 - `rustyline` — REPL line editing
-- `string_cache` (or hand-rolled Symbol) — interned words
+- `proptest` (dev) — printer/parser round-trip property test
 - `assert_cmd` + `predicates` (dev) — CLI tests
 - No async, no proc-macros.
 

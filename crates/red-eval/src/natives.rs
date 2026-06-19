@@ -75,6 +75,22 @@ fn truthy(v: &Value) -> bool {
     !matches!(v, Value::None | Value::Logic(false))
 }
 
+/// Build an `Arity` error for `native` with the given expected/got counts.
+/// The span falls back to the first argument's source position (if any) so
+/// the user gets a `file:line:col:` pointer to the call site even though
+/// natives don't receive the calling word's span directly.
+fn arity_err(args: &[Value], native: &str, expected: usize, got: usize) -> EvalError {
+    EvalError::Arity {
+        native: Symbol::new(native),
+        expected,
+        got,
+        span: args
+            .first()
+            .map(|v| v.span_or_default())
+            .unwrap_or_default(),
+    }
+}
+
 /// A numeric value extracted from `Value::Integer` or `Value::Float`.
 enum Num {
     Int(i64),
@@ -83,8 +99,8 @@ enum Num {
 
 fn as_number(v: &Value) -> Option<Num> {
     match v {
-        Value::Integer(n) => Some(Num::Int(*n)),
-        Value::Float(f) => Some(Num::Float(*f)),
+        Value::Integer { n, .. } => Some(Num::Int(*n)),
+        Value::Float { f, .. } => Some(Num::Float(*f)),
         _ => None,
     }
 }
@@ -93,14 +109,14 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
     match v {
         Value::None => "none!",
         Value::Logic(_) => "logic!",
-        Value::Integer(_) => "integer!",
-        Value::Float(_) => "float!",
-        Value::String(_) => "string!",
+        Value::Integer { .. } => "integer!",
+        Value::Float { .. } => "float!",
+        Value::String { .. } => "string!",
         Value::String8(_) => "binary!",
         Value::Word { .. } => "word!",
         Value::SetWord { .. } => "set-word!",
         Value::GetWord { .. } => "get-word!",
-        Value::LitWord(_) => "lit-word!",
+        Value::LitWord { .. } => "lit-word!",
         Value::Block { .. } => "block!",
         Value::Paren { .. } => "paren!",
         Value::Func(_) => "function!",
@@ -108,27 +124,34 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
     }
 }
 
-/// Extract a `Block` value from `args[idx]`, or raise a TypeError.
+/// Extract a `Block` value from `args[idx]`, or raise a TypeError. The error
+/// span is taken from the offending argument (its source position when
+/// available).
 fn expect_block(args: &[Value], idx: usize, native: &str) -> Result<Value, EvalError> {
     match args.get(idx) {
         Some(v @ Value::Block { .. }) => Ok(v.clone()),
         Some(other) => Err(EvalError::TypeError {
             expected: "block!",
             found: type_name(other),
-            span: Span::new(0, 0),
+            span: other.span_or_default(),
         }),
         None => Err(EvalError::Arity {
             native: Symbol::new(native),
             expected: idx + 1,
             got: args.len(),
-            span: Span::new(0, 0),
+            // No argument to read a span from; fall back to the calling
+            // native's first-arg span if present, else zero.
+            span: args
+                .first()
+                .map(|v| v.span_or_default())
+                .unwrap_or_default(),
         }),
     }
 }
 
 /// Apply a numeric binary operator to `args[0]` (left) and `args[1]` (right).
 /// Int+Int → Int; any Float involved → Float. `op` names the operation for
-/// error messages.
+/// error messages. Errors carry the offending operand's span.
 fn num_binop(
     args: &[Value],
     op: &str,
@@ -141,7 +164,7 @@ fn num_binop(
             return Err(EvalError::TypeError {
                 expected: "integer! or float!",
                 found: type_name(&args[0]),
-                span: Span::new(0, 0),
+                span: args[0].span_or_default(),
             })
         }
     };
@@ -151,22 +174,22 @@ fn num_binop(
             return Err(EvalError::TypeError {
                 expected: "integer! or float!",
                 found: type_name(&args[1]),
-                span: Span::new(0, 0),
+                span: args[1].span_or_default(),
             })
         }
     };
     match (a, b) {
         (Num::Int(x), Num::Int(y)) => match f_int(x, y) {
-            Some(r) => Ok(Value::Integer(r)),
+            Some(r) => Ok(Value::integer(r)),
             // `f_int` returns None to signal a domain error (e.g. div-by-zero).
             None => Err(EvalError::Native {
                 message: format!("math error: {op} by zero"),
-                span: Span::new(0, 0),
+                span: args[0].span_or_default(),
             }),
         },
-        (Num::Int(x), Num::Float(y)) => Ok(Value::Float(f_float(x as f64, y))),
-        (Num::Float(x), Num::Int(y)) => Ok(Value::Float(f_float(x, y as f64))),
-        (Num::Float(x), Num::Float(y)) => Ok(Value::Float(f_float(x, y))),
+        (Num::Int(x), Num::Float(y)) => Ok(Value::float(f_float(x as f64, y))),
+        (Num::Float(x), Num::Int(y)) => Ok(Value::float(f_float(x, y as f64))),
+        (Num::Float(x), Num::Float(y)) => Ok(Value::float(f_float(x, y))),
     }
 }
 
@@ -207,11 +230,11 @@ fn divide(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
 
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::Integer(x), Value::Integer(y)) => x == y,
-        (Value::Float(x), Value::Float(y)) => x == y,
-        (Value::Integer(x), Value::Float(y)) => (*x as f64) == *y,
-        (Value::Float(x), Value::Integer(y)) => *x == (*y as f64),
-        (Value::String(x), Value::String(y)) => x == y,
+        (Value::Integer { n: x, .. }, Value::Integer { n: y, .. }) => x == y,
+        (Value::Float { f: x, .. }, Value::Float { f: y, .. }) => x == y,
+        (Value::Integer { n: x, .. }, Value::Float { f: y, .. }) => (*x as f64) == *y,
+        (Value::Float { f: x, .. }, Value::Integer { n: y, .. }) => *x == (*y as f64),
+        (Value::String { s: x, .. }, Value::String { s: y, .. }) => x == y,
         (Value::None, Value::None) => true,
         (Value::Logic(x), Value::Logic(y)) => x == y,
         _ => false,
@@ -255,7 +278,8 @@ fn greater_equal(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
     Ok(Value::Logic(compare(">=", num_cmp(&args[0], &args[1])?)))
 }
 
-/// Compare two numeric values, returning their `Ordering`.
+/// Compare two numeric values, returning their `Ordering`. Errors carry the
+/// offending operand's span.
 fn num_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalError> {
     let x = match as_number(a) {
         Some(n) => n,
@@ -263,7 +287,7 @@ fn num_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "integer! or float!",
                 found: type_name(a),
-                span: Span::new(0, 0),
+                span: a.span_or_default(),
             })
         }
     };
@@ -273,7 +297,7 @@ fn num_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "integer! or float!",
                 found: type_name(b),
-                span: Span::new(0, 0),
+                span: b.span_or_default(),
             })
         }
     };
@@ -312,12 +336,7 @@ fn not_op(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
 /// `if cond block` — evaluates `block` if `cond` is truthy, else returns `none`.
 fn if_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Arity {
-            native: Symbol::new("if"),
-            expected: 2,
-            got: args.len(),
-            span: Span::new(0, 0),
-        });
+        return Err(arity_err(args, "if", 2, args.len()));
     }
     if truthy(&args[0]) {
         let body = expect_block(args, 1, "if")?;
@@ -330,12 +349,7 @@ fn if_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 /// `either cond t-block f-block`
 fn either(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 3 {
-        return Err(EvalError::Arity {
-            native: Symbol::new("either"),
-            expected: 3,
-            got: args.len(),
-            span: Span::new(0, 0),
-        });
+        return Err(arity_err(args, "either", 3, args.len()));
     }
     let t = expect_block(args, 1, "either")?;
     let f = expect_block(args, 2, "either")?;
@@ -368,31 +382,26 @@ fn loop_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 /// each iteration. Accepts both lit-word (`'i`) and bare-word (`i`) forms.
 fn repeat(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 3 {
-        return Err(EvalError::Arity {
-            native: Symbol::new("repeat"),
-            expected: 3,
-            got: args.len(),
-            span: Span::new(0, 0),
-        });
+        return Err(arity_err(args, "repeat", 3, args.len()));
     }
     let sym = match &args[0] {
-        Value::LitWord(s) => s.clone(),
+        Value::LitWord { sym, .. } => sym.clone(),
         Value::Word { sym, .. } => sym.clone(),
         other => {
             return Err(EvalError::TypeError {
                 expected: "word!",
                 found: type_name(other),
-                span: Span::new(0, 0),
+                span: other.span_or_default(),
             })
         }
     };
     let count = match &args[1] {
-        Value::Integer(n) => *n,
+        Value::Integer { n, .. } => *n,
         other => {
             return Err(EvalError::TypeError {
                 expected: "integer!",
                 found: type_name(other),
-                span: Span::new(0, 0),
+                span: other.span_or_default(),
             })
         }
     };
@@ -402,10 +411,10 @@ fn repeat(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
         .index_of(&sym)
         .ok_or_else(|| EvalError::UnboundWord {
             sym: sym.clone(),
-            span: Span::new(0, 0),
+            span: args[0].span_or_default(),
         })?;
     for n in 1..=count {
-        env.user_ctx.set_slot(idx, Value::Integer(n));
+        env.user_ctx.set_slot(idx, Value::integer(n));
         match eval(&body, env) {
             Ok(_) => {}
             Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
@@ -438,12 +447,7 @@ fn until(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 /// evaluates `body-block` and repeats. Returns `none`.
 fn while_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Arity {
-            native: Symbol::new("while"),
-            expected: 2,
-            got: args.len(),
-            span: Span::new(0, 0),
-        });
+        return Err(arity_err(args, "while", 2, args.len()));
     }
     let cond = expect_block(args, 0, "while")?;
     let body = expect_block(args, 1, "while")?;
@@ -515,12 +519,7 @@ fn reduce(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 /// (recursion, globals) bound as `Binding::Local`. Returns `Value::Func`.
 fn func_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Arity {
-            native: Symbol::new("func"),
-            expected: 2,
-            got: args.len(),
-            span: Span::new(0, 0),
-        });
+        return Err(arity_err(args, "func", 2, args.len()));
     }
     let spec_block = expect_block(args, 0, "func")?;
     let body_block = expect_block(args, 1, "func")?;
@@ -544,12 +543,7 @@ fn func_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 /// `does [body]` — zero-argument `func`. Returns `Value::Func`.
 fn does_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Arity {
-            native: Symbol::new("does"),
-            expected: 1,
-            got: args.len(),
-            span: Span::new(0, 0),
-        });
+        return Err(arity_err(args, "does", 1, args.len()));
     }
     let body_block = expect_block(args, 0, "does")?;
     let body_series = match &body_block {
@@ -573,28 +567,23 @@ fn does_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 /// the parameter spec and the body.
 fn make_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Arity {
-            native: Symbol::new("make"),
-            expected: 2,
-            got: args.len(),
-            span: Span::new(0, 0),
-        });
+        return Err(arity_err(args, "make", 2, args.len()));
     }
     let type_sym = match &args[0] {
-        Value::LitWord(s) => s.clone(),
+        Value::LitWord { sym, .. } => sym.clone(),
         Value::Word { sym, .. } => sym.clone(),
         other => {
             return Err(EvalError::TypeError {
                 expected: "word!",
                 found: type_name(other),
-                span: Span::new(0, 0),
+                span: other.span_or_default(),
             })
         }
     };
     if type_sym.as_str() != "function!" && type_sym.as_str() != "function" {
         return Err(EvalError::Native {
             message: format!("make: {:?} type not supported in POC", type_sym.as_str()),
-            span: Span::new(0, 0),
+            span: args[0].span_or_default(),
         });
     }
     let packed = expect_block(args, 1, "make")?;
@@ -606,7 +595,7 @@ fn make_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     if data.len() != 2 {
         return Err(EvalError::Native {
             message: "make function!: packed block must be [[spec][body]]".to_string(),
-            span: Span::new(0, 0),
+            span: args[1].span_or_default(),
         });
     }
     let spec_block = match &data[0] {
@@ -615,7 +604,7 @@ fn make_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "block!",
                 found: type_name(other),
-                span: Span::new(0, 0),
+                span: other.span_or_default(),
             })
         }
     };
@@ -625,7 +614,7 @@ fn make_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "block!",
                 found: type_name(other),
-                span: Span::new(0, 0),
+                span: other.span_or_default(),
             })
         }
     };
@@ -643,7 +632,7 @@ fn extract_params(spec_block: &Value) -> Result<Vec<Symbol>, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "block!",
                 found: type_name(spec_block),
-                span: Span::new(0, 0),
+                span: spec_block.span_or_default(),
             })
         }
     };
@@ -651,7 +640,7 @@ fn extract_params(spec_block: &Value) -> Result<Vec<Symbol>, EvalError> {
     let mut params = Vec::new();
     for v in data.iter() {
         match v {
-            Value::Word { sym, .. } | Value::LitWord(sym) => params.push(sym.clone()),
+            Value::Word { sym, .. } | Value::LitWord { sym, .. } => params.push(sym.clone()),
             _ => {
                 // Skip type annotations / refinements / locals markers in POC.
             }
@@ -663,12 +652,7 @@ fn extract_params(spec_block: &Value) -> Result<Vec<Symbol>, EvalError> {
 /// `function? value` — `true` if value is a `function!`, else `false`.
 fn function_predicate(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
     if args.is_empty() {
-        return Err(EvalError::Arity {
-            native: Symbol::new("function?"),
-            expected: 1,
-            got: 0,
-            span: Span::new(0, 0),
-        });
+        return Err(arity_err(args, "function?", 1, 0));
     }
     Ok(Value::Logic(matches!(args[0], Value::Func(_))))
 }
@@ -690,21 +674,16 @@ fn return_native(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
 /// or an unbound word (`foo`).
 fn get_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Arity {
-            native: Symbol::new("get"),
-            expected: 1,
-            got: args.len(),
-            span: Span::new(0, 0),
-        });
+        return Err(arity_err(args, "get", 1, args.len()));
     }
     let sym = match &args[0] {
-        Value::LitWord(s) => s.clone(),
+        Value::LitWord { sym, .. } => sym.clone(),
         Value::Word { sym, .. } => sym.clone(),
         other => {
             return Err(EvalError::TypeError {
                 expected: "word!",
                 found: type_name(other),
-                span: Span::new(0, 0),
+                span: other.span_or_default(),
             })
         }
     };
@@ -712,7 +691,7 @@ fn get_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
         .get(&sym)
         .ok_or_else(|| EvalError::UnboundWord {
             sym,
-            span: Span::new(0, 0),
+            span: args[0].span_or_default(),
         })
 }
 
@@ -720,21 +699,16 @@ fn get_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 /// (the word must have been pre-allocated by `bind_pass`). Returns the value.
 fn set_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Arity {
-            native: Symbol::new("set"),
-            expected: 2,
-            got: args.len(),
-            span: Span::new(0, 0),
-        });
+        return Err(arity_err(args, "set", 2, args.len()));
     }
     let sym = match &args[0] {
-        Value::LitWord(s) => s.clone(),
+        Value::LitWord { sym, .. } => sym.clone(),
         Value::Word { sym, .. } => sym.clone(),
         other => {
             return Err(EvalError::TypeError {
                 expected: "word!",
                 found: type_name(other),
-                span: Span::new(0, 0),
+                span: other.span_or_default(),
             })
         }
     };
@@ -745,7 +719,7 @@ fn set_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     } else {
         Err(EvalError::UnboundWord {
             sym,
-            span: Span::new(0, 0),
+            span: args[0].span_or_default(),
         })
     }
 }
@@ -754,21 +728,16 @@ fn set_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 /// `false`.
 fn value_predicate(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 1 {
-        return Err(EvalError::Arity {
-            native: Symbol::new("value?"),
-            expected: 1,
-            got: args.len(),
-            span: Span::new(0, 0),
-        });
+        return Err(arity_err(args, "value?", 1, args.len()));
     }
     let sym = match &args[0] {
-        Value::LitWord(s) => s.clone(),
+        Value::LitWord { sym, .. } => sym.clone(),
         Value::Word { sym, .. } => sym.clone(),
         other => {
             return Err(EvalError::TypeError {
                 expected: "word!",
                 found: type_name(other),
-                span: Span::new(0, 0),
+                span: other.span_or_default(),
             })
         }
     };
@@ -783,12 +752,7 @@ fn value_predicate(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 /// `use` returns. Returns the block's last value.
 fn use_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Arity {
-            native: Symbol::new("use"),
-            expected: 2,
-            got: args.len(),
-            span: Span::new(0, 0),
-        });
+        return Err(arity_err(args, "use", 2, args.len()));
     }
     let words_block = expect_block(args, 0, "use")?;
     let body_block = expect_block(args, 1, "use")?;
@@ -846,32 +810,27 @@ fn use_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 /// user context it lives in). Returns the rebound block (a deep copy).
 fn bind_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(EvalError::Arity {
-            native: Symbol::new("bind"),
-            expected: 2,
-            got: args.len(),
-            span: Span::new(0, 0),
-        });
+        return Err(arity_err(args, "bind", 2, args.len()));
     }
     let block = expect_block(args, 0, "bind")?;
     // Verify the word operand is bound in the user context (POC: the only
     // context available). The operand itself is otherwise unused — `bind`
     // always rebinds to the user context in the POC.
     let word_sym = match &args[1] {
-        Value::LitWord(s) => s.clone(),
+        Value::LitWord { sym, .. } => sym.clone(),
         Value::Word { sym, .. } => sym.clone(),
         other => {
             return Err(EvalError::TypeError {
                 expected: "word!",
                 found: type_name(other),
-                span: Span::new(0, 0),
+                span: other.span_or_default(),
             })
         }
     };
     if !env.user_ctx.has(&word_sym) {
         return Err(EvalError::UnboundWord {
             sym: word_sym,
-            span: Span::new(0, 0),
+            span: args[1].span_or_default(),
         });
     }
     // Deep-copy the block so we don't mutate shared data, then rebind every
@@ -1070,7 +1029,7 @@ pub fn install_constants(ctx: &Context) {
     ctx.set(Symbol::new("false"), Value::Logic(false));
     ctx.set(
         Symbol::new("newline"),
-        Value::String(std::rc::Rc::from("\n")),
+        Value::string(std::rc::Rc::from("\n")),
     );
 }
 
@@ -1102,8 +1061,8 @@ mod tests {
     fn run_capture_val(src: &str) -> Result<(Value, Vec<u8>), String> {
         use crate::binding::bind_pass;
         let body = load_source(src).map_err(|e| e.to_string())?;
-        let mut ctx = Context::new();
-        install_constants(&mut ctx);
+        let ctx = Context::new();
+        install_constants(&ctx);
         let ctx_rc = bind_pass(&body, ctx);
         let buf = Rc::new(RefCell::new(Vec::<u8>::new()));
         let mut env = Env::new_with_output(ctx_rc, Box::new(BufferWriter(Rc::clone(&buf))));

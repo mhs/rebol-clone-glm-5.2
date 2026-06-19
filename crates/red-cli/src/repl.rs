@@ -19,8 +19,8 @@ use std::rc::Rc;
 use std::cell::RefCell;
 
 use red_eval::{
-    bind_pass_into, eval, install_constants, register_natives, Context, Env, Error, EvalError,
-    ParseError, Value, load_source, mold_to_string,
+    bind_pass_into, eval, install_constants, load_source, mold_to_string, register_natives,
+    render_error, Context, Env, Error, EvalError, ParseError, Value,
 };
 
 /// Build a fresh REPL environment: empty user context with constants
@@ -60,7 +60,7 @@ fn eval_repl_line(buffer: &str, env: &mut Env) -> LineAction {
             bind_pass_into(&body, &env.user_ctx);
             match eval(&Value::block(body), env) {
                 Err(EvalError::Return(_)) => LineAction::Evaluated,
-                Err(e) => LineAction::Failed(format!("{e}")),
+                Err(e) => LineAction::Failed(render_error(None, buffer, &Error::Eval(e))),
                 Ok(Value::None) => LineAction::Evaluated,
                 Ok(v) => {
                     let _ = writeln!(env.out, "{}", mold_to_string(&v));
@@ -69,7 +69,7 @@ fn eval_repl_line(buffer: &str, env: &mut Env) -> LineAction {
             }
         }
         Err(Error::Parse(ParseError::MissingClose { .. })) => LineAction::NeedMoreInput,
-        Err(e) => LineAction::Failed(format!("*** Error: {e}")),
+        Err(e) => LineAction::Failed(render_error(None, buffer, &e)),
     }
 }
 
@@ -253,7 +253,10 @@ mod tests {
         // after definition is visible when the function runs. Each line's
         // result is printed: `g: 1`→1, `f: func…`→`#[function]`, `g: 2`→2,
         // `f`→2 (the mutation is visible inside the function body).
-        assert_eq!(repl_session("g: 1\nf: func [][g]\ng: 2\nf\n"), "1\n#[function]\n2\n2\n");
+        assert_eq!(
+            repl_session("g: 1\nf: func [][g]\ng: 2\nf\n"),
+            "1\n#[function]\n2\n2\n"
+        );
     }
 
     #[test]

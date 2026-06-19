@@ -43,7 +43,7 @@ fn version_flag() {
     cmd.arg("--version")
         .assert()
         .success()
-        .stdout("red 0.0.1\n");
+        .stdout("red 0.1.0\n");
 }
 
 #[test]

@@ -9,12 +9,12 @@ pub fn mold(value: &Value, out: &mut String) {
         Value::None => out.push_str("none"),
         Value::Logic(true) => out.push_str("true"),
         Value::Logic(false) => out.push_str("false"),
-        Value::Integer(n) => {
+        Value::Integer { n, .. } => {
             use std::fmt::Write;
             let _ = write!(out, "{}", n);
         }
-        Value::Float(f) => mold_float(*f, out),
-        Value::String(s) => mold_string(s, out),
+        Value::Float { f, .. } => mold_float(*f, out),
+        Value::String { s, .. } => mold_string(s, out),
         Value::String8(bytes) => {
             // POC: mold as `#{hex}` so it round-trips as a distinct literal.
             out.push_str("#{");
@@ -33,7 +33,7 @@ pub fn mold(value: &Value, out: &mut String) {
             out.push(':');
             out.push_str(sym.as_str());
         }
-        Value::LitWord(sym) => {
+        Value::LitWord { sym, .. } => {
             out.push('\'');
             out.push_str(sym.as_str());
         }
@@ -101,6 +101,7 @@ fn mold_string(s: &str, out: &mut String) {
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
             _ => out.push(c),
         }
     }
@@ -114,7 +115,7 @@ mod tests {
     use std::rc::Rc;
 
     fn s(literal: &str) -> Value {
-        Value::String(Rc::from(literal))
+        Value::string(Rc::<str>::from(literal))
     }
 
     #[test]
@@ -130,16 +131,67 @@ mod tests {
 
     #[test]
     fn mold_integer() {
-        assert_eq!(mold_to_string(&Value::Integer(0)), "0");
-        assert_eq!(mold_to_string(&Value::Integer(42)), "42");
-        assert_eq!(mold_to_string(&Value::Integer(-7)), "-7");
+        assert_eq!(mold_to_string(&Value::integer(0)), "0");
+        assert_eq!(mold_to_string(&Value::integer(42)), "42");
+        assert_eq!(mold_to_string(&Value::integer(-7)), "-7");
     }
 
     #[test]
     fn mold_float() {
-        assert_eq!(mold_to_string(&Value::Float(5.0)), "5.0");
-        assert_eq!(mold_to_string(&Value::Float(1.5)), "1.5");
-        assert_eq!(mold_to_string(&Value::Float(-2.25)), "-2.25");
+        assert_eq!(mold_to_string(&Value::float(5.0)), "5.0");
+        assert_eq!(mold_to_string(&Value::float(1.5)), "1.5");
+        assert_eq!(mold_to_string(&Value::float(-2.25)), "-2.25");
+    }
+
+    #[test]
+    fn mold_float_always_has_dot() {
+        // Every finite float must mold with a `.` so it re-parses as Float
+        // (not Integer). `{:?}` on f64 already does this for whole numbers.
+        for n in [0.0, 1.0, -1.0, 100.0, 1_000_000.0] {
+            let molded = mold_to_string(&Value::float(n));
+            assert!(molded.contains('.'), "{n} molded to {molded:?} (no dot)");
+        }
+    }
+
+    #[test]
+    fn mold_float_scientific_notation_round_trips() {
+        // Large/small magnitudes use scientific notation via `{:?}`; the
+        // lexer accepts `e`/`E` exponents, so these re-parse.
+        for f in [1e20, 1e-10, 1.5e30] {
+            let molded = mold_to_string(&Value::float(f));
+            let toks = crate::lexer::lex(&molded).expect("lex float");
+            assert_eq!(toks.len(), 1);
+            match &toks[0].kind {
+                crate::lexer::TokenKind::Float(parsed) => {
+                    assert_eq!(*parsed, f, "round-trip mismatch: {f} molded to {molded}");
+                }
+                other => panic!("expected Float token for {molded}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn mold_float_nan_inf_documented_gap() {
+        // NaN/inf are NOT reparseable (the lexer has no literal for them) —
+        // a documented POC limitation. We just confirm they mold to *some*
+        // string without panicking; the property test excludes them.
+        let _ = mold_to_string(&Value::float(f64::NAN));
+        let _ = mold_to_string(&Value::float(f64::INFINITY));
+        let _ = mold_to_string(&Value::float(f64::NEG_INFINITY));
+    }
+
+    #[test]
+    fn mold_deeply_nested_block() {
+        // Deep nesting must not overflow; recursion handles arbitrary depth.
+        let mut v = Value::integer(1);
+        for _ in 0..50 {
+            v = Value::block(Series::new(vec![v]));
+        }
+        let molded = mold_to_string(&v);
+        // 50 opening brackets, the integer, 50 closing brackets.
+        assert_eq!(molded.chars().filter(|&c| c == '[').count(), 50);
+        assert_eq!(molded.chars().filter(|&c| c == ']').count(), 50);
+        assert!(molded.contains('1'));
     }
 
     #[test]
@@ -153,6 +205,35 @@ mod tests {
         assert_eq!(mold_to_string(&s("a\\b")), "\"a\\\\b\"");
         assert_eq!(mold_to_string(&s("a\nb")), "\"a\\nb\"");
         assert_eq!(mold_to_string(&s("a\tb")), "\"a\\tb\"");
+        assert_eq!(mold_to_string(&s("a\rb")), "\"a\\rb\"");
+    }
+
+    #[test]
+    fn mold_string_carriage_return_round_trips() {
+        // A string containing a raw CR must mold to an escaped form so it
+        // re-parses to the same value (the lexer's `\r` escape decodes to CR).
+        let raw = s("line1\rline2");
+        let molded = mold_to_string(&raw);
+        assert_eq!(molded, "\"line1\\rline2\"");
+        // No raw CR inside the quotes.
+        assert!(!molded[1..molded.len() - 1].contains('\r'));
+    }
+
+    #[test]
+    fn mold_string_control_chars_preserved() {
+        // The four lexer-supported escapes round-trip.
+        for raw in ["a\"b", "a\\b", "a\nb", "a\tb", "a\rb"] {
+            let molded = mold_to_string(&s(raw));
+            // Re-parse the molded form and compare.
+            let toks = crate::lexer::lex(&molded).expect("lex molded string");
+            assert_eq!(toks.len(), 1);
+            match &toks[0].kind {
+                crate::lexer::TokenKind::String(parsed) => {
+                    assert_eq!(parsed.as_ref(), raw, "round-trip mismatch for {raw:?}");
+                }
+                other => panic!("expected String token, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -208,9 +289,9 @@ mod tests {
     #[test]
     fn mold_simple_block() {
         let v = Value::block(Series::new(vec![
-            Value::Integer(1),
-            Value::Integer(2),
-            Value::Integer(3),
+            Value::integer(1),
+            Value::integer(2),
+            Value::integer(3),
         ]));
         assert_eq!(mold_to_string(&v), "[1 2 3]");
     }
@@ -220,7 +301,7 @@ mod tests {
         let v = Value::block(Series::new(vec![
             Value::word("print"),
             s("hi"),
-            Value::Integer(7),
+            Value::integer(7),
         ]));
         assert_eq!(mold_to_string(&v), "[print \"hi\" 7]");
     }
@@ -239,13 +320,13 @@ mod tests {
 
     #[test]
     fn mold_paren() {
-        let v = Value::paren(Series::new(vec![Value::Integer(1), Value::Integer(2)]));
+        let v = Value::paren(Series::new(vec![Value::integer(1), Value::integer(2)]));
         assert_eq!(mold_to_string(&v), "(1 2)");
     }
 
     #[test]
     fn mold_nested_block_in_paren() {
-        let inner = Value::block(Series::new(vec![Value::Integer(1), Value::Integer(2)]));
+        let inner = Value::block(Series::new(vec![Value::integer(1), Value::integer(2)]));
         let v = Value::paren(Series::new(vec![inner, Value::word("x")]));
         assert_eq!(mold_to_string(&v), "([1 2] x)");
     }

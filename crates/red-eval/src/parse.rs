@@ -99,7 +99,7 @@ impl Input {
         match self {
             Input::Str { src, cursor } => {
                 let needle_str = match needle {
-                    Value::String(s) => s.as_ref(),
+                    Value::String { s, .. } => s.as_ref(),
                     _ => return false,
                 };
                 let end = *cursor + needle_str.len();
@@ -161,7 +161,7 @@ impl Input {
         match self {
             Input::Str { src, cursor } => {
                 let needle_str = match needle {
-                    Value::String(s) => s.as_ref(),
+                    Value::String { s, .. } => s.as_ref(),
                     _ => return false,
                 };
                 if let Some(rel) = src[*cursor..].find(needle_str) {
@@ -209,7 +209,7 @@ impl Input {
         match (self, start) {
             (Input::Str { src, cursor }, Cursor::Str { cursor: start }) => {
                 let s: &str = &src[*start..*cursor];
-                Value::String(Rc::from(s))
+                Value::string(s)
             }
             (
                 Input::Series {
@@ -246,7 +246,7 @@ impl Input {
         match (self, start) {
             (Input::Str { src, cursor }, Cursor::Str { cursor: start }) => {
                 let s: &str = &src[*start..*cursor];
-                Value::String(Rc::from(s))
+                Value::string(s)
             }
             (Input::Series { series, .. }, Cursor::Series { index: start }) => {
                 let data = series.data.borrow();
@@ -281,12 +281,15 @@ pub fn parse_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
             native: Symbol::new("parse"),
             expected: 2,
             got: args.len(),
-            span: Span::new(0, 0),
+            span: args
+                .first()
+                .map(|v| v.span_or_default())
+                .unwrap_or_default(),
         });
     }
 
     let mut input = match &args[0] {
-        Value::String(s) => Input::Str {
+        Value::String { s, .. } => Input::Str {
             src: Rc::clone(s),
             cursor: 0,
         },
@@ -304,7 +307,7 @@ pub fn parse_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "string! or block!",
                 found: type_name(other),
-                span: Span::new(0, 0),
+                span: other.span_or_default(),
             })
         }
     };
@@ -316,7 +319,7 @@ pub fn parse_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
             return Err(EvalError::TypeError {
                 expected: "block!",
                 found: type_name(other),
-                span: Span::new(0, 0),
+                span: other.span_or_default(),
             })
         }
     };
@@ -551,7 +554,7 @@ fn rule_one(
 
 /// True if `v` is an unbound `Word` with the given name.
 fn is_word(v: Value, name: &str) -> bool {
-    matches!(&v, Value::Word { sym, binding: red_core::value::Binding::Unbound } if sym.as_str() == name)
+    matches!(&v, Value::Word { sym, binding: red_core::value::Binding::Unbound, .. } if sym.as_str() == name)
 }
 
 /// Write a captured value into the user-context slot for `target` (a
@@ -559,13 +562,13 @@ fn is_word(v: Value, name: &str) -> bool {
 /// slot was pre-allocated by `collect_parse_words` in the binding pass.
 fn write_capture(env: &mut Env, target: &Value, value: Value) -> Result<(), EvalError> {
     let sym = match target {
-        Value::LitWord(s) => s.clone(),
+        Value::LitWord { sym, .. } => sym.clone(),
         Value::Word { sym, .. } => sym.clone(),
         other => {
             return Err(EvalError::TypeError {
                 expected: "word!",
                 found: type_name(other),
-                span: Span::new(0, 0),
+                span: other.span_or_default(),
             })
         }
     };
@@ -574,7 +577,7 @@ fn write_capture(env: &mut Env, target: &Value, value: Value) -> Result<(), Eval
         .index_of(&sym)
         .ok_or_else(|| EvalError::UnboundWord {
             sym: sym.clone(),
-            span: Span::new(0, 0),
+            span: target.span_or_default(),
         })?;
     env.user_ctx.set_slot(idx, value);
     Ok(())
@@ -709,8 +712,8 @@ mod tests {
 
     fn run_capture_val(src: &str) -> Result<(Value, Vec<u8>), String> {
         let body = load_source(src).map_err(|e| e.to_string())?;
-        let mut ctx = Context::new();
-        install_constants(&mut ctx);
+        let ctx = Context::new();
+        install_constants(&ctx);
         let ctx_rc = bind_pass(&body, ctx);
         let buf = Rc::new(RefCell::new(Vec::<u8>::new()));
         let mut env = Env::new_with_output(ctx_rc, Box::new(BufferWriter(Rc::clone(&buf))));

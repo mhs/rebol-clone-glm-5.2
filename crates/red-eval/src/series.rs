@@ -41,7 +41,7 @@ fn extract_series(v: &Value) -> Result<(Series, Span, bool), EvalError> {
         other => Err(EvalError::TypeError {
             expected: "series!",
             found: type_name(other),
-            span: Span::new(0, 0),
+            span: other.span_or_default(),
         }),
     }
 }
@@ -91,12 +91,12 @@ fn pick_index(cursor: usize, len: usize, n: i64) -> Option<usize> {
 /// Loop-variable name: `'word` or bare `word` form.
 fn loop_word(v: &Value) -> Result<Symbol, EvalError> {
     match v {
-        Value::LitWord(s) => Ok(s.clone()),
+        Value::LitWord { sym, .. } => Ok(sym.clone()),
         Value::Word { sym, .. } => Ok(sym.clone()),
         other => Err(EvalError::TypeError {
             expected: "word!",
             found: type_name(other),
-            span: Span::new(0, 0),
+            span: other.span_or_default(),
         }),
     }
 }
@@ -107,16 +107,19 @@ fn loop_slot(sym: &Symbol, env: &Env) -> Result<usize, EvalError> {
         .index_of(sym)
         .ok_or_else(|| EvalError::UnboundWord {
             sym: sym.clone(),
-            span: Span::new(0, 0),
+            span: Span::default(),
         })
 }
 
-fn arity(native: &str, expected: usize, got: usize) -> EvalError {
+fn arity(args: &[Value], native: &str, expected: usize, got: usize) -> EvalError {
     EvalError::Arity {
         native: Symbol::new(native),
         expected,
         got,
-        span: Span::new(0, 0),
+        span: args
+            .first()
+            .map(|v| v.span_or_default())
+            .unwrap_or_default(),
     }
 }
 
@@ -124,7 +127,7 @@ fn type_err(expected: &'static str, found: &Value) -> EvalError {
     EvalError::TypeError {
         expected,
         found: type_name(found),
-        span: Span::new(0, 0),
+        span: found.span_or_default(),
     }
 }
 
@@ -133,7 +136,7 @@ fn body_block(args: &[Value], idx: usize, native: &str) -> Result<Value, EvalErr
     match args.get(idx) {
         Some(v @ Value::Block { .. }) => Ok(v.clone()),
         Some(other) => Err(type_err("block!", other)),
-        None => Err(arity(native, idx + 1, args.len())),
+        None => Err(arity(args, native, idx + 1, args.len())),
     }
 }
 
@@ -180,7 +183,7 @@ fn value_at(series: &Series, offset: usize, native: &str) -> Result<Value, EvalE
     if idx >= data.len() {
         return Err(EvalError::Native {
             message: format!("{native}: index out of range"),
-            span: Span::new(0, 0),
+            span: Span::default(),
         });
     }
     Ok(data[idx].clone())
@@ -204,7 +207,7 @@ fn last(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
     let Some(v) = data.last() else {
         return Err(EvalError::Native {
             message: "last: empty series".into(),
-            span: Span::new(0, 0),
+            span: Span::default(),
         });
     };
     Ok(v.clone())
@@ -264,14 +267,14 @@ fn skip(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
 fn index_q(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
     let (series, _, _) = extract_series(&args[0])?;
     // 1-based cursor position.
-    Ok(Value::Integer(series.index as i64 + 1))
+    Ok(Value::integer(series.index as i64 + 1))
 }
 
 fn length_q(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
     let (series, _, _) = extract_series(&args[0])?;
     let len = storage_len(&series);
     let count = len.saturating_sub(series.index);
-    Ok(Value::Integer(count as i64))
+    Ok(Value::integer(count as i64))
 }
 
 // ---------------------------------------------------------------------------
@@ -290,7 +293,7 @@ fn pick(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
 /// tail). Returns the written value. Errors if out of range.
 fn poke(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 3 {
-        return Err(arity("poke", 3, args.len()));
+        return Err(arity(args, "poke", 3, args.len()));
     }
     let (series, _, _) = extract_series(&args[0])?;
     let n = as_int(&args[1], "poke")?;
@@ -298,7 +301,7 @@ fn poke(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
     let Some(idx) = pick_index(series.index, len, n) else {
         return Err(EvalError::Native {
             message: "poke: index out of range".into(),
-            span: Span::new(0, 0),
+            span: args[0].span_or_default(),
         });
     };
     let val = args[2].clone();
@@ -323,7 +326,7 @@ pub(crate) fn word_sym(v: &Value) -> Option<&Symbol> {
         Value::Word { sym, .. } | Value::SetWord { sym, .. } | Value::GetWord { sym, .. } => {
             Some(sym)
         }
-        Value::LitWord(s) => Some(s),
+        Value::LitWord { sym, .. } => Some(sym),
         _ => None,
     }
 }
@@ -370,7 +373,7 @@ fn find(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
 /// Returns the series at its current cursor.
 fn append(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(arity("append", 2, args.len()));
+        return Err(arity(args, "append", 2, args.len()));
     }
     let (series, span, is_paren) = extract_series(&args[0])?;
     series.data.borrow_mut().push(args[1].clone());
@@ -380,7 +383,7 @@ fn append(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
 /// `insert series value` — insert `value` at the cursor.
 fn insert(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(arity("insert", 2, args.len()));
+        return Err(arity(args, "insert", 2, args.len()));
     }
     let (series, span, is_paren) = extract_series(&args[0])?;
     series
@@ -393,14 +396,14 @@ fn insert(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
 /// `change series value` — replace the value at the cursor.
 fn change(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
-        return Err(arity("change", 2, args.len()));
+        return Err(arity(args, "change", 2, args.len()));
     }
     let (series, span, is_paren) = extract_series(&args[0])?;
     let len = storage_len(&series);
     if series.index >= len {
         return Err(EvalError::Native {
             message: "change: at tail".into(),
-            span: Span::new(0, 0),
+            span,
         });
     }
     series.data.borrow_mut()[series.index] = args[1].clone();
@@ -410,7 +413,7 @@ fn change(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
 /// `remove series` — remove the value at the cursor.
 fn remove(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
     if !args.is_empty() && args.len() != 1 {
-        return Err(arity("remove", 1, args.len()));
+        return Err(arity(args, "remove", 1, args.len()));
     }
     let (series, span, is_paren) = extract_series(&args[0])?;
     let len = storage_len(&series);
@@ -463,7 +466,7 @@ fn copy(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
 /// last body value (or `none` if the body never ran).
 fn foreach(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 3 {
-        return Err(arity("foreach", 3, args.len()));
+        return Err(arity(args, "foreach", 3, args.len()));
     }
     let sym = loop_word(&args[0])?;
     let idx = loop_slot(&sym, env)?;
@@ -497,7 +500,7 @@ fn foreach(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 /// the cursor. Terminates when the series reaches its tail.
 fn forall(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 3 {
-        return Err(arity("forall", 3, args.len()));
+        return Err(arity(args, "forall", 3, args.len()));
     }
     let sym = loop_word(&args[0])?;
     let idx = loop_slot(&sym, env)?;
@@ -531,7 +534,7 @@ fn forall(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 
 fn as_int(v: &Value, _native: &str) -> Result<i64, EvalError> {
     match v {
-        Value::Integer(n) => Ok(*n),
+        Value::Integer { n, .. } => Ok(*n),
         other => Err(type_err("integer!", other)),
     }
 }
@@ -638,8 +641,8 @@ mod tests {
 
     fn run_capture_val(src: &str) -> Result<(Value, Vec<u8>), String> {
         let body = load_source(src).map_err(|e| e.to_string())?;
-        let mut ctx = Context::new();
-        install_constants(&mut ctx);
+        let ctx = Context::new();
+        install_constants(&ctx);
         let ctx_rc = bind_pass(&body, ctx);
         let buf = Rc::new(RefCell::new(Vec::<u8>::new()));
         let mut env = Env::new_with_output(ctx_rc, Box::new(BufferWriter(Rc::clone(&buf))));

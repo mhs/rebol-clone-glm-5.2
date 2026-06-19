@@ -32,6 +32,38 @@ pub enum ParseError {
     EmptyInput,
 }
 
+impl ParseError {
+    /// Byte-offset span where this error originated. `EmptyInput` has no
+    /// span (the source was empty).
+    pub fn span(&self) -> Option<Span> {
+        match self {
+            ParseError::Unexpected { span, .. } => Some(*span),
+            ParseError::MissingClose { open, .. } => Some(*open),
+            ParseError::EmptyInput => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Message body only — `render_error` adds the `*** Error:` prefix
+        // and `file:line:col:` location.
+        match self {
+            ParseError::Unexpected {
+                found, expected, ..
+            } => {
+                write!(f, "expected {expected}, found {found:?}")
+            }
+            ParseError::MissingClose { kind, .. } => {
+                write!(f, "missing closing {kind} delimiter")
+            }
+            ParseError::EmptyInput => write!(f, "empty input"),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
+
 /// Recursive-descent cursor over a borrowed token slice.
 pub struct Parser<'a> {
     tokens: &'a [Token],
@@ -87,21 +119,22 @@ impl<'a> Parser<'a> {
             TokenKind::LParen => self.parse_paren(),
             TokenKind::Integer(n) => {
                 self.advance()?;
-                Ok(Value::Integer(n))
+                Ok(Value::Integer { n, span: tok.span })
             }
             TokenKind::Float(f) => {
                 self.advance()?;
-                Ok(Value::Float(f))
+                Ok(Value::Float { f, span: tok.span })
             }
             TokenKind::String(s) => {
                 self.advance()?;
-                Ok(Value::String(s))
+                Ok(Value::String { s, span: tok.span })
             }
             TokenKind::Word(sym) => {
                 self.advance()?;
                 Ok(Value::Word {
                     sym,
                     binding: Binding::Unbound,
+                    span: tok.span,
                 })
             }
             TokenKind::SetWord(sym) => {
@@ -109,6 +142,7 @@ impl<'a> Parser<'a> {
                 Ok(Value::SetWord {
                     sym,
                     binding: Binding::Unbound,
+                    span: tok.span,
                 })
             }
             TokenKind::GetWord(sym) => {
@@ -116,11 +150,15 @@ impl<'a> Parser<'a> {
                 Ok(Value::GetWord {
                     sym,
                     binding: Binding::Unbound,
+                    span: tok.span,
                 })
             }
             TokenKind::LitWord(sym) => {
                 self.advance()?;
-                Ok(Value::LitWord(sym))
+                Ok(Value::LitWord {
+                    sym,
+                    span: tok.span,
+                })
             }
             // Stray closers at value position are always errors.
             TokenKind::RBracket => Err(ParseError::Unexpected {
@@ -282,7 +320,10 @@ mod tests {
     fn single_integer_parses() {
         let series = load(&lex("42").unwrap()).unwrap();
         assert_eq!(series.data.borrow().len(), 1);
-        assert!(matches!(series.data.borrow()[0], Value::Integer(42)));
+        assert!(matches!(
+            series.data.borrow()[0],
+            Value::Integer { n: 42, .. }
+        ));
     }
 
     #[test]

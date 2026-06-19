@@ -312,21 +312,21 @@ on the one above unless noted.
 
 ## Milestone 12 — Golden suite + error polish
 
-- [ ] Audit `EvalError` rendering: every variant produces a clear `*** Error:` line
-- [ ] Include span info in error messages (`file.red:line:col:`)
-- [ ] Implement line/col lookup from byte offset (precompute line starts in lexer)
-- [ ] Unbound word error names the symbol
-- [ ] Type errors name expected vs. found
-- [ ] Arity errors name the native and counts
-- [ ] Errors from natives carry a span (use first arg's span as fallback)
-- [ ] Add golden fixtures for each error case (one per error kind)
-- [ ] Expand `red-eval/tests/programs/` to 15-20 fixtures covering all features
-- [ ] Include fixtures for: arithmetic, strings, blocks, parens, functions, recursion, series ops, `parse`, errors
-- [ ] Add a `tests/programs/README.md` explaining fixture format
-- [ ] Audit `mold` output for printer edge cases (empty block, nested quotes, floats)
-- [ ] Add property-style test: `mold(parse(mold(v))) == mold(v)` for random-ish `Value`s
-- [ ] Run clippy on workspace; fix warnings
-- [ ] Run `cargo fmt --all --check`
-- [ ] Final `cargo test --workspace` green
-- [ ] Update `project-brief.md` and `architecture.md` if any drift was discovered
+- [x] Audit `EvalError` rendering: every variant produces a clear `*** Error:` line
+- [x] Include span info in error messages (`file.red:line:col:`)
+- [x] Implement line/col lookup from byte offset (precompute line starts in lexer)
+- [x] Unbound word error names the symbol
+- [x] Type errors name expected vs. found
+- [x] Arity errors name the native and counts
+- [x] Errors from natives carry a span (use first arg's span as fallback)
+- [x] Add golden fixtures for each error case (one per error kind)
+- [x] Expand `red-eval/tests/programs/` to 15-20 fixtures covering all features
+- [x] Include fixtures for: arithmetic, strings, blocks, parens, functions, recursion, series ops, `parse`, errors
+- [x] Add a `tests/programs/README.md` explaining fixture format
+- [x] Audit `mold` output for printer edge cases (empty block, nested quotes, floats)
+- [x] Add property-style test: `mold(parse(mold(v))) == mold(v)` for random-ish `Value`s
+- [x] Run clippy on workspace; fix warnings
+- [x] Run `cargo fmt --all --check`
+- [x] Final `cargo test --workspace` green
+- [x] Update `project-brief.md` and `architecture.md` if any drift was discovered
 - [ ] Tag release `v0.1.0-poc`

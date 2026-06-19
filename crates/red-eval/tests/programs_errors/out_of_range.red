@@ -1,0 +1,2 @@
+Red []
+print first []

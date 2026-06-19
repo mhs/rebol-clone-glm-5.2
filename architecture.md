@@ -39,7 +39,7 @@ flowchart TD
 ```rust
 pub struct Span { pub start: usize, pub end: usize }  // byte offsets
 
-pub struct Symbol(pub string_cache::DefaultSymbol);   // interned
+pub struct Symbol(pub Rc<str>);   // interned via `Rc<str>` (string_cache tried & dropped)
 
 pub struct Series {
     pub data: Rc<RefCell<Vec<Value>>>,
@@ -49,7 +49,7 @@ pub struct Series {
 pub enum Binding {
     Unbound,
     Local(Context, usize),
-    Func(Rc<FuncDef>, usize),
+    Func(usize),   // function-local slot; resolved via the active call frame
 }
 
 pub struct FuncDef {
@@ -57,12 +57,18 @@ pub struct FuncDef {
     pub body: Series,
     pub ctx: Context,
     pub native: Option<NativeFn>,
+    pub variadic: bool,
+    pub infix: bool,
 }
 
 pub type NativeFn = fn(&[Value], &mut Env) -> Result<Value, EvalError>;
 ```
 
-`Value`, `Context`, `Env`, `EvalError` defined as in the brief.
+`Value`, `Context`, `Env`, `EvalError` defined as in the brief. Every source-
+origin `Value` variant (`Integer`/`Float`/`String`/word-family/`Block`/`Paren`)
+carries the byte-offset `Span` of its originating token so eval-time errors
+can render `file:line:col:`. Synthetic variants (`None`/`Logic`/`Func`/`Path`/
+`String8`) are produced at runtime and carry no span.
 
 ## Lexer (`red-core/src/lexer.rs`)
 
@@ -237,9 +243,20 @@ pub enum EvalError {
     TypeError { expected: &'static str, found: &'static str, span: Span },
     Arity { native: Symbol, expected: usize, got: usize, span: Span },
     Return(Value),                 // control-flow unwind from `return`
-    Native { source: Box<dyn std::error::Error>, span: Span },
+    Break(Option<Value>),          // control-flow unwind from `break`
+    Continue,                      // control-flow unwind from `continue`
+    Native { message: String, span: Span },
 }
 ```
+
+`EvalError::Display` renders just the message body (no `*** Error:` prefix,
+no location). The `render_error(file: Option<&str>, src: &str, err: &Error)`
+function in `red-core::error` produces the full Red-style diagnostic line
+`*** Error: [file:line:col: ]<msg>` using a `LineMap` (precomputed line-start
+offsets) to translate the error's byte-offset `Span` into 1-based
+`line:col`. The CLI passes `Some(path)` + the file source; the REPL passes
+`None` + the line buffer. Errors whose span is the zero placeholder
+(`Span::new(0,0)`, used by synthetic values) omit the location.
 
 ### Main eval loop (pseudocode)
 
@@ -321,13 +338,22 @@ inline or via its `Series`'s token span).
 
 ## Cross-cutting
 
-- **Span flow**: lex→parse→eval. Every `Value` carries or can reach a span.
-- **Symbol interning**: at lex time; reused through parse/eval.
+- **Span flow**: lex→parse→eval. Every source-origin `Value` carries its
+  token span; synthetic variants (`None`/`Logic`/`Func`/`Path`/`String8`)
+  carry none and fall back to the zero span.
+- **Symbol interning**: `Symbol(Rc<str>)` — `string_cache` was tried early
+  on but dropped in favor of the simpler `Rc<str>` newtype (no profiling
+  need surfaced).
 - **Sharing & mutation**: `Rc<RefCell<...>>` for `Series` data and Context
   slots. No GC, no borrowing across the eval loop.
 - **Single-threaded**: no `Send`/`Sync` requirements; `Env` is `!Send`.
 - **No precedence parsing**: Red is prefix/eager, so the parser has no
   expression grammar — every value is one token (or one bracketed group).
+- **Printer round-trip gaps (POC)**: `Func` molds as `#[function]`,
+  `String8` as `#{hex}`, and `NaN`/`inf` floats have no lexer literal — none
+  reparse. The property test in `red-core/tests/property.rs` excludes these
+  variants. Positioned series (`index != 0`) also don't round-trip to their
+  head form (mold renders from the cursor).
 
 ## Testing touchpoints
 

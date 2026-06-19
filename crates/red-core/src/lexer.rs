@@ -46,6 +46,37 @@ pub enum LexError {
     UnbalancedBrace { span: Span, depth: i32 },
 }
 
+impl LexError {
+    /// Byte-offset span where this error was detected.
+    pub fn span(&self) -> Span {
+        match self {
+            LexError::UnterminatedString { span }
+            | LexError::InvalidNumber { span, .. }
+            | LexError::InvalidWord { span }
+            | LexError::UnbalancedBrace { span, .. } => *span,
+        }
+    }
+}
+
+impl std::fmt::Display for LexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Message body only — `render_error` adds the `*** Error:` prefix
+        // and `file:line:col:` location.
+        match self {
+            LexError::UnterminatedString { .. } => write!(f, "unterminated string"),
+            LexError::InvalidNumber { chars, .. } => {
+                write!(f, "invalid number: {chars:?}")
+            }
+            LexError::InvalidWord { .. } => write!(f, "invalid word (empty body)"),
+            LexError::UnbalancedBrace { depth, .. } => {
+                write!(f, "unbalanced brace — {depth} unclosed `{{` at EOF")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LexError {}
+
 /// Tokenize `src`. Whitespace and `;` comments are skipped; every emitted
 /// token has a correct byte-offset span.
 pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {

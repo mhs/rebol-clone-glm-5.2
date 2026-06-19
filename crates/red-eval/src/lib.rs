@@ -21,5 +21,5 @@ pub use series::register_series_natives;
 // Re-exports from red-core used by the CLI (REPL): parsing the next line,
 // molding the result, and matching on parse errors for multi-line input.
 pub use red_core::{
-    load_source, mold, mold_to_string, Error, ParseError, Series, Span, Symbol, Value,
+    load_source, mold, mold_to_string, render_error, Error, ParseError, Series, Span, Symbol, Value,
 };
