@@ -27,110 +27,7 @@ use red_core::parser::parse_program;
 use red_core::value::{Binding, FuncDef, Series, Span, Symbol, Value};
 use red_core::{Context, Env, Error, EvalError};
 
-/// Walk `body` and attach `Binding::Local` to every word whose name matches a
-/// slot allocated for a `SetWord` or a `repeat` loop variable. Recurses into
-/// nested `Block`/`Paren` contents so that words inside data blocks are also
-/// bound (matches Red semantics: `foo: 5 [foo]` later `do`ne yields `[5]`).
-///
-/// Returns the `Rc<Context>` shared by all attached bindings. The caller
-/// installs it into `Env.user_ctx` so eval-time writes flow through the same
-/// slots.
-pub fn bind_pass(body: &Series, user_ctx: Context) -> Rc<Context> {
-    let mut ctx = user_ctx;
-    collect_setwords(body, &mut ctx);
-    collect_loop_vars(body, &mut ctx);
-    let ctx_rc = Rc::new(ctx);
-    attach_bindings(body, &ctx_rc);
-    ctx_rc
-}
-
-/// Phase 1: allocate a slot in `ctx` for every `SetWord` encountered anywhere
-/// in the tree. The slots are populated during eval, not here.
-fn collect_setwords(series: &Series, ctx: &mut Context) {
-    let data = series.data.borrow();
-    for v in data.iter() {
-        match v {
-            Value::SetWord { sym, .. } => {
-                ctx.slot_index(sym.clone());
-            }
-            Value::Block { series: s, .. } | Value::Paren { series: s, .. } => {
-                collect_setwords(s, ctx);
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Phase 1b: allocate a slot for every word introduced as a loop variable by
-/// `repeat`, `foreach`, or `forall`. Each is recognized in either of two
-/// forms:
-/// - `repeat 'i <count> <body>`  (lit-word counter, Red canonical form)
-/// - `repeat i <count> <body>`   (bare-word counter, accepted by the POC)
-/// - `foreach 'word <series> <body>` / `forall 'word <series> <body>`
-///
-/// The lit-word/bare-word value itself is *not* a SetWord, so without this
-/// pass the loop name would never get a slot and body references would
-/// resolve as unbound. Recurses into nested `Block`/`Paren`.
-fn collect_loop_vars(series: &Series, ctx: &mut Context) {
-    let data = series.data.borrow();
-    let n = data.len();
-    let mut i = 0;
-    while i < n {
-        match &data[i] {
-            Value::Word {
-                sym,
-                binding: Binding::Unbound,
-            } if matches!(sym.as_str(), "repeat" | "foreach" | "forall") => {
-                if i + 1 < n {
-                    let name = match &data[i + 1] {
-                        Value::LitWord(sym) => Some(sym.clone()),
-                        Value::Word {
-                            sym,
-                            binding: Binding::Unbound,
-                        } => Some(sym.clone()),
-                        _ => None,
-                    };
-                    if let Some(sym) = name {
-                        ctx.slot_index(sym);
-                    }
-                }
-                i += 1;
-            }
-            Value::Block { series: s, .. } | Value::Paren { series: s, .. } => {
-                let child = s.clone();
-                collect_loop_vars(&child, ctx);
-                i += 1;
-            }
-            _ => i += 1,
-        }
-    }
-}
-
-/// Phase 2: for every `Word`/`SetWord`/`GetWord` whose name is now in `ctx`,
-/// replace its `binding` with `Binding::Local(Rc::clone(ctx), idx)`. Words
-/// with no matching slot stay `Unbound` (function locals / natives resolved
-/// at eval time).
-fn attach_bindings(series: &Series, ctx: &Rc<Context>) {
-    let mut data = series.data.borrow_mut();
-    for i in 0..data.len() {
-        match &mut data[i] {
-            Value::Block { series, .. } | Value::Paren { series, .. } => {
-                let child = series.clone();
-                // Recurse into the child series — a different `RefCell`, so
-                // the outer `borrow_mut` above stays valid.
-                attach_bindings(&child, ctx);
-            }
-            Value::Word { sym, binding }
-            | Value::SetWord { sym, binding }
-            | Value::GetWord { sym, binding } => {
-                if let Some(idx) = ctx.index_of(sym) {
-                    *binding = Binding::Local(Rc::clone(ctx), idx);
-                }
-            }
-            _ => {}
-        }
-    }
-}
+use crate::binding::bind_pass;
 
 /// Evaluate a block/paren value: walk its contents in order, returning the
 /// last value. Non-block/paren values passed in are returned as-is (cloned).
@@ -284,10 +181,12 @@ fn eval_prefix(
     }
 }
 
-/// If `resolved` is a native-bearing `Func`, collect arguments from `data`
-/// (advancing `i`) and invoke the native. Otherwise return `resolved` as-is
-/// (user-defined funcs land in M9). `sym` is the calling word's symbol, used
-/// for arity-error messages.
+/// If `resolved` is a `Func`, collect arguments from `data` (advancing `i`)
+/// and invoke it. Native funcs (M6+) call their `NativeFn` directly; user
+/// funcs (M9: created via `func`/`does`/`make function!`) push a `CallFrame`
+/// with a per-call context clone, evaluate the body, and catch
+/// `EvalError::Return` as the return value. Otherwise return `resolved`
+/// as-is. `sym` is the calling word's symbol, used for arity-error messages.
 ///
 /// Pre: `*i` points at the first potential argument (the calling word has
 /// already been consumed by [`eval_prefix`]). Each argument is evaluated as a
@@ -303,6 +202,26 @@ fn dispatch_call(
 ) -> Result<Value, EvalError> {
     let fd = match &resolved {
         Value::Func(fd) if fd.native.is_some() => fd.clone(),
+        Value::Func(fd) => {
+            // User-defined function (no native). Collect `params.len()`
+            // caller-evaluated arguments, push a call frame with a fresh
+            // per-call context clone (so recursion doesn't clobber caller
+            // locals), evaluate the body, and catch `Return`.
+            let arity = fd.params.len();
+            let mut args = Vec::with_capacity(arity);
+            for _ in 0..arity {
+                if *i >= data.len() {
+                    return Err(EvalError::Arity {
+                        native: sym.clone(),
+                        expected: arity,
+                        got: args.len(),
+                        span,
+                    });
+                }
+                args.push(eval_expression(data, i, env)?);
+            }
+            return call_user_func(fd, args, env);
+        }
         _ => return Ok(resolved),
     };
     let f = fd.native.unwrap();
@@ -328,8 +247,10 @@ fn dispatch_call(
             // *name*, not a value to evaluate. Pass it through unevaluated so
             // the native can bind it as the loop counter / iterator. (Red uses
             // a lit-word here; the POC also accepts a bare word for
-            // ergonomics.)
-            if n == 0 && matches!(sym.as_str(), "repeat" | "foreach" | "forall") {
+            // ergonomics.) `make`'s first argument is a datatype word
+            // (`function!`) which is also passed unevaluated — datatype words
+            // aren't bound values in the POC.
+            if n == 0 && matches!(sym.as_str(), "repeat" | "foreach" | "forall" | "make") {
                 args.push(data[*i].clone());
                 *i += 1;
             } else {
@@ -338,6 +259,36 @@ fn dispatch_call(
         }
     }
     f(&args, env)
+}
+
+/// Invoke a user-defined function: clone its `FuncDef.ctx` (fresh slot
+/// storage per call so recursion is safe), fill param slots in order, push a
+/// `CallFrame`, evaluate the body, then pop the frame. `EvalError::Return(v)`
+/// is caught and converted to `Ok(v)` — that's how the `return` native exits
+/// a function. Any other error propagates.
+fn call_user_func(fd: &Rc<FuncDef>, args: Vec<Value>, env: &mut Env) -> Result<Value, EvalError> {
+    // Fresh per-call context: clone the definition ctx (its name map + slot
+    // layout) with fresh `RefCell` storage. Param slots are filled below;
+    // body-local SetWord slots start at `none`.
+    let call_ctx = fd.ctx.clone();
+    for (idx, arg) in args.iter().enumerate() {
+        call_ctx.set_slot(idx, arg.clone());
+    }
+    env.call_stack.push(crate::context::CallFrame {
+        ctx: call_ctx,
+        func: Some(Rc::clone(fd)),
+    });
+    let body_block = Value::Block {
+        series: fd.body.clone(),
+        span: Span::new(0, 0),
+    };
+    let result = eval(&body_block, env);
+    env.call_stack.pop();
+    match result {
+        Ok(v) => Ok(v),
+        Err(EvalError::Return(v)) => Ok(v),
+        Err(e) => Err(e),
+    }
 }
 
 /// True if `v` is an unbound `Word`/`GetWord` whose name is a registered
@@ -367,6 +318,19 @@ fn resolve_word(
 ) -> Result<Value, EvalError> {
     match binding {
         Binding::Local(ctx, idx) => Ok(ctx.slot_value(*idx)),
+        Binding::Func(idx) => {
+            // Function-local slot: read from the current call frame's
+            // per-call context clone. `call_stack` is non-empty whenever
+            // a function body is being evaluated.
+            let frame = env
+                .call_stack
+                .last()
+                .ok_or_else(|| EvalError::UnboundWord {
+                    sym: sym.clone(),
+                    span,
+                })?;
+            Ok(frame.ctx.slot_value(*idx))
+        }
         Binding::Unbound => {
             if let Some(fd) = env.natives.get(sym) {
                 Ok(Value::Func(Rc::clone(fd)))
@@ -376,13 +340,6 @@ fn resolve_word(
                     span,
                 })
             }
-        }
-        Binding::Func => {
-            // Reserved for M9 (function-parameter binding).
-            Err(EvalError::UnboundWord {
-                sym: sym.clone(),
-                span,
-            })
         }
     }
 }
@@ -395,7 +352,7 @@ fn write_setword(
     sym: &Symbol,
     binding: &Binding,
     val: Value,
-    _env: &mut Env,
+    env: &mut Env,
     span: Span,
 ) -> Result<(), EvalError> {
     match binding {
@@ -403,11 +360,19 @@ fn write_setword(
             ctx.set_slot(*idx, val);
             Ok(())
         }
+        Binding::Func(idx) => {
+            // Write to the current call frame's function-local slot.
+            let frame = env
+                .call_stack
+                .last()
+                .ok_or_else(|| EvalError::UnboundWord {
+                    sym: sym.clone(),
+                    span,
+                })?;
+            frame.ctx.set_slot(*idx, val);
+            Ok(())
+        }
         Binding::Unbound => Err(EvalError::UnboundWord {
-            sym: sym.clone(),
-            span,
-        }),
-        Binding::Func => Err(EvalError::UnboundWord {
             sym: sym.clone(),
             span,
         }),

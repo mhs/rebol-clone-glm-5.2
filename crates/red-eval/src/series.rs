@@ -616,7 +616,7 @@ pub fn register_series_natives(env: &mut Env) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interp::bind_pass;
+    use crate::binding::bind_pass;
     use crate::natives::{install_constants, register_natives};
     use red_core::context::Context;
     use red_core::parser::load_source;

@@ -233,32 +233,32 @@ on the one above unless noted.
 
 ## Milestone 9 — Functions + binding
 
-- [ ] Create `red-eval/src/binding.rs`
-- [ ] Implement `func` native: takes spec block + body block, returns `Value::Func`
-- [ ] Bind function body words to fresh function context at creation time
-- [ ] Implement `does` native: zero-arg `func`
-- [ ] Implement `make function!` (same as `func`)
-- [ ] Implement `function?` predicate
-- [ ] Implement `return value` native — unwinds via `EvalError::Return`
-- [ ] Function call shim: push `CallFrame`, bind params, eval body, pop, catch Return
-- [ ] Support default arg evaluation: caller evaluates args before call
-- [ ] Implement `bind block context` — rebind words in a block to a context
-- [ ] Implement `use [words] block` — creates local context, binds words, evals block
-- [ ] Implement `in context 'word` — returns bound word value
-- [ ] Implement `get 'word` — returns value bound to word
-- [ ] Implement `set 'word value` — sets value in word's context
-- [ ] Implement `value? 'word` — returns true if word has a value
-- [ ] Recursive functions work (function can call itself)
-- [ ] Closures explicitly out of scope (document in code comment)
-- [ ] Inline `#[test]`: `square: func [x][x * x] square 5` → 25
-- [ ] Inline `#[test]`: `does` zero-arg call
-- [ ] Inline `#[test]`: `return` exits early
-- [ ] Inline `#[test]`: recursive factorial
-- [ ] Inline `#[test]`: `use [x][x: 5 x]` → 5, x unbound outside
-- [ ] Inline `#[test]`: `value? 'foo` before/after `foo: 5`
-- [ ] Inline `#[test]`: `bind` rebinds words to a context
-- [ ] Add 5-6 golden fixtures using functions, recursion, locals
-- [ ] `cargo test --workspace` passes
+- [x] Create `red-eval/src/binding.rs`
+- [x] Implement `func` native: takes spec block + body block, returns `Value::Func`
+- [x] Bind function body words to fresh function context at creation time
+- [x] Implement `does` native: zero-arg `func`
+- [x] Implement `make function!` (same as `func`)
+- [x] Implement `function?` predicate
+- [x] Implement `return value` native — unwinds via `EvalError::Return`
+- [x] Function call shim: push `CallFrame`, bind params, eval body, pop, catch Return
+- [x] Support default arg evaluation: caller evaluates args before call
+- [x] Implement `bind block context` — rebind words in a block to a context
+- [x] Implement `use [words] block` — creates local context, binds words, evals block
+- [ ] Implement `in context 'word` — returns bound word value — *deferred (objects out of scope; `in` documented out-of-scope in `binding.rs`)*
+- [x] Implement `get 'word` — returns value bound to word
+- [x] Implement `set 'word value` — sets value in word's context
+- [x] Implement `value? 'word` — returns true if word has a value
+- [x] Recursive functions work (function can call itself)
+- [x] Closures explicitly out of scope (document in code comment)
+- [x] Inline `#[test]`: `square: func [x][x * x] square 5` → 25
+- [x] Inline `#[test]`: `does` zero-arg call
+- [x] Inline `#[test]`: `return` exits early
+- [x] Inline `#[test]`: recursive factorial
+- [x] Inline `#[test]`: `use [x][x: 5 x]` → 5, x unbound outside
+- [x] Inline `#[test]`: `value? 'foo` before/after `foo: 5`
+- [x] Inline `#[test]`: `bind` rebinds words to a context
+- [x] Add 5-6 golden fixtures using functions, recursion, locals
+- [x] `cargo test --workspace` passes
 
 ## Milestone 10 — `parse` dialect
 

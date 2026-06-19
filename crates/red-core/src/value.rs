@@ -72,15 +72,18 @@ impl Default for Series {
 /// - `Unbound`: no binding attached yet; resolved at eval time via the
 ///   user context or native registry.
 /// - `Local(Rc<Context>, usize)`: bound to a slot in the given context.
-///   Attached by `bind_pass` (M5) for script-level words and by `func`/
-///   `does` creation (M9) for function bodies.
-/// - `Func`: reserved for function-parameter binding (M9); unused in M5.
+///   Attached by `bind_pass` (M5) for script-level words and for function-body
+///   references to outer (user-context) words (M9, supports recursion).
+/// - `Func(usize)`: bound to a function-local slot. Resolved at eval time via
+///   `env.call_stack.last().ctx` — the current call frame's per-call context
+///   clone. Attached by `bind_function_body` (M9) for params and body-local
+///   set-words. The index refers to a slot in the active call frame's `ctx`.
 #[derive(Clone, Debug, Default)]
 pub enum Binding {
     #[default]
     Unbound,
     Local(Rc<Context>, usize),
-    Func,
+    Func(usize),
 }
 
 /// Function definition shared by `Value::Func`. Fields stubbed for Milestone 2:

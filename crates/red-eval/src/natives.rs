@@ -505,6 +505,392 @@ fn reduce(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 }
 
 // ---------------------------------------------------------------------------
+// Functions: func, does, make, function?, return (M9)
+// ---------------------------------------------------------------------------
+
+/// `func [spec] [body]` — create a user-defined function value. `spec` is a
+/// block of word/lit-word parameter names; `body` is the body block. The body
+/// is bound at creation time to a fresh function-local context (params +
+/// body-local SetWords become `Binding::Func`), with outer user-context words
+/// (recursion, globals) bound as `Binding::Local`. Returns `Value::Func`.
+fn func_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Arity {
+            native: Symbol::new("func"),
+            expected: 2,
+            got: args.len(),
+            span: Span::new(0, 0),
+        });
+    }
+    let spec_block = expect_block(args, 0, "func")?;
+    let body_block = expect_block(args, 1, "func")?;
+    let params = extract_params(&spec_block)?;
+    let body_series = match &body_block {
+        Value::Block { series, .. } => series.clone(),
+        _ => unreachable!("expect_block guarantees Block"),
+    };
+    let mut fd = FuncDef {
+        params,
+        body: body_series,
+        native: None,
+        variadic: false,
+        infix: false,
+        ..Default::default()
+    };
+    crate::binding::bind_function_body(&mut fd, &env.user_ctx);
+    Ok(Value::Func(Rc::new(fd)))
+}
+
+/// `does [body]` — zero-argument `func`. Returns `Value::Func`.
+fn does_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Arity {
+            native: Symbol::new("does"),
+            expected: 1,
+            got: args.len(),
+            span: Span::new(0, 0),
+        });
+    }
+    let body_block = expect_block(args, 0, "does")?;
+    let body_series = match &body_block {
+        Value::Block { series, .. } => series.clone(),
+        _ => unreachable!("expect_block guarantees Block"),
+    };
+    let mut fd = FuncDef {
+        params: Vec::new(),
+        body: body_series,
+        native: None,
+        variadic: false,
+        infix: false,
+        ..Default::default()
+    };
+    crate::binding::bind_function_body(&mut fd, &env.user_ctx);
+    Ok(Value::Func(Rc::new(fd)))
+}
+
+/// `make <type> <spec>` — currently only `make function! [[spec][body]]` is
+/// supported. The single spec block must contain exactly two sub-blocks:
+/// the parameter spec and the body.
+fn make_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Arity {
+            native: Symbol::new("make"),
+            expected: 2,
+            got: args.len(),
+            span: Span::new(0, 0),
+        });
+    }
+    let type_sym = match &args[0] {
+        Value::LitWord(s) => s.clone(),
+        Value::Word { sym, .. } => sym.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "word!",
+                found: type_name(other),
+                span: Span::new(0, 0),
+            })
+        }
+    };
+    if type_sym.as_str() != "function!" && type_sym.as_str() != "function" {
+        return Err(EvalError::Native {
+            message: format!("make: {:?} type not supported in POC", type_sym.as_str()),
+            span: Span::new(0, 0),
+        });
+    }
+    let packed = expect_block(args, 1, "make")?;
+    let packed_series = match &packed {
+        Value::Block { series, .. } => series.clone(),
+        _ => unreachable!("expect_block guarantees Block"),
+    };
+    let data = packed_series.data.borrow();
+    if data.len() != 2 {
+        return Err(EvalError::Native {
+            message: "make function!: packed block must be [[spec][body]]".to_string(),
+            span: Span::new(0, 0),
+        });
+    }
+    let spec_block = match &data[0] {
+        Value::Block { .. } => data[0].clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "block!",
+                found: type_name(other),
+                span: Span::new(0, 0),
+            })
+        }
+    };
+    let body_block = match &data[1] {
+        Value::Block { .. } => data[1].clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "block!",
+                found: type_name(other),
+                span: Span::new(0, 0),
+            })
+        }
+    };
+    drop(data);
+    func_native(&[spec_block, body_block], env)
+}
+
+/// Extract parameter symbols from a func spec block. Each top-level item must
+/// be a word or lit-word; anything else (type annotations, refinements) is
+/// skipped for the POC.
+fn extract_params(spec_block: &Value) -> Result<Vec<Symbol>, EvalError> {
+    let series = match spec_block {
+        Value::Block { series, .. } => series.clone(),
+        _ => {
+            return Err(EvalError::TypeError {
+                expected: "block!",
+                found: type_name(spec_block),
+                span: Span::new(0, 0),
+            })
+        }
+    };
+    let data = series.data.borrow();
+    let mut params = Vec::new();
+    for v in data.iter() {
+        match v {
+            Value::Word { sym, .. } | Value::LitWord(sym) => params.push(sym.clone()),
+            _ => {
+                // Skip type annotations / refinements / locals markers in POC.
+            }
+        }
+    }
+    Ok(params)
+}
+
+/// `function? value` — `true` if value is a `function!`, else `false`.
+fn function_predicate(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(EvalError::Arity {
+            native: Symbol::new("function?"),
+            expected: 1,
+            got: 0,
+            span: Span::new(0, 0),
+        });
+    }
+    Ok(Value::Logic(matches!(args[0], Value::Func(_))))
+}
+
+/// `return [value]` — unwinds out of the enclosing function via
+/// `EvalError::Return`. With no argument, returns `none`. Caught by
+/// `call_user_func` in `interp.rs`.
+fn return_native(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+    let v = args.first().cloned().unwrap_or(Value::None);
+    Err(EvalError::Return(v))
+}
+
+// ---------------------------------------------------------------------------
+// Binding natives: get, set, value?, use, bind (M9)
+// ---------------------------------------------------------------------------
+
+/// `get 'word` — returns the value bound to `word` in the user context.
+/// Errors if the word has no value. The word operand is a lit-word (`'foo`)
+/// or an unbound word (`foo`).
+fn get_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Arity {
+            native: Symbol::new("get"),
+            expected: 1,
+            got: args.len(),
+            span: Span::new(0, 0),
+        });
+    }
+    let sym = match &args[0] {
+        Value::LitWord(s) => s.clone(),
+        Value::Word { sym, .. } => sym.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "word!",
+                found: type_name(other),
+                span: Span::new(0, 0),
+            })
+        }
+    };
+    env.user_ctx
+        .get(&sym)
+        .ok_or_else(|| EvalError::UnboundWord {
+            sym,
+            span: Span::new(0, 0),
+        })
+}
+
+/// `set 'word value` — writes `value` into `word`'s slot in the user context
+/// (the word must have been pre-allocated by `bind_pass`). Returns the value.
+fn set_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Arity {
+            native: Symbol::new("set"),
+            expected: 2,
+            got: args.len(),
+            span: Span::new(0, 0),
+        });
+    }
+    let sym = match &args[0] {
+        Value::LitWord(s) => s.clone(),
+        Value::Word { sym, .. } => sym.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "word!",
+                found: type_name(other),
+                span: Span::new(0, 0),
+            })
+        }
+    };
+    let val = args[1].clone();
+    if let Some(idx) = env.user_ctx.index_of(&sym) {
+        env.user_ctx.set_slot(idx, val.clone());
+        Ok(val)
+    } else {
+        Err(EvalError::UnboundWord {
+            sym,
+            span: Span::new(0, 0),
+        })
+    }
+}
+
+/// `value? 'word` — `true` if `word` has a value in the user context, else
+/// `false`.
+fn value_predicate(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::Arity {
+            native: Symbol::new("value?"),
+            expected: 1,
+            got: args.len(),
+            span: Span::new(0, 0),
+        });
+    }
+    let sym = match &args[0] {
+        Value::LitWord(s) => s.clone(),
+        Value::Word { sym, .. } => sym.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "word!",
+                found: type_name(other),
+                span: Span::new(0, 0),
+            })
+        }
+    };
+    Ok(Value::Logic(env.user_ctx.has(&sym)))
+}
+
+/// `use [words] block` — evaluates `block` with the listed words bound as
+/// locals in a fresh child context layered over the user context. Body
+/// SetWords and loop vars inside `block` are also collected as use-locals
+/// (scoped to the child), so `use` provides a self-contained local scope.
+/// Outer user-context words remain visible. The locals do not persist after
+/// `use` returns. Returns the block's last value.
+fn use_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Arity {
+            native: Symbol::new("use"),
+            expected: 2,
+            got: args.len(),
+            span: Span::new(0, 0),
+        });
+    }
+    let words_block = expect_block(args, 0, "use")?;
+    let body_block = expect_block(args, 1, "use")?;
+
+    // Collect the word names declared in the words block.
+    let words_series = match &words_block {
+        Value::Block { series, .. } => series.clone(),
+        _ => unreachable!(),
+    };
+    let local_names: Vec<Symbol> = {
+        let data = words_series.data.borrow();
+        data.iter()
+            .filter_map(crate::binding::loop_word_name)
+            .collect()
+    };
+
+    // Build a fresh child context seeded from the current user ctx (so outer
+    // words are visible), then allocate the listed locals (overriding any
+    // inherited slots so writes go to the child, not the user ctx).
+    let mut child = (*env.user_ctx).clone();
+    for sym in &local_names {
+        child.slot_index(sym.clone());
+    }
+
+    // Collect body-local SetWords and loop vars into the child so they're
+    // scoped to the `use` and don't leak to the user context.
+    let body_series = match &body_block {
+        Value::Block { series, .. } => series.clone(),
+        _ => unreachable!(),
+    };
+    crate::binding::collect_setwords(&body_series, &mut child);
+    crate::binding::collect_loop_vars(&body_series, &mut child);
+
+    let child_rc = Rc::new(child);
+    // Deep-copy the body so rebinding doesn't mutate the shared source tree,
+    // then bind words: child-locals first (shadow outer), then outer
+    // user-ctx words, else leave Unbound.
+    let rebound = crate::binding::deep_clone_series(&body_series);
+    crate::binding::attach_use_bindings(&rebound, &child_rc, &env.user_ctx);
+
+    let saved = std::mem::replace(&mut env.user_ctx, child_rc);
+    let block = Value::Block {
+        series: rebound,
+        span: Span::new(0, 0),
+    };
+    let result = eval(&block, env);
+    env.user_ctx = saved;
+    result
+}
+
+/// `bind block 'word` — rebinds words in `block` to the user context (the
+/// context where `word` is bound). For the POC, the second argument names a
+/// word in the user context (the canonical Red form takes a context value;
+/// objects are out of scope, so we accept a word/lit-word and bind to the
+/// user context it lives in). Returns the rebound block (a deep copy).
+fn bind_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::Arity {
+            native: Symbol::new("bind"),
+            expected: 2,
+            got: args.len(),
+            span: Span::new(0, 0),
+        });
+    }
+    let block = expect_block(args, 0, "bind")?;
+    // Verify the word operand is bound in the user context (POC: the only
+    // context available). The operand itself is otherwise unused — `bind`
+    // always rebinds to the user context in the POC.
+    let word_sym = match &args[1] {
+        Value::LitWord(s) => s.clone(),
+        Value::Word { sym, .. } => sym.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "word!",
+                found: type_name(other),
+                span: Span::new(0, 0),
+            })
+        }
+    };
+    if !env.user_ctx.has(&word_sym) {
+        return Err(EvalError::UnboundWord {
+            sym: word_sym,
+            span: Span::new(0, 0),
+        });
+    }
+    // Deep-copy the block so we don't mutate shared data, then rebind every
+    // word whose name is in the user context to a `Binding::Local` pointing
+    // at it.
+    let series = match &block {
+        Value::Block { series, .. } => series.clone(),
+        _ => unreachable!(),
+    };
+    let rebound = crate::binding::deep_clone_series(&series);
+    let all_names: Vec<Symbol> = env.user_ctx.names.keys().cloned().collect();
+    crate::binding::rebind_to_context(&rebound, &env.user_ctx, &all_names);
+    Ok(Value::Block {
+        series: rebound,
+        span: Span::new(0, 0),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -530,6 +916,18 @@ fn infix_native(f: NativeFn, arity: usize) -> Rc<FuncDef> {
         native: Some(f),
         variadic: false,
         infix: true,
+        ..Default::default()
+    })
+}
+
+/// Build a variadic native: collects all remaining expressions up to the next
+/// native word. Used by `make` (which accepts 2 or 3 args depending on form).
+fn variadic_native(f: NativeFn) -> Rc<FuncDef> {
+    Rc::new(FuncDef {
+        params: Vec::new(),
+        native: Some(f),
+        variadic: true,
+        infix: false,
         ..Default::default()
     })
 }
@@ -615,6 +1013,44 @@ pub fn register_natives(env: &mut Env) {
     env.natives
         .insert(Symbol::new("reduce"), fixed_native(reduce as NativeFn, 1));
 
+    // Functions (M9)
+    env.natives.insert(
+        Symbol::new("func"),
+        fixed_native(func_native as NativeFn, 2),
+    );
+    env.natives.insert(
+        Symbol::new("does"),
+        fixed_native(does_native as NativeFn, 1),
+    );
+    env.natives.insert(
+        Symbol::new("make"),
+        fixed_native(make_native as NativeFn, 2),
+    );
+    env.natives.insert(
+        Symbol::new("function?"),
+        fixed_native(function_predicate as NativeFn, 1),
+    );
+    env.natives.insert(
+        Symbol::new("return"),
+        variadic_native(return_native as NativeFn),
+    );
+
+    // Binding (M9)
+    env.natives
+        .insert(Symbol::new("get"), fixed_native(get_native as NativeFn, 1));
+    env.natives
+        .insert(Symbol::new("set"), fixed_native(set_native as NativeFn, 2));
+    env.natives.insert(
+        Symbol::new("value?"),
+        fixed_native(value_predicate as NativeFn, 1),
+    );
+    env.natives
+        .insert(Symbol::new("use"), fixed_native(use_native as NativeFn, 2));
+    env.natives.insert(
+        Symbol::new("bind"),
+        fixed_native(bind_native as NativeFn, 2),
+    );
+
     // Series (M8)
     crate::series::register_series_natives(env);
 }
@@ -658,7 +1094,7 @@ mod tests {
     }
 
     fn run_capture_val(src: &str) -> Result<(Value, Vec<u8>), String> {
-        use crate::interp::bind_pass;
+        use crate::binding::bind_pass;
         let body = load_source(src).map_err(|e| e.to_string())?;
         let mut ctx = Context::new();
         install_constants(&mut ctx);
