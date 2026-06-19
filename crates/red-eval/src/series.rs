@@ -358,20 +358,38 @@ fn select(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, E
 /// same, but routes through a dedicated case-sensitive comparator so future
 /// default-case-insensitive behavior can change without touching `find`).
 fn find(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
-    let (mut series, span, is_paren) = extract_series(&args[0])?;
-    let needle = &args[1];
-    let case_sensitive = refs.has(&Symbol::new("case"));
-    let data = series.data.borrow();
-    let mut i = series.index;
-    while i < data.len() {
-        if find_match(needle, &data[i], case_sensitive) {
-            drop(data);
-            series.index = i;
-            return Ok(mk_series(series, span, is_paren));
+    // String substring search (M15). POC has no positioned-string series,
+    // so we return the tail of the source from the match position (mimics
+    // Red's positioned-string mold, which renders from the cursor). Not
+    // found → `none`. Case-sensitivity: Red's default for `find` on
+    // strings is case-sensitive; `/case` is accepted for parity but is a
+    // no-op (already case-sensitive). `/any` wildcard is deferred.
+    if let Value::String { s: src, .. } = &args[0] {
+        let needle = match &args[1] {
+            Value::String { s, .. } => s.clone(),
+            other => return Err(type_err("string!", other)),
+        };
+        let _ = refs.has(&Symbol::new("case")); // declared but no-op
+        match src.find(needle.as_ref()) {
+            Some(i) => Ok(Value::string(Rc::from(&src[i..]))),
+            None => Ok(Value::None),
         }
-        i += 1;
+    } else {
+        let (mut series, span, is_paren) = extract_series(&args[0])?;
+        let needle = &args[1];
+        let case_sensitive = refs.has(&Symbol::new("case"));
+        let data = series.data.borrow();
+        let mut i = series.index;
+        while i < data.len() {
+            if find_match(needle, &data[i], case_sensitive) {
+                drop(data);
+                series.index = i;
+                return Ok(mk_series(series, span, is_paren));
+            }
+            i += 1;
+        }
+        Ok(Value::None)
     }
-    Ok(Value::None)
 }
 
 /// Match a needle against a series element. Word-family needles match by
@@ -508,6 +526,33 @@ fn take(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eva
 /// including) the position marked by a positioned series alias of the same
 /// storage (Red's `/part` with a series argument).
 fn copy(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    // String copy (M15). Returns a fresh `Value::String` (since strings are
+    // immutable `Rc<str>`, "fresh" just means a new `Value::String` wrapping
+    // a clone of the same `Rc<str>`; storage sharing is automatic). `/part n`
+    // copies the first `n` chars.
+    if let Value::String { s, .. } = &args[0] {
+        let out: String = if refs.has(&Symbol::new("part")) {
+            let part_arg = refs
+                .get(&Symbol::new("part"))
+                .and_then(|a| a.first())
+                .ok_or_else(|| EvalError::Native {
+                    message: "copy/part: missing length argument".into(),
+                    span: args[0].span_or_default(),
+                })?
+                .clone();
+            match part_arg {
+                Value::Integer { n, .. } => {
+                    let n = if n < 0 { 0 } else { n as usize };
+                    s.chars().take(n).collect()
+                }
+                other => return Err(type_err("integer!", &other)),
+            }
+        } else {
+            (*s).to_string()
+        };
+        return Ok(Value::string(Rc::from(out.as_str())));
+    }
+
     let (series, _, is_paren) = extract_series(&args[0])?;
     let end = if refs.has(&Symbol::new("part")) {
         let part_arg = refs

@@ -33,6 +33,7 @@ print "Parsed records:"
 print records
 
 ; Print each field on its own line (print molds strings with quotes — a POC
-; divergence from Red's `form`-based printing; `form` is planned for v0.2).
+; divergence from Red's form-based printing; use `prin form <value>` to
+; emit raw text).
 print "One per line:"
 foreach 'f records [print f]

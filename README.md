@@ -73,6 +73,11 @@ see `plan2.md` M19).
   (alternative), `copy 'word rule`, `set 'word rule`, `[...]` grouping,
   `(...)` Red side-effects. Backtracking via cursor save/restore.
 - **Constants:** `none`, `true`, `false`, `newline` bound in the user context.
+- **Strings (M15):** `rejoin`, `reform`, `join`, `split` (`/with`), `trim`
+  (`/auto` `/with` `/lines` `/all`), `replace` (`/all`), `uppercase`/
+  `lowercase` (`/part`), `suffix?`. `+` concatenates two strings; `find`
+  does substring search (returns tail-from-match or `none`); `copy` on a
+  string honors `/part`.
 
 ### Errors
 Unified `Error` (Lex / Parse / Eval). Every error carries a `Span`; the CLI
@@ -103,7 +108,7 @@ runnable via `cargo run -p red-cli -- examples/<name>.red`:
 | `mutation.red` | `insert` / `change` / `remove` / `take` / `clear` / `poke`, shared-storage aliasing, `copy` |
 | `shared.red` | shared-storage semantics via aliases |
 | `blocks.red` | blocks as data (homoiconicity), `mold`/`do`/`reduce`, nested blocks |
-| `strings.red` | `"..."` escapes and `{...}` multi-line braced strings, `prin` |
+| `strings.red` | `"..."` escapes and `{...}` multi-line braced strings, `prin`, M15 string natives (`rejoin`/`split`/`trim`/`replace`/`uppercase`/`lowercase`/`suffix?`, string `+`, string `find`/`copy`) |
 | `sort.red` | insertion sort with `forall`/`insert` |
 | `map.red` | `reduce`-style mapping |
 | `filter.red` | filtering with series ops |

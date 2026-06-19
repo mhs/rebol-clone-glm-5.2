@@ -199,7 +199,15 @@ fn num_binop(
 // ---------------------------------------------------------------------------
 
 fn add(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
-    num_binop(args, "division", |a, b| Some(a + b), |a, b| a + b)
+    // String concatenation when both operands are strings (M15). Falls
+    // through to numeric addition otherwise.
+    if let (Value::String { s: a, .. }, Value::String { s: b, .. }) = (&args[0], &args[1]) {
+        let mut cat = String::with_capacity(a.len() + b.len());
+        cat.push_str(a);
+        cat.push_str(b);
+        return Ok(Value::string(std::rc::Rc::from(cat.as_str())));
+    }
+    num_binop(args, "add", |a, b| Some(a + b), |a, b| a + b)
 }
 
 fn subtract(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
@@ -1004,6 +1012,9 @@ pub fn register_natives(env: &mut Env) {
 
     // Type conversions + make/to/form (M14)
     crate::convert::register_convert_natives(env);
+
+    // String manipulation natives (M15)
+    crate::strings::register_string_natives(env);
 }
 
 /// Install the predefined constant words (`none`, `true`, `false`, `newline`)

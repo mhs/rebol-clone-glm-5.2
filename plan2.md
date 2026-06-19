@@ -66,26 +66,26 @@ Deferred to v0.3+ (acknowledged but not built here): `char!`, `map!`, `pair!`,
 
 ## Milestone 15 — String manipulation natives
 
-- [ ] Implement `rejoin` (reduce block, concatenate molded results to string)
-- [ ] Implement `reform` (reduce + form)
-- [ ] Implement `join` (binary `join a b` shortcut)
-- [ ] Implement `+` over strings (concatenation, both operands string)
-- [ ] Implement `split` (and `/with` refinement for delimiter)
-- [ ] Implement `trim` (and `/auto`/`/with`/`/lines`/`/all` refinements)
-- [ ] Implement `replace` (and `/all` refinement)
-- [ ] Extend `find` for string input: substring search, `/case` refinement,
+- [x] Implement `rejoin` (reduce block, concatenate molded results to string)
+- [x] Implement `reform` (reduce + form)
+- [x] Implement `join` (binary `join a b` shortcut)
+- [x] Implement `+` over strings (concatenation, both operands string)
+- [x] Implement `split` (and `/with` refinement for delimiter)
+- [x] Implement `trim` (and `/auto`/`/with`/`/lines`/`/all` refinements)
+- [x] Implement `replace` (and `/all` refinement)
+- [x] Extend `find` for string input: substring search, `/case` refinement,
       `/any` (wildcard) deferred
-- [ ] Extend `copy` for strings including `/part`
-- [ ] Implement `uppercase`/`lowercase` (and `/part`)
-- [ ] Implement `suffix?` (file extension)
-- [ ] Inline `#[test]`: `rejoin ["a" 1 "b"]` → `"a1b"`
-- [ ] Inline `#[test]`: `"abc" + "def"` → `"abcdef"`
-- [ ] Inline `#[test]`: `split "a,b,c" ","` → `["a" "b" "c"]`
-- [ ] Inline `#[test]`: `trim "  hi  "` → `"hi"`
-- [ ] Inline `#[test]`: `replace/all "a-a" "a" "b"` → `"b-b"`
-- [ ] Inline `#[test]`: `find "hello" "ll"` returns index/position
-- [ ] Add golden fixtures for string-processing programs
-- [ ] `cargo test --workspace` passes
+- [x] Extend `copy` for strings including `/part`
+- [x] Implement `uppercase`/`lowercase` (and `/part`)
+- [x] Implement `suffix?` (file extension)
+- [x] Inline `#[test]`: `rejoin ["a" 1 "b"]` → `"a1b"`
+- [x] Inline `#[test]`: `"abc" + "def"` → `"abcdef"`
+- [x] Inline `#[test]`: `split "a,b,c" ","` → `["a" "b" "c"]`
+- [x] Inline `#[test]`: `trim "  hi  "` → `"hi"`
+- [x] Inline `#[test]`: `replace/all "a-a" "a" "b"` → `"b-b"`
+- [x] Inline `#[test]`: `find "hello" "ll"` returns index/position
+- [x] Add golden fixtures for string-processing programs
+- [x] `cargo test --workspace` passes
 
 ## Milestone 16 — Control flow expansion
 
