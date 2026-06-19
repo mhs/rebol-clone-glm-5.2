@@ -25,7 +25,7 @@ use std::rc::Rc;
 use red_core::lexer;
 use red_core::parser::parse_program;
 use red_core::value::{Binding, FuncDef, Series, Span, Symbol, Value};
-use red_core::{Context, Env, Error, EvalError};
+use red_core::{Context, Env, Error, EvalError, RefineArgs};
 
 use crate::binding::bind_pass;
 
@@ -97,7 +97,7 @@ pub(crate) fn eval_expression(
             args.push(eval_prefix(data, i, env)?);
         }
         let f = infix.native.unwrap();
-        value = f(&args, env)?;
+        value = f(&args, &RefineArgs::empty(), env)?;
     }
     Ok(value)
 }
@@ -143,7 +143,17 @@ fn eval_prefix(
         | Value::LitWord { .. }
         | Value::Block { .. }
         | Value::Func(_)
-        | Value::Path(_) => Ok(cur),
+        | Value::Refinement { .. } => Ok(cur),
+
+        // Path: a function-headed path is a refined call (`copy/part`,
+        // `find/case`); anything else is a data-path select (`block/2`,
+        // `obj/field`) which lands in M19. Resolve the head; if it's a Func,
+        // dispatch a refined call with the path tail as leading refinement
+        // flags. Otherwise stub-error (M19).
+        Value::Path {
+            parts,
+            span: path_span,
+        } => dispatch_path_call(parts, *path_span, data, i, env),
 
         // Paren: walked eagerly in place. The recursion borrows the child
         // series's `RefCell`, distinct from the outer borrow.
@@ -201,79 +211,219 @@ fn dispatch_call(
     env: &mut Env,
     span: Span,
 ) -> Result<Value, EvalError> {
+    dispatch_call_with_refs(resolved, sym, &[], data, i, env, span)
+}
+
+/// Like [`dispatch_call`] but the caller has already consumed some refinement
+/// flags from a path (`copy/part` → head `copy`, leading ref `["part"]`).
+/// `leading_refs` are refinement names already activated; they're merged with
+/// any inline `/ref` tokens discovered at the call site during spec-order
+/// collection.
+fn dispatch_call_with_refs(
+    resolved: Value,
+    sym: &Symbol,
+    leading_refs: &[Symbol],
+    data: &std::cell::Ref<Vec<Value>>,
+    i: &mut usize,
+    env: &mut Env,
+    span: Span,
+) -> Result<Value, EvalError> {
     let fd = match &resolved {
         Value::Func(fd) if fd.native.is_some() => fd.clone(),
         Value::Func(fd) => {
-            // User-defined function (no native). Collect `params.len()`
-            // caller-evaluated arguments, push a call frame with a fresh
-            // per-call context clone (so recursion doesn't clobber caller
-            // locals), evaluate the body, and catch `Return`.
-            let arity = fd.params.len();
-            let mut args = Vec::with_capacity(arity);
-            for _ in 0..arity {
-                if *i >= data.len() {
-                    return Err(EvalError::Arity {
-                        native: sym.clone(),
-                        expected: arity,
-                        got: args.len(),
-                        span,
-                    });
-                }
-                args.push(eval_expression(data, i, env)?);
-            }
-            return call_user_func(fd, args, env);
+            let (args, refs) = collect_call_args(sym, fd, leading_refs, data, i, env, span)?;
+            return call_user_func(fd, args, &refs, env);
         }
         _ => return Ok(resolved),
     };
+    let (args, refs) = collect_call_args(sym, &fd, leading_refs, data, i, env, span)?;
     let f = fd.native.unwrap();
-    let mut args = Vec::new();
+    f(&args, &refs, env)
+}
+
+/// A function-headed path (`copy/part [1 2 3] 2`) dispatches as a refined
+/// call: resolve the head word; if it's a Func, treat the path tail as
+/// leading refinement flags and delegate to [`dispatch_call_with_refs`].
+/// Anything else (data-path select: `block/2`, `obj/field`) is a stub error
+/// until M19.
+fn dispatch_path_call(
+    parts: &[Value],
+    path_span: Span,
+    data: &std::cell::Ref<Vec<Value>>,
+    i: &mut usize,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
+    if parts.is_empty() {
+        return Err(EvalError::Native {
+            message: "empty path".into(),
+            span: path_span,
+        });
+    }
+    // Resolve the head word.
+    let (head_sym, head_binding) = match &parts[0] {
+        Value::Word { sym, binding, .. } => (sym.clone(), binding.clone()),
+        Value::GetWord { sym, binding, .. } => (sym.clone(), binding.clone()),
+        Value::LitWord { sym, .. } => (sym.clone(), Binding::Unbound),
+        other => {
+            return Err(EvalError::Native {
+                message: format!(
+                    "path head must be a word, found {}",
+                    crate::natives::type_name(other)
+                ),
+                span: path_span,
+            });
+        }
+    };
+    // Tail parts are stored as `Value::Word` by the parser; extract their
+    // symbol names as leading refinement flags.
+    let leading_refs: Vec<Symbol> = parts[1..]
+        .iter()
+        .filter_map(|p| match p {
+            Value::Word { sym, .. } => Some(sym.clone()),
+            _ => None,
+        })
+        .collect();
+    let resolved = resolve_word(&head_sym, &head_binding, env, path_span)?;
+    match resolved {
+        Value::Func(_) => {
+            dispatch_call_with_refs(resolved, &head_sym, &leading_refs, data, i, env, path_span)
+        }
+        _ => Err(EvalError::Native {
+            message: "path select not implemented (M19)".into(),
+            span: path_span,
+        }),
+    }
+}
+
+/// Collect positional args + refinement args in spec order (Red's
+/// refinement semantics). Walks `fd.params` then `fd.refinements` in
+/// declaration order; for each refinement, if it's in `leading_refs` (path
+/// tail) or the next inline token is a matching `Value::Refinement`, the
+/// refinement is active and its `arity` expressions are collected. Returns
+/// the positional `args` and a `RefineArgs` of active refinements + their
+/// collected arg values.
+///
+/// The special-case natives that take their first argument unevaluated
+/// (`repeat`/`foreach`/`forall`/`make` — a word name, not a value) are
+/// honored only for the *positional* params; refinements on those natives
+/// aren't supported (none declare any).
+fn collect_call_args(
+    sym: &Symbol,
+    fd: &Rc<FuncDef>,
+    leading_refs: &[Symbol],
+    data: &std::cell::Ref<Vec<Value>>,
+    i: &mut usize,
+    env: &mut Env,
+    span: Span,
+) -> Result<(Vec<Value>, RefineArgs), EvalError> {
+    // Variadic natives (e.g. `return`, `print`) collect all remaining
+    // expressions up to the next native word. They don't take refinements.
     if fd.variadic {
-        // Consume remaining expressions until the next native word or end of
-        // block.
+        let mut args = Vec::new();
         while *i < data.len() && !is_native_word(&data[*i], env) {
             args.push(eval_expression(data, i, env)?);
         }
-    } else {
-        let arity = fd.params.len();
-        for n in 0..arity {
-            if *i >= data.len() {
-                return Err(EvalError::Arity {
-                    native: sym.clone(),
-                    expected: arity,
-                    got: args.len(),
-                    span,
-                });
-            }
-            // `repeat`/`foreach`/`forall`'s first argument is a word/lit-word
-            // *name*, not a value to evaluate. Pass it through unevaluated so
-            // the native can bind it as the loop counter / iterator. (Red uses
-            // a lit-word here; the POC also accepts a bare word for
-            // ergonomics.) `make`'s first argument is a datatype word
-            // (`function!`) which is also passed unevaluated — datatype words
-            // aren't bound values in the POC.
-            if n == 0 && matches!(sym.as_str(), "repeat" | "foreach" | "forall" | "make") {
-                args.push(data[*i].clone());
-                *i += 1;
-            } else {
-                args.push(eval_expression(data, i, env)?);
-            }
+        return Ok((args, RefineArgs::default()));
+    }
+
+    let arity = fd.params.len();
+    let mut args: Vec<Value> = Vec::with_capacity(arity);
+    let uneval_first = matches!(sym.as_str(), "repeat" | "foreach" | "forall" | "make");
+
+    // Positional params.
+    for n in 0..arity {
+        if *i >= data.len() {
+            return Err(EvalError::Arity {
+                native: sym.clone(),
+                expected: arity,
+                got: args.len(),
+                span,
+            });
+        }
+        if n == 0 && uneval_first {
+            args.push(data[*i].clone());
+            *i += 1;
+        } else {
+            args.push(eval_expression(data, i, env)?);
         }
     }
-    f(&args, env)
+
+    // Refinements in spec order.
+    let mut ref_pairs: Vec<(Symbol, Vec<Value>)> = Vec::new();
+    for (ref_name, ref_args_spec) in &fd.refinements {
+        let already_leading = leading_refs.iter().any(|r| r == ref_name);
+        let mut active = already_leading;
+        // Inline refinement flag? Peek the next value; if it's a matching
+        // Refinement token, consume it and activate.
+        if !active {
+            if let Some(Value::Refinement { sym: rname, .. }) = data.get(*i) {
+                if rname == ref_name {
+                    *i += 1;
+                    active = true;
+                }
+            }
+        }
+        if active {
+            let mut collected = Vec::with_capacity(ref_args_spec.len());
+            for _ in 0..ref_args_spec.len() {
+                if *i >= data.len() {
+                    return Err(EvalError::Arity {
+                        native: sym.clone(),
+                        expected: arity + ref_args_spec.len(),
+                        got: args.len() + collected.len(),
+                        span,
+                    });
+                }
+                collected.push(eval_expression(data, i, env)?);
+            }
+            ref_pairs.push((ref_name.clone(), collected));
+        }
+    }
+
+    Ok((args, RefineArgs::from_pairs(ref_pairs)))
 }
 
 /// Invoke a user-defined function: clone its `FuncDef.ctx` (fresh slot
-/// storage per call so recursion is safe), fill param slots in order, push a
-/// `CallFrame`, evaluate the body, then pop the frame. `EvalError::Return(v)`
-/// is caught and converted to `Ok(v)` — that's how the `return` native exits
-/// a function. Any other error propagates.
-fn call_user_func(fd: &Rc<FuncDef>, args: Vec<Value>, env: &mut Env) -> Result<Value, EvalError> {
-    // Fresh per-call context: clone the definition ctx (its name map + slot
-    // layout) with fresh `RefCell` storage. Param slots are filled below;
-    // body-local SetWord slots start at `none`.
+/// storage per call so recursion is safe), fill param slots in order, fill
+/// refinement flag + arg slots, push a `CallFrame`, evaluate the body, then
+/// pop the frame. `EvalError::Return(v)` is caught and converted to
+/// `Ok(v)` — that's how the `return` native exits a function. Any other
+/// error propagates.
+///
+/// Slot layout (established by `bind_function_body`):
+///   `[param_0 .. param_{n-1}] [ref_0_flag] [ref_0_arg_0 ..] [ref_1_flag] ...`
+fn call_user_func(
+    fd: &Rc<FuncDef>,
+    args: Vec<Value>,
+    refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
     let call_ctx = fd.ctx.clone();
-    for (idx, arg) in args.iter().enumerate() {
-        call_ctx.set_slot(idx, arg.clone());
+    let mut slot = 0;
+    for arg in args.iter() {
+        call_ctx.set_slot(slot, arg.clone());
+        slot += 1;
+    }
+    // Refinement slots follow param slots in spec order: for each declared
+    // refinement, a logic flag slot then its arg-word slots.
+    for (ref_name, ref_args_spec) in &fd.refinements {
+        let active = refs.has(ref_name);
+        call_ctx.set_slot(slot, Value::Logic(active));
+        slot += 1;
+        if active {
+            if let Some(collected) = refs.get(ref_name) {
+                for v in collected {
+                    call_ctx.set_slot(slot, v.clone());
+                    slot += 1;
+                }
+            }
+        } else {
+            // Inactive refinement: arg slots default to `none`.
+            for _ in 0..ref_args_spec.len() {
+                call_ctx.set_slot(slot, Value::None);
+                slot += 1;
+            }
+        }
     }
     env.call_stack.push(crate::context::CallFrame {
         ctx: call_ctx,

@@ -16,8 +16,53 @@ use std::rc::Rc;
 use crate::context::Context;
 use crate::value::{FuncDef, Span, Symbol, Value};
 
-/// Function pointer for native (Rust-implemented) operations.
-pub type NativeFn = fn(&[Value], &mut Env) -> Result<Value, EvalError>;
+/// Refinement arguments handed to a native at call time. Built by
+/// `dispatch_call` from the call site (path refinements and/or inline
+/// `/ref` flags), this is the refinement-facing counterpart to `args`.
+///
+/// Each entry is `(refinement_name, collected_arg_values)`. A refinement
+/// present in the call appears here with its arguments (possibly empty for
+/// zero-arity refinements like `/case` or `/only`); a refinement absent
+/// from the call does not appear. Natives query with [`Self::has`] and
+/// [`Self::get`].
+#[derive(Debug, Default)]
+pub struct RefineArgs {
+    inner: Vec<(Symbol, Vec<Value>)>,
+}
+
+impl RefineArgs {
+    /// A fresh empty argument set — used by call sites that take no
+    /// refinements (the overwhelming majority, including all infix natives).
+    /// Returns an owned value; pass `&RefineArgs::empty()` to natives.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Construct from already-collected `(name, args)` pairs. Used by
+    /// `dispatch_call` after walking the spec.
+    pub fn from_pairs(pairs: Vec<(Symbol, Vec<Value>)>) -> Self {
+        Self { inner: pairs }
+    }
+
+    /// True if refinement `name` was supplied at the call site.
+    pub fn has(&self, name: &Symbol) -> bool {
+        self.inner.iter().any(|(n, _)| n == name)
+    }
+
+    /// The argument values supplied for refinement `name`, or `None` if the
+    /// refinement wasn't used. Zero-arity refinements return `Some(&[])`.
+    pub fn get(&self, name: &Symbol) -> Option<&[Value]> {
+        self.inner
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_slice())
+    }
+}
+
+/// Function pointer for native (Rust-implemented) operations. `args` are the
+/// positional arguments (in spec order); `refs` carries any refinement flags
+/// and their arguments (M13); `env` is the interpreter state.
+pub type NativeFn = fn(&[Value], &RefineArgs, &mut Env) -> Result<Value, EvalError>;
 
 /// Top-level interpreter state: the shared user context, the function call
 /// stack (empty until M9), the native registry (populated in M6), and the

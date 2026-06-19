@@ -131,11 +131,12 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Word(sym) => {
                 self.advance()?;
-                Ok(Value::Word {
+                let head = Value::Word {
                     sym,
                     binding: Binding::Unbound,
                     span: tok.span,
-                })
+                };
+                self.assemble_path(head, tok.span)
             }
             TokenKind::SetWord(sym) => {
                 self.advance()?;
@@ -147,15 +148,24 @@ impl<'a> Parser<'a> {
             }
             TokenKind::GetWord(sym) => {
                 self.advance()?;
-                Ok(Value::GetWord {
+                let head = Value::GetWord {
                     sym,
                     binding: Binding::Unbound,
                     span: tok.span,
-                })
+                };
+                self.assemble_path(head, tok.span)
             }
             TokenKind::LitWord(sym) => {
                 self.advance()?;
-                Ok(Value::LitWord {
+                let head = Value::LitWord {
+                    sym,
+                    span: tok.span,
+                };
+                self.assemble_path(head, tok.span)
+            }
+            TokenKind::Refinement(sym) => {
+                self.advance()?;
+                Ok(Value::Refinement {
                     sym,
                     span: tok.span,
                 })
@@ -171,6 +181,51 @@ impl<'a> Parser<'a> {
                 span: tok.span,
                 expected: "value",
             }),
+        }
+    }
+
+    /// Fold any run of *adjacent* refinement tokens (`/foo`, no whitespace)
+    /// following `head` into a `Value::Path`. A refinement separated by
+    /// whitespace from its predecessor is left as a standalone `Refinement`
+    /// value — the evaluator handles spaced refinement flags at call sites.
+    /// Path parts are stored as `Word` values so molding yields `foo/bar`.
+    fn assemble_path(&mut self, head: Value, head_span: Span) -> Result<Value, ParseError> {
+        let mut parts = vec![head];
+        let mut end = head_span.end;
+        loop {
+            // Peek + clone the needed fields so we can release the immutable
+            // borrow before `advance` (which needs `&mut self`).
+            let next = self.peek_opt().and_then(|tok| match &tok.kind {
+                TokenKind::Refinement(sym) => {
+                    // Adjacency: refinement must start where the prior part
+                    // ended (no whitespace between).
+                    if tok.span.start != end {
+                        return None;
+                    }
+                    Some((sym.clone(), tok.span))
+                }
+                _ => None,
+            });
+            match next {
+                Some((sym, span)) => {
+                    end = span.end;
+                    self.advance()?;
+                    parts.push(Value::Word {
+                        sym,
+                        binding: Binding::Unbound,
+                        span,
+                    });
+                }
+                None => break,
+            }
+        }
+        if parts.len() == 1 {
+            Ok(parts.pop().unwrap())
+        } else {
+            Ok(Value::Path {
+                parts,
+                span: Span::new(head_span.start, end),
+            })
         }
     }
 
@@ -491,5 +546,74 @@ mod tests {
     fn load_source_propagates_parse_error() {
         let err = load_source("[1 2").unwrap_err();
         assert!(matches!(err, crate::error::Error::Parse(_)));
+    }
+
+    // --- Milestone 13 Phase A: paths & refinements ---
+
+    #[test]
+    fn adjacent_path_assembles() {
+        // `foo/bar` → single Path value with two word parts.
+        assert_eq!(mold_src("foo/bar"), "foo/bar");
+    }
+
+    #[test]
+    fn adjacent_path_three_parts() {
+        assert_eq!(mold_src("a/b/c"), "a/b/c");
+    }
+
+    #[test]
+    fn spaced_refinement_stays_separate() {
+        // `copy /part` — space breaks adjacency, so it stays two values.
+        assert_eq!(mold_src("copy /part"), "copy /part");
+    }
+
+    #[test]
+    fn standalone_refinement_molds_with_slash() {
+        assert_eq!(mold_src("/part"), "/part");
+    }
+
+    #[test]
+    fn path_inside_block() {
+        assert_eq!(mold_src("[foo/bar baz]"), "[foo/bar baz]");
+    }
+
+    #[test]
+    fn get_word_path_assembles() {
+        // `:foo/bar` — get-word head followed by adjacent refinement.
+        assert_eq!(mold_src(":foo/bar"), ":foo/bar");
+    }
+
+    #[test]
+    fn lit_word_path_assembles() {
+        assert_eq!(mold_src("'foo/bar"), "'foo/bar");
+    }
+
+    #[test]
+    fn path_span_covers_whole_run() {
+        let toks = lex("foo/bar").unwrap();
+        let body = load(&toks).unwrap();
+        let data = body.data.borrow();
+        match &data[0] {
+            Value::Path { span, .. } => {
+                assert_eq!(*span, Span::new(0, 7));
+            }
+            other => panic!("expected Path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refinement_in_block_parses_as_refinement_value() {
+        // Spec-block shape: `func [x /only]` — `/only` is a standalone
+        // Refinement value (not a path; it's not adjacent to a word).
+        let toks = lex("[x /only]").unwrap();
+        let body = load(&toks).unwrap();
+        let data = body.data.borrow();
+        // The outer `[...]` is one Block value; inspect its contents.
+        let inner = match &data[0] {
+            Value::Block { series, .. } => series.data.borrow(),
+            other => panic!("expected Block, got {other:?}"),
+        };
+        assert!(matches!(&inner[0], Value::Word { sym, .. } if sym.as_str() == "x"));
+        assert!(matches!(&inner[1], Value::Refinement { sym, .. } if sym.as_str() == "only"));
     }
 }

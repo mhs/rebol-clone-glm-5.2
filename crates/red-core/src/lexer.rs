@@ -18,6 +18,10 @@ pub enum TokenKind {
     SetWord(Symbol),
     GetWord(Symbol),
     LitWord(Symbol),
+    /// `/foo` — a refinement word. Produced by a `/` followed by a run of
+    /// word chars. A bare `/` (slash not followed by word chars) is emitted
+    /// as `Word("/")` instead, since `/` is also the division operator.
+    Refinement(Symbol),
     LBracket,
     RBracket,
     LParen,
@@ -117,6 +121,19 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             out.push(Token {
                 kind,
                 span: Span::new(start, i),
+            });
+            continue;
+        }
+
+        // Refinement word `/foo`, or bare `/` (the division operator) when
+        // not followed by word chars. `/` is a delimiter, so `foo/bar` lexes
+        // as `Word(foo) Refinement(bar)`; the parser assembles adjacent
+        // `Word`+`Refinement` runs into a `Path`.
+        if c == b'/' {
+            let (end, kind) = scan_refinement(src, &mut i)?;
+            out.push(Token {
+                kind,
+                span: Span::new(start, end),
             });
             continue;
         }
@@ -374,12 +391,58 @@ fn scan_word(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError> {
 }
 
 /// Delimiter set per architecture.md: whitespace, `[](){};"`. (`,` is
-/// whitespace, not a delimiter — handled in the main scan loop.)
+/// whitespace, not a delimiter — handled in the main scan loop.) `/` is also
+/// a delimiter so refinement words (`/foo`) and paths (`foo/bar`) split into
+/// separate tokens; the parser reassembles paths.
 fn is_delimiter(c: u8) -> bool {
     matches!(
         c,
-        b' ' | b'\t' | b'\r' | b'\n' | b'[' | b']' | b'(' | b')' | b'{' | b'}' | b';' | b'"'
+        b' ' | b'\t' | b'\r' | b'\n' | b'[' | b']' | b'(' | b')' | b'{' | b'}' | b';' | b'"' | b'/'
     )
+}
+
+/// Scan a `/`-led token. If word chars follow the `/`, emit
+/// `TokenKind::Refinement(Symbol)` covering `/word`. If nothing followable
+/// follows (EOF, whitespace, another delimiter, or a digit/`-`-digit run
+/// that should be scanned as a number instead), emit `Word("/")` — the bare
+/// slash is Red's division operator and a valid word.
+fn scan_refinement(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError> {
+    let start = *i;
+    let bytes = src.as_bytes();
+    *i += 1; // consume `/`
+             // If the next char would start a number (`digit`, or `-` + digit), the
+             // `/` is the division operator, not a refinement. Leave `*i` after the
+             // `/` so the main loop scans the number next.
+    let next = bytes.get(*i).copied();
+    let starts_number = match next {
+        Some(c) if c.is_ascii_digit() => true,
+        Some(b'-') => bytes
+            .get(*i + 1)
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false),
+        _ => false,
+    };
+    if starts_number {
+        return Ok((*i, TokenKind::Word(Symbol::new("/"))));
+    }
+    // Consume a run of non-delimiter bytes as the refinement body.
+    while *i < bytes.len() && !is_delimiter(bytes[*i]) {
+        *i += 1;
+    }
+    let end = *i;
+    if end == start + 1 {
+        // Bare `/` — division operator.
+        return Ok((end, TokenKind::Word(Symbol::new("/"))));
+    }
+    let body = &src[start + 1..end];
+    // Refinement bodies use the same char rules as words; reject all-colon
+    // / all-quote bodies for consistency with `classify_word`.
+    if body.chars().all(|c| c == ':' || c == '\'') {
+        return Err(LexError::InvalidWord {
+            span: Span::new(start, end),
+        });
+    }
+    Ok((end, TokenKind::Refinement(Symbol::new(body))))
 }
 
 /// Classify a word run into its token kind. Returns `None` for an empty body
@@ -682,5 +745,80 @@ mod tests {
                 TokenKind::String(Rc::from("Hello")),
             ]
         );
+    }
+
+    #[test]
+    fn refinement_word() {
+        assert_eq!(one("/part"), TokenKind::Refinement(Symbol::new("part")));
+        assert_eq!(one("/only"), TokenKind::Refinement(Symbol::new("only")));
+        assert_eq!(one("/case"), TokenKind::Refinement(Symbol::new("case")));
+    }
+
+    #[test]
+    fn bare_slash_is_division_word() {
+        // `/` alone is the division operator (a word), not a refinement.
+        assert_eq!(one("/"), TokenKind::Word(Symbol::new("/")));
+    }
+
+    #[test]
+    fn path_splits_into_word_and_refinement() {
+        // `foo/bar` — `/` is a delimiter, so this is two tokens.
+        let toks = kinds("foo/bar");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::Word(Symbol::new("foo")),
+                TokenKind::Refinement(Symbol::new("bar")),
+            ]
+        );
+    }
+
+    #[test]
+    fn path_three_segments() {
+        let toks = kinds("a/b/c");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::Word(Symbol::new("a")),
+                TokenKind::Refinement(Symbol::new("b")),
+                TokenKind::Refinement(Symbol::new("c")),
+            ]
+        );
+    }
+
+    #[test]
+    fn spaced_refinement_stays_separate() {
+        // `copy /part` — space separates, so both are distinct tokens and
+        // `/part` is a standalone Refinement (not folded into a path by the
+        // lexer; the parser's adjacency check decides path assembly).
+        let toks = kinds("copy /part");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::Word(Symbol::new("copy")),
+                TokenKind::Refinement(Symbol::new("part")),
+            ]
+        );
+    }
+
+    #[test]
+    fn division_expression_splits() {
+        // `1/2` now splits into Integer, Word("/"), Integer (was one word in
+        // the pre-refinement lexer). `1 / 2` is Red division.
+        let toks = kinds("1/2");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::Integer(1),
+                TokenKind::Word(Symbol::new("/")),
+                TokenKind::Integer(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn refinement_span_covers_leading_slash() {
+        let toks = lex("/part").expect("lex");
+        assert_eq!(toks[0].span, Span::new(0, 5));
     }
 }

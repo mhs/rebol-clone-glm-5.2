@@ -64,13 +64,17 @@ pub fn mold(value: &Value, out: &mut String) {
             out.push(')');
         }
         Value::Func(_) => out.push_str("#[function]"),
-        Value::Path(parts) => {
+        Value::Path { parts, .. } => {
             for (i, p) in parts.iter().enumerate() {
                 if i > 0 {
                     out.push('/');
                 }
                 mold(p, out);
             }
+        }
+        Value::Refinement { sym, .. } => {
+            out.push('/');
+            out.push_str(sym.as_str());
         }
     }
 }
@@ -339,14 +343,20 @@ mod tests {
 
     #[test]
     fn mold_path() {
-        let p = Value::Path(vec![Value::word("foo"), Value::word("bar")]);
+        let p = Value::path(vec![Value::word("foo"), Value::word("bar")]);
         assert_eq!(mold_to_string(&p), "foo/bar");
     }
 
     #[test]
     fn mold_path_three_parts() {
-        let p = Value::Path(vec![Value::word("a"), Value::word("b"), Value::word("c")]);
+        let p = Value::path(vec![Value::word("a"), Value::word("b"), Value::word("c")]);
         assert_eq!(mold_to_string(&p), "a/b/c");
+    }
+
+    #[test]
+    fn mold_refinement() {
+        assert_eq!(mold_to_string(&Value::refinement("part")), "/part");
+        assert_eq!(mold_to_string(&Value::refinement("only")), "/only");
     }
 
     #[test]

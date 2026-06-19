@@ -23,7 +23,7 @@ use std::rc::Rc;
 use red_core::context::Context;
 use red_core::printer::mold_to_string;
 use red_core::value::{FuncDef, Series, Span, Symbol, Value};
-use red_core::{Env, EvalError, NativeFn};
+use red_core::{Env, EvalError, NativeFn, RefineArgs};
 
 use crate::interp::{eval, eval_expression};
 
@@ -33,14 +33,14 @@ use crate::interp::{eval, eval_expression};
 
 /// `print`: mold each arg, join with a single space, append a newline.
 /// Returns `Value::None`.
-fn print(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn print(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     let joined = join_molded(args);
     let _ = writeln!(env.out, "{joined}");
     Ok(Value::None)
 }
 
 /// `prin`: like `print` but without the trailing newline.
-fn prin(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn prin(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     let joined = join_molded(args);
     let _ = write!(env.out, "{joined}");
     Ok(Value::None)
@@ -48,7 +48,7 @@ fn prin(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 
 /// `probe`: print `== <mold>` for each arg (joined with space), newline,
 /// and return the first arg (or `none` if no args).
-fn probe(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn probe(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     let joined = join_molded(args);
     let _ = writeln!(env.out, "== {joined}");
     Ok(args.first().cloned().unwrap_or(Value::None))
@@ -120,7 +120,8 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Block { .. } => "block!",
         Value::Paren { .. } => "paren!",
         Value::Func(_) => "function!",
-        Value::Path(_) => "path!",
+        Value::Path { .. } => "path!",
+        Value::Refinement { .. } => "refinement!",
     }
 }
 
@@ -197,19 +198,19 @@ fn num_binop(
 // Arithmetic (infix): + - * /
 // ---------------------------------------------------------------------------
 
-fn add(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+fn add(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     num_binop(args, "division", |a, b| Some(a + b), |a, b| a + b)
 }
 
-fn subtract(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+fn subtract(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     num_binop(args, "division", |a, b| Some(a - b), |a, b| a - b)
 }
 
-fn multiply(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+fn multiply(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     num_binop(args, "division", |a, b| Some(a * b), |a, b| a * b)
 }
 
-fn divide(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+fn divide(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     num_binop(
         args,
         "division",
@@ -241,11 +242,11 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
-fn equal(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+fn equal(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     Ok(Value::Logic(values_equal(&args[0], &args[1])))
 }
 
-fn not_equal(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+fn not_equal(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     Ok(Value::Logic(!values_equal(&args[0], &args[1])))
 }
 
@@ -262,19 +263,19 @@ fn compare(op: &str, ord: std::cmp::Ordering) -> bool {
     )
 }
 
-fn less_than(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+fn less_than(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     Ok(Value::Logic(compare("<", num_cmp(&args[0], &args[1])?)))
 }
 
-fn greater_than(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+fn greater_than(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     Ok(Value::Logic(compare(">", num_cmp(&args[0], &args[1])?)))
 }
 
-fn less_equal(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+fn less_equal(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     Ok(Value::Logic(compare("<=", num_cmp(&args[0], &args[1])?)))
 }
 
-fn greater_equal(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+fn greater_equal(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     Ok(Value::Logic(compare(">=", num_cmp(&args[0], &args[1])?)))
 }
 
@@ -317,15 +318,15 @@ fn num_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalError> {
 // Logic: and, or (infix), not (prefix)
 // ---------------------------------------------------------------------------
 
-fn and_op(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+fn and_op(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     Ok(Value::Logic(truthy(&args[0]) && truthy(&args[1])))
 }
 
-fn or_op(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+fn or_op(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     Ok(Value::Logic(truthy(&args[0]) || truthy(&args[1])))
 }
 
-fn not_op(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+fn not_op(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     Ok(Value::Logic(!truthy(&args[0])))
 }
 
@@ -334,7 +335,7 @@ fn not_op(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
 // ---------------------------------------------------------------------------
 
 /// `if cond block` — evaluates `block` if `cond` is truthy, else returns `none`.
-fn if_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn if_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "if", 2, args.len()));
     }
@@ -347,7 +348,7 @@ fn if_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 }
 
 /// `either cond t-block f-block`
-fn either(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn either(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 3 {
         return Err(arity_err(args, "either", 3, args.len()));
     }
@@ -366,7 +367,7 @@ fn either(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 
 /// `loop block` — evaluates `block` repeatedly until `break`. Returns the
 /// break-value (or `none` if `break` had no value).
-fn loop_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn loop_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     let body = expect_block(args, 0, "loop")?;
     loop {
         match eval(&body, env) {
@@ -380,7 +381,7 @@ fn loop_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 
 /// `repeat 'word count block` — binds `word` to 1..=count, evaluates `block`
 /// each iteration. Accepts both lit-word (`'i`) and bare-word (`i`) forms.
-fn repeat(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn repeat(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 3 {
         return Err(arity_err(args, "repeat", 3, args.len()));
     }
@@ -427,7 +428,7 @@ fn repeat(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 
 /// `until block` — evaluates `block` repeatedly until its last value is
 /// truthy. Returns `true`.
-fn until(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn until(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     let body = expect_block(args, 0, "until")?;
     loop {
         match eval(&body, env) {
@@ -445,7 +446,7 @@ fn until(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 
 /// `while cond-block body-block` — evaluates `cond-block`; if truthy,
 /// evaluates `body-block` and repeats. Returns `none`.
-fn while_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn while_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "while", 2, args.len()));
     }
@@ -470,13 +471,17 @@ fn while_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 // ---------------------------------------------------------------------------
 
 /// `break` — unwinds out of the enclosing loop via `EvalError::Break`.
-fn break_native(_args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+fn break_native(_args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     Err(EvalError::Break(None))
 }
 
 /// `continue` — skips to the next iteration of the enclosing loop via
 /// `EvalError::Continue`.
-fn continue_native(_args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+fn continue_native(
+    _args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
     Err(EvalError::Continue)
 }
 
@@ -485,14 +490,14 @@ fn continue_native(_args: &[Value], _env: &mut Env) -> Result<Value, EvalError> 
 // ---------------------------------------------------------------------------
 
 /// `do block` — evaluates a block, returning the last value.
-fn do_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn do_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     let body = expect_block(args, 0, "do")?;
     eval(&body, env)
 }
 
 /// `reduce block` — evaluates each expression in the block, returning a new
 /// block of the results.
-fn reduce(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn reduce(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     let body = expect_block(args, 0, "reduce")?;
     let series = match &body {
         Value::Block { series, .. } | Value::Paren { series, .. } => series.clone(),
@@ -517,19 +522,20 @@ fn reduce(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 /// is bound at creation time to a fresh function-local context (params +
 /// body-local SetWords become `Binding::Func`), with outer user-context words
 /// (recursion, globals) bound as `Binding::Local`. Returns `Value::Func`.
-fn func_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn func_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "func", 2, args.len()));
     }
     let spec_block = expect_block(args, 0, "func")?;
     let body_block = expect_block(args, 1, "func")?;
-    let params = extract_params(&spec_block)?;
+    let spec = extract_spec(&spec_block)?;
     let body_series = match &body_block {
         Value::Block { series, .. } => series.clone(),
         _ => unreachable!("expect_block guarantees Block"),
     };
     let mut fd = FuncDef {
-        params,
+        params: spec.params,
+        refinements: spec.refinements,
         body: body_series,
         native: None,
         variadic: false,
@@ -541,7 +547,7 @@ fn func_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 }
 
 /// `does [body]` — zero-argument `func`. Returns `Value::Func`.
-fn does_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn does_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(arity_err(args, "does", 1, args.len()));
     }
@@ -565,7 +571,7 @@ fn does_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 /// `make <type> <spec>` — currently only `make function! [[spec][body]]` is
 /// supported. The single spec block must contain exactly two sub-blocks:
 /// the parameter spec and the body.
-fn make_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "make", 2, args.len()));
     }
@@ -619,13 +625,30 @@ fn make_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
         }
     };
     drop(data);
-    func_native(&[spec_block, body_block], env)
+    func_native(&[spec_block, body_block], &RefineArgs::empty(), env)
 }
 
-/// Extract parameter symbols from a func spec block. Each top-level item must
-/// be a word or lit-word; anything else (type annotations, refinements) is
-/// skipped for the POC.
-fn extract_params(spec_block: &Value) -> Result<Vec<Symbol>, EvalError> {
+/// Result of parsing a `func`/`does` spec block: positional parameter
+/// names plus declared refinements (each a name + its argument-word names).
+struct FuncSpec {
+    params: Vec<Symbol>,
+    refinements: Vec<(Symbol, Vec<Symbol>)>,
+}
+
+/// Extract parameter symbols and refinements from a func spec block.
+///
+/// Spec grammar (POC subset):
+///   spec := item*
+///   item := word | lit-word | refinement
+///   refinement := `/name` word*    — `/name` introduces a refinement; the
+///                                     following words (until the next
+///                                     refinement or end) are its argument
+///                                     words.
+///
+/// Words become positional params (in order). A refinement and its args are
+/// recorded in `refinements` in declaration order. Type annotations and
+/// locals markers (e.g. `<local>`) are skipped.
+fn extract_spec(spec_block: &Value) -> Result<FuncSpec, EvalError> {
     let series = match spec_block {
         Value::Block { series, .. } => series.clone(),
         _ => {
@@ -638,19 +661,36 @@ fn extract_params(spec_block: &Value) -> Result<Vec<Symbol>, EvalError> {
     };
     let data = series.data.borrow();
     let mut params = Vec::new();
+    let mut refinements: Vec<(Symbol, Vec<Symbol>)> = Vec::new();
     for v in data.iter() {
         match v {
-            Value::Word { sym, .. } | Value::LitWord { sym, .. } => params.push(sym.clone()),
+            Value::Word { sym, .. } | Value::LitWord { sym, .. } => {
+                if let Some(last) = refinements.last_mut() {
+                    last.1.push(sym.clone());
+                } else {
+                    params.push(sym.clone());
+                }
+            }
+            Value::Refinement { sym, .. } => {
+                refinements.push((sym.clone(), Vec::new()));
+            }
             _ => {
-                // Skip type annotations / refinements / locals markers in POC.
+                // Skip type annotations / locals markers.
             }
         }
     }
-    Ok(params)
+    Ok(FuncSpec {
+        params,
+        refinements,
+    })
 }
 
 /// `function? value` — `true` if value is a `function!`, else `false`.
-fn function_predicate(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+fn function_predicate(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
     if args.is_empty() {
         return Err(arity_err(args, "function?", 1, 0));
     }
@@ -660,7 +700,7 @@ fn function_predicate(args: &[Value], _env: &mut Env) -> Result<Value, EvalError
 /// `return [value]` — unwinds out of the enclosing function via
 /// `EvalError::Return`. With no argument, returns `none`. Caught by
 /// `call_user_func` in `interp.rs`.
-fn return_native(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
+fn return_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     let v = args.first().cloned().unwrap_or(Value::None);
     Err(EvalError::Return(v))
 }
@@ -672,7 +712,7 @@ fn return_native(args: &[Value], _env: &mut Env) -> Result<Value, EvalError> {
 /// `get 'word` — returns the value bound to `word` in the user context.
 /// Errors if the word has no value. The word operand is a lit-word (`'foo`)
 /// or an unbound word (`foo`).
-fn get_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn get_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(arity_err(args, "get", 1, args.len()));
     }
@@ -697,7 +737,7 @@ fn get_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 
 /// `set 'word value` — writes `value` into `word`'s slot in the user context
 /// (the word must have been pre-allocated by `bind_pass`). Returns the value.
-fn set_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn set_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "set", 2, args.len()));
     }
@@ -726,7 +766,7 @@ fn set_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 
 /// `value? 'word` — `true` if `word` has a value in the user context, else
 /// `false`.
-fn value_predicate(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn value_predicate(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(arity_err(args, "value?", 1, args.len()));
     }
@@ -750,7 +790,7 @@ fn value_predicate(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 /// (scoped to the child), so `use` provides a self-contained local scope.
 /// Outer user-context words remain visible. The locals do not persist after
 /// `use` returns. Returns the block's last value.
-fn use_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn use_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "use", 2, args.len()));
     }
@@ -808,7 +848,7 @@ fn use_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
 /// word in the user context (the canonical Red form takes a context value;
 /// objects are out of scope, so we accept a word/lit-word and bind to the
 /// user context it lives in). Returns the rebound block (a deep copy).
-fn bind_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+fn bind_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "bind", 2, args.len()));
     }
@@ -1327,5 +1367,88 @@ mod tests {
     #[test]
     fn if_with_none_is_falsy() {
         assert_eq!(mold_to_string(&val("if none [42]")), "none");
+    }
+
+    // --- M13: user-function refinements ---
+
+    #[test]
+    fn func_with_only_refinement_callable_with_and_without() {
+        // `func [x /only][...]` — callable both ways. The body reads `only`
+        // as a logic flag (true when `/only` supplied, false otherwise).
+        let src = r#"
+            f: func [x /only][
+                either only [x * 10][x]
+            ]
+            print f 5
+            print f/only 5
+        "#;
+        let out = run_capture(src).unwrap();
+        assert_eq!(s(&out), "5\n50\n");
+    }
+
+    #[test]
+    fn func_refinement_with_argument() {
+        // `func [x /with y][...]` — `/with` takes one arg `y`. The inactive
+        // branch must not reference `y` (it's `none` when `/with` is unused).
+        let src = r#"
+            f: func [x /with y][
+                if with [return x + y]
+                x
+            ]
+            print f 5
+            print f/with 5 7
+        "#;
+        let out = run_capture(src).unwrap();
+        assert_eq!(s(&out), "5\n12\n");
+    }
+
+    #[test]
+    fn func_refinement_inline_spaced_form() {
+        // The spaced form `f 5 /with 7` (refinement as a standalone token
+        // after the positional args) also works — spec-order dispatch
+        // consumes positional args first, then the refinement flag + its
+        // args. (Refinements may not skip required positionals.)
+        let src = r#"
+            f: func [x /with y][
+                if with [return x + y]
+                x
+            ]
+            print f 5 /with 7
+        "#;
+        let out = run_capture(src).unwrap();
+        assert_eq!(s(&out), "12\n");
+    }
+
+    #[test]
+    fn func_refinement_arg_defaults_to_none_when_inactive() {
+        // When `/with` isn't supplied, `y` is `none` in the body. The body
+        // must guard against using `y` in the inactive path.
+        let src = r#"
+            f: func [x /with y][
+                if with [return y]
+                x
+            ]
+            print f 5
+        "#;
+        let out = run_capture(src).unwrap();
+        assert_eq!(s(&out), "5\n");
+    }
+
+    #[test]
+    fn func_multiple_refinements() {
+        // Two refinements, both usable independently and together.
+        let src = r#"
+            f: func [x /double /add n][
+                if double [x: x * 2]
+                if add [x: x + n]
+                x
+            ]
+            print f 5
+            print f/double 5
+            print f/add 5 3
+            print f/double/add 5 3
+        "#;
+        let out = run_capture(src).unwrap();
+        assert_eq!(s(&out), "5\n10\n8\n13\n");
     }
 }

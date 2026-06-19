@@ -267,6 +267,18 @@ fn attach_local_bindings(series: &Series, ctx: &Rc<Context>) {
                     *binding = Binding::Local(Rc::clone(ctx), idx);
                 }
             }
+            // Path: bind only the head word (the function or object being
+            // navigated). Tail parts are refinement/field names looked up
+            // by symbol at eval time, not variables.
+            Value::Path { parts, .. } => {
+                if let Some(Value::Word { sym, binding, .. })
+                | Some(Value::GetWord { sym, binding, .. }) = parts.first_mut()
+                {
+                    if let Some(idx) = ctx.index_of(sym) {
+                        *binding = Binding::Local(Rc::clone(ctx), idx);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -292,10 +304,21 @@ pub fn bind_function_body(fd: &mut FuncDef, user_ctx: &Rc<Context>) {
     for p in fd.params.iter() {
         fd.ctx.slot_index(p.clone());
     }
-    // 2. Body-local SetWords + loop vars become function-local slots.
+    // 2. Refinement slots, in spec order: for each refinement a flag slot
+    //    (named by the refinement word, holds a `logic!` at call time) then
+    //    one slot per refinement argument word. The call shim
+    //    (`call_user_func`) fills these in the same order. Body references
+    //    to the refinement word or its arg words bind to these `Func` slots.
+    for (ref_name, ref_args) in &fd.refinements {
+        fd.ctx.slot_index(ref_name.clone());
+        for arg in ref_args {
+            fd.ctx.slot_index(arg.clone());
+        }
+    }
+    // 3. Body-local SetWords + loop vars become function-local slots.
     collect_setwords(&fd.body, &fd.ctx);
     collect_loop_vars(&fd.body, &fd.ctx);
-    // 3. Attach bindings: function-local first, then outer user-ctx refs.
+    // 4. Attach bindings: function-local first, then outer user-ctx refs.
     attach_func_bindings(&fd.body, &fd.ctx, user_ctx);
 }
 
@@ -332,6 +355,17 @@ fn attach_use_inner(data: &mut [Value], child_ctx: &Rc<Context>, user_ctx: &Rc<C
                     *binding = Binding::Local(Rc::clone(user_ctx), idx);
                 }
             }
+            Value::Path { parts, .. } => {
+                if let Some(Value::Word { sym, binding, .. })
+                | Some(Value::GetWord { sym, binding, .. }) = parts.first_mut()
+                {
+                    if let Some(idx) = child_ctx.index_of(sym) {
+                        *binding = Binding::Local(Rc::clone(child_ctx), idx);
+                    } else if let Some(idx) = user_ctx.index_of(sym) {
+                        *binding = Binding::Local(Rc::clone(user_ctx), idx);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -355,6 +389,17 @@ fn attach_func_bindings(series: &Series, func_ctx: &Context, user_ctx: &Rc<Conte
                     *binding = Binding::Func(idx);
                 } else if let Some(idx) = user_ctx.index_of(sym) {
                     *binding = Binding::Local(Rc::clone(user_ctx), idx);
+                }
+            }
+            Value::Path { parts, .. } => {
+                if let Some(Value::Word { sym, binding, .. })
+                | Some(Value::GetWord { sym, binding, .. }) = parts.first_mut()
+                {
+                    if let Some(idx) = func_ctx.index_of(sym) {
+                        *binding = Binding::Func(idx);
+                    } else if let Some(idx) = user_ctx.index_of(sym) {
+                        *binding = Binding::Local(Rc::clone(user_ctx), idx);
+                    }
                 }
             }
             _ => {}

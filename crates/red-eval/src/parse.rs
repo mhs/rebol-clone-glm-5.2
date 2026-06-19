@@ -20,7 +20,7 @@
 use std::rc::Rc;
 
 use red_core::value::{Series, Span, Symbol, Value};
-use red_core::{Env, EvalError};
+use red_core::{Env, EvalError, RefineArgs};
 
 use crate::interp::eval;
 use crate::natives::type_name;
@@ -275,7 +275,7 @@ enum Cursor {
 /// Input is `string!`, `block!`, or `paren!`. Rules must be a `block!`.
 /// Returns `logic!`: `true` if the rules matched *and* consumed the input
 /// entirely (cursor at end), else `false`.
-pub fn parse_native(args: &[Value], env: &mut Env) -> Result<Value, EvalError> {
+pub fn parse_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(EvalError::Arity {
             native: Symbol::new("parse"),

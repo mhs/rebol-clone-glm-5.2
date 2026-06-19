@@ -107,6 +107,14 @@ pub enum Binding {
 #[derive(Clone, Debug, Default)]
 pub struct FuncDef {
     pub params: Vec<Symbol>,
+    /// Refinements declared in the spec block, in declaration order. Each
+    /// entry is `(refinement_name, arg_word_names)`. For user functions the
+    /// arg words are the words following `/ref` in the spec (e.g.
+    /// `func [x /with y]` → `("with", ["y"])`); for natives the names are
+    /// synthetic placeholders whose count gives the refinement's arity.
+    /// `dispatch_call` walks params then this list in order, collecting
+    /// caller-supplied refinements into a `RefineArgs`.
+    pub refinements: Vec<(Symbol, Vec<Symbol>)>,
     pub body: Series,
     pub ctx: Context,
     pub native: Option<NativeFn>,
@@ -168,17 +176,27 @@ pub enum Value {
     /// produced by `func`/`does`/`make function!` and by native lookup; has
     /// no source span of its own.
     Func(Rc<FuncDef>),
-    /// `foo/bar` — simple select-on-block in POC. Synthetic.
-    Path(Vec<Value>),
+    /// `foo/bar` — a path. Source-origin (the parser assembles these from a
+    /// word immediately followed by one or more refinement tokens); carries
+    /// the span of the whole `foo/bar` run. Used both for data selection
+    /// (`block/2`, `obj/field` — M19) and for refined function calls
+    /// (`copy/part`, `find/case` — M13). Path parts are stored as `Word`
+    /// values so molding yields `foo/bar`.
+    Path { parts: Vec<Value>, span: Span },
+    /// `/foo` — a refinement word. Source-origin. Appears standalone in
+    /// function spec blocks (`func [x /only y]`) and as a refinement-flag
+    /// token in call sites (`copy /part x` — the spaced form). When adjacent
+    /// to a preceding word (`copy/part`) the parser folds it into a `Path`.
+    Refinement { sym: Symbol, span: Span },
     /// `binary!` (optional in brief; included for completeness). Synthetic.
     String8(Vec<u8>),
 }
 
 impl Value {
     /// Span of this value in the original source. Every source-origin variant
-    /// (`Integer`/`Float`/`String`/word-family/`Block`/`Paren`) carries its
-    /// token span; synthetic variants (`None`/`Logic`/`Func`/`Path`/`String8`)
-    /// return `None`.
+    /// (`Integer`/`Float`/`String`/word-family/`Block`/`Paren`/`Path`/
+    /// `Refinement`) carries its token span; synthetic variants
+    /// (`None`/`Logic`/`Func`/`String8`) return `None`.
     pub fn span(&self) -> Option<Span> {
         match self {
             Value::Integer { span, .. }
@@ -189,10 +207,10 @@ impl Value {
             | Value::GetWord { span, .. }
             | Value::LitWord { span, .. }
             | Value::Block { span, .. }
-            | Value::Paren { span, .. } => Some(*span),
-            Value::None | Value::Logic(_) | Value::Func(_) | Value::Path(_) | Value::String8(_) => {
-                None
-            }
+            | Value::Paren { span, .. }
+            | Value::Path { span, .. }
+            | Value::Refinement { span, .. } => Some(*span),
+            Value::None | Value::Logic(_) | Value::Func(_) | Value::String8(_) => None,
         }
     }
 
@@ -275,6 +293,23 @@ impl Value {
     pub fn paren(series: Series) -> Self {
         Value::Paren {
             series,
+            span: Span::new(0, 0),
+        }
+    }
+
+    /// Constructor shorthand for a path with a zero span (test/REPL use).
+    /// Parts are typically `Value::Word` values.
+    pub fn path(parts: Vec<Value>) -> Self {
+        Value::Path {
+            parts,
+            span: Span::new(0, 0),
+        }
+    }
+
+    /// Constructor shorthand for a refinement word with a zero span.
+    pub fn refinement(s: &str) -> Self {
+        Value::Refinement {
+            sym: Symbol::new(s),
             span: Span::new(0, 0),
         }
     }

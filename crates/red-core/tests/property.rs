@@ -3,9 +3,6 @@
 //!
 //! Excluded variants (documented POC gaps):
 //! - `Func` — molds as `#[function]`, not reparseable.
-//! - `Path` — the lexer can't reparse paths with non-word parts (e.g.
-//!   `foo/"bar"`); a word-only path round-trips but the parser doesn't
-//!   produce `Path` values from source anyway.
 //! - `String8` — molds as `#{hex}`, not reparseable.
 //! - `NaN`/`inf` floats — no lexer literal for them.
 //! - Series with `index != 0` — mold renders from the cursor, so a positioned
@@ -14,6 +11,9 @@
 //! `None`/`Logic` round-trip at the *mold* level: `mold(Value::None)` is
 //! `none`, which re-parses as `Word("none")` whose mold is also `none`. The
 //! span difference is invisible to `mold`.
+//!
+//! `Path` and `Refinement` (M13) are source-origin and round-trip. Paths
+//! are generated with word-only parts so they reparse via adjacency folding.
 
 use proptest::prelude::*;
 use red_core::{load_source, mold_to_string, printer::mold, Series, Span, Value};
@@ -60,6 +60,11 @@ fn gen_value(_depth: u32) -> BoxedStrategy<Value> {
         // `none` / `true` / `false` constants round-trip at mold level.
         Just(Value::None),
         any::<bool>().prop_map(Value::Logic),
+        // Refinement word (standalone): `/foo` re-parses to a Refinement.
+        "[a-z][a-z0-9]{0,8}".prop_map(|s: String| Value::Refinement {
+            sym: red_core::Symbol::new(&s),
+            span: Span::new(0, 0),
+        }),
     ]
     .prop_recursive(
         3,  // max depth
@@ -85,12 +90,26 @@ fn gen_value(_depth: u32) -> BoxedStrategy<Value> {
                     }
                 }),
                 // Paren.
-                prop::collection::vec(inner, 0..4).prop_map(|vs| {
+                prop::collection::vec(inner.clone(), 0..4).prop_map(|vs| {
                     let series = Series::new(vs);
                     Value::Paren {
                         series,
                         span: Span::new(0, 0),
                     }
+                }),
+                // Path of 2..4 word parts. Word-only parts reparse via the
+                // parser's adjacency folding into a single Path value.
+                prop::collection::vec(
+                    "[a-z][a-z0-9]{0,8}".prop_map(|s: String| Value::Word {
+                        sym: red_core::Symbol::new(&s),
+                        binding: red_core::Binding::Unbound,
+                        span: Span::new(0, 0),
+                    }),
+                    2..4,
+                )
+                .prop_map(|parts| Value::Path {
+                    parts,
+                    span: Span::new(0, 0),
                 }),
             ]
         },
