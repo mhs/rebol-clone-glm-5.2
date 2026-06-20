@@ -21,6 +21,7 @@ use std::io::Write;
 use std::rc::Rc;
 
 use red_core::context::Context;
+use red_core::parser::load_source;
 use red_core::printer::mold_to_string;
 use red_core::value::{FuncDef, Series, Span, Symbol, Value};
 use red_core::{Env, EvalError, NativeFn, RefineArgs};
@@ -819,13 +820,60 @@ fn function_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<
 }
 
 // ---------------------------------------------------------------------------
-// Eval: do, reduce
+// Eval: do, reduce, load
 // ---------------------------------------------------------------------------
 
-/// `do block` — evaluates a block, returning the last value.
+/// `do block-or-string` — evaluates a block (or a string parsed as Red source),
+/// returning the last value. When given a string, lexes+parses it via
+/// `load_source`, binds the resulting body against the live `env.user_ctx`
+/// (so `do "x: 5"` writes to the user context like a top-level script), then
+/// evaluates it.
 fn do_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
-    let body = expect_block(args, 0, "do")?;
-    eval(&body, env)
+    if args.is_empty() {
+        return Err(arity_err(args, "do", 1, 0));
+    }
+    match &args[0] {
+        Value::Block { .. } | Value::Paren { .. } => eval(&args[0], env),
+        Value::String { s, span } => {
+            let body = load_source(s).map_err(|e| EvalError::Native {
+                message: e.to_string(),
+                span: *span,
+            })?;
+            crate::binding::bind_pass_into(&body, &env.user_ctx);
+            let block = Value::block(body);
+            eval(&block, env)
+        }
+        other => Err(EvalError::TypeError {
+            expected: "block! or string!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
+/// `load string` — lexes+parses a string of Red source, returns the body as a
+/// `block!` value (unbound — callers that want to evaluate it should pass it
+/// to `do`, which binds it to the user context). Mirrors `load_source` from
+/// `red-core::parser` exposed as a runtime native. This is the string→block
+/// half of the load dialect; file loading lands in M20.
+fn load_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "load", 1, args.len()));
+    }
+    match &args[0] {
+        Value::String { s, span } => {
+            let body = load_source(s).map_err(|e| EvalError::Native {
+                message: e.to_string(),
+                span: *span,
+            })?;
+            Ok(Value::block(body))
+        }
+        other => Err(EvalError::TypeError {
+            expected: "string!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
 }
 
 /// `reduce block` — evaluates each expression in the block, returning a new
@@ -1395,11 +1443,15 @@ pub fn register_natives(env: &mut Env) {
         variadic_native(exit_native as NativeFn),
     );
 
-    // Eval (M7)
+    // Eval (M7 + M16.1)
     env.natives
         .insert(Symbol::new("do"), fixed_native(do_native as NativeFn, 1));
     env.natives
         .insert(Symbol::new("reduce"), fixed_native(reduce as NativeFn, 1));
+    env.natives.insert(
+        Symbol::new("load"),
+        fixed_native(load_native as NativeFn, 1),
+    );
 
     // Functions (M9)
     env.natives.insert(
@@ -1750,6 +1802,59 @@ mod tests {
     #[test]
     fn reduce_empty_block() {
         assert_eq!(mold_to_string(&val("reduce []")), "[]");
+    }
+
+    // --- M16.1: load + do-with-string ---
+
+    #[test]
+    fn load_returns_block_from_string() {
+        let v = val("load \"1 + 2\"");
+        match v {
+            Value::Block { series, .. } => {
+                let data = series.data.borrow();
+                assert_eq!(data.len(), 3, "expected 3 values [1 + 2], got {data:?}");
+            }
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn do_evaluates_string() {
+        assert_eq!(mold_to_string(&val("do \"1 + 2\"")), "3");
+    }
+
+    #[test]
+    fn do_load_calculator_pattern() {
+        // The canonical string→code→eval pattern now works.
+        let v = val("calc: function [expr][do load expr] calc \"1 + 2 * 3\"");
+        assert_eq!(mold_to_string(&v), "9");
+    }
+
+    #[test]
+    fn do_string_sets_existing_global() {
+        // `do "x: 5"` writes to the pre-allocated `x` slot in the user ctx.
+        assert_eq!(mold_to_string(&val("x: 0 do \"x: 5\" x")), "5");
+    }
+
+    #[test]
+    fn do_string_errors_on_eval_failure() {
+        // A syntactically-valid but semantically-broken string propagates
+        // the eval error (here: `1 +` is missing its right operand).
+        let err = run_capture("do \"1 +\"").unwrap_err();
+        assert!(err.contains("expects") || err.contains("argument"));
+    }
+
+    #[test]
+    fn do_string_errors_on_lex_failure() {
+        // A lex error in the string propagates as a native error.
+        let err = run_capture("do {\"unterminated}").unwrap_err();
+        assert!(err.contains("unterminated") || err.contains("string"));
+    }
+
+    #[test]
+    fn do_rejects_non_block_non_string() {
+        let err = run_capture("do 5").unwrap_err();
+        assert!(err.contains("expected") && err.contains("block"));
     }
 
     // --- M7 truthiness edge cases ---
