@@ -126,6 +126,8 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::LitPath { .. } => "lit-path!",
         Value::SetPath { .. } => "set-path!",
         Value::Refinement { .. } => "refinement!",
+        Value::File { .. } => "file!",
+        Value::Url { .. } => "url!",
         Value::Error(_) => "error!",
         Value::Object(_) => "object!",
     }
@@ -1622,11 +1624,20 @@ pub fn register_natives(env: &mut Env) {
 
     // Path natives (M19)
     crate::path::register_path_natives(env);
+
+    // File & shell I/O (M20)
+    crate::io::register_io_natives(env);
 }
 
-/// Install the predefined constant words (`none`, `true`, `false`, `newline`)
-/// into a user context. Must be called before `bind_pass` so references to
-/// these words get `Local` bindings to the constant slots.
+/// Install the predefined constant words (`none`, `true`, `false`, `newline`,
+/// `system`) into a user context. Must be called before `bind_pass` so
+/// references to these words get `Local` bindings to the constant slots.
+///
+/// `system` is an object with an `options` field (also an object) carrying
+/// `args` (a block of CLI arg strings, empty by default), `allow-shell`
+/// (logic, false by default), and `path` (the current working directory as a
+/// file!). The CLI mutates these slots after `install_constants` to reflect
+/// its flags; `change-dir` updates `path` at runtime.
 pub fn install_constants(ctx: &Context) {
     ctx.set(Symbol::new("none"), Value::None);
     ctx.set(Symbol::new("true"), Value::Logic(true));
@@ -1635,6 +1646,32 @@ pub fn install_constants(ctx: &Context) {
         Symbol::new("newline"),
         Value::string(std::rc::Rc::from("\n")),
     );
+    install_system(ctx);
+}
+
+/// Build and install the `system` object. The object mirrors `Env`'s
+/// `allow_shell`/`cwd` fields for script-readable access via
+/// `system/options/args` etc. The CLI populates `args`/`allow-shell` after
+/// `install_constants` by writing into the slots directly.
+fn install_system(ctx: &Context) {
+    use red_core::value::ObjectDef;
+    use std::rc::Rc as StdRc;
+    // options object: args, allow-shell, path.
+    let opts = ObjectDef::new();
+    opts.ctx
+        .set(Symbol::new("args"), Value::block(Series::empty()));
+    opts.ctx
+        .set(Symbol::new("allow-shell"), Value::Logic(false));
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    opts.ctx.set(
+        Symbol::new("path"),
+        Value::file(StdRc::from(cwd.to_string_lossy().as_ref())),
+    );
+
+    // system object: options.
+    let sys = ObjectDef::new();
+    sys.ctx.set(Symbol::new("options"), Value::object(opts));
+    ctx.set(Symbol::new("system"), Value::object(sys));
 }
 
 #[cfg(test)]

@@ -67,6 +67,16 @@ fn gen_value(_depth: u32) -> BoxedStrategy<Value> {
             sym: red_core::Symbol::new(&s),
             span: Span::new(0, 0),
         }),
+        // File! literal: bare path form (no delimiters) round-trips.
+        "[a-z][a-z0-9/._-]{0,12}".prop_map(|s: String| Value::File {
+            path: s.into(),
+            span: Span::new(0, 0),
+        }),
+        // Url! literal: `scheme://...` round-trips.
+        "[a-z]{1,5}://[a-z0-9./_-]{0,12}".prop_map(|s: String| Value::Url {
+            url: s.into(),
+            span: Span::new(0, 0),
+        }),
     ]
     .prop_recursive(
         3,  // max depth

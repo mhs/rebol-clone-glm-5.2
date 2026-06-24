@@ -22,6 +22,13 @@ pub enum TokenKind {
     /// word chars. A bare `/` (slash not followed by word chars) is emitted
     /// as `Word("/")` instead, since `/` is also the division operator.
     Refinement(Symbol),
+    /// `%foo/bar.txt` — a file! literal. Produced by a `%` followed by a run
+    /// of non-delimiter bytes (where `/` is *not* a delimiter inside a file
+    /// run, so paths stay together).
+    File(Rc<str>),
+    /// `http://example.com/x` — a url! literal. Produced when a word run
+    /// matches `scheme://...`. The full text (including scheme) is stored.
+    Url(Rc<str>),
     LBracket,
     RBracket,
     LParen,
@@ -154,6 +161,31 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                 span: Span::new(start, end),
             });
             continue;
+        }
+
+        // File literal: `%`-prefixed run. `/` is allowed inside (file paths),
+        // so this scans its own run rather than reusing `scan_word`.
+        if c == b'%' {
+            let (end, kind) = scan_file(src, &mut i)?;
+            out.push(Token {
+                kind,
+                span: Span::new(start, end),
+            });
+            continue;
+        }
+
+        // URL literal: `scheme://...` where scheme is alpha-led. Detected
+        // here (before the `/` refinement arm and the word fall-through)
+        // because `/` is otherwise a delimiter and would split the URL.
+        if c.is_ascii_alphabetic() {
+            if let Some(scheme_end) = url_scheme_end(src, i) {
+                let (end, kind) = scan_url(src, &mut i, scheme_end);
+                out.push(Token {
+                    kind,
+                    span: Span::new(start, end),
+                });
+                continue;
+            }
         }
 
         // Numbers: digit, or `-` followed by digit.
@@ -476,6 +508,45 @@ fn scan_refinement(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexEr
     Ok((end, TokenKind::Refinement(Symbol::new(body))))
 }
 
+/// `%foo/bar.txt` or `%"foo bar.txt"` — a file! literal. Two forms:
+/// - Bare: `%` followed by a run of non-delimiter bytes (where `/` is
+///   allowed, so paths stay together).
+/// - Quoted: `%` followed by a `"..."` string (with standard escapes), used
+///   when the path contains delimiters like spaces. The decoded string is
+///   stored as the file path (without the `%` or quotes).
+fn scan_file(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError> {
+    let start = *i;
+    let bytes = src.as_bytes();
+    *i += 1; // consume leading `%`
+             // Quoted form: `%"..."`.
+    if bytes.get(*i) == Some(&b'"') {
+        let (end, body) = scan_quoted(src, i)?;
+        return Ok((end, TokenKind::File(Rc::from(body.as_str()))));
+    }
+    // Bare form: run of non-delimiter bytes (with `/` allowed).
+    while *i < bytes.len() && !is_file_delimiter(bytes[*i]) {
+        *i += 1;
+    }
+    let end = *i;
+    if end == start + 1 {
+        return Err(LexError::InvalidWord {
+            span: Span::new(start, end),
+        });
+    }
+    let body = &src[start + 1..end];
+    Ok((end, TokenKind::File(Rc::from(body))))
+}
+
+/// Delimiter set for file! runs: same as `is_delimiter` but `/` and `%` are
+/// *not* delimiters here (paths contain slashes; the leading `%` is the
+/// marker).
+fn is_file_delimiter(c: u8) -> bool {
+    matches!(
+        c,
+        b' ' | b'\t' | b'\r' | b'\n' | b'[' | b']' | b'(' | b')' | b'{' | b'}' | b';' | b'"'
+    )
+}
+
 /// Classify a word run into its token kind. Returns `None` for an empty body
 /// (e.g. `::`, `''`).
 fn classify_word(raw: &str) -> Option<TokenKind> {
@@ -517,6 +588,59 @@ fn classify_word(raw: &str) -> Option<TokenKind> {
         None => Some(TokenKind::Word(Symbol::new(core))),
         _ => None,
     }
+}
+
+/// If a URL scheme starts at `i` (alpha-led run followed by `://`), return
+/// the byte offset just past the scheme (the position of the `:`). The
+/// caller verifies the scheme body chars.
+fn url_scheme_end(src: &str, i: usize) -> Option<usize> {
+    let bytes = src.as_bytes();
+    if i >= bytes.len() || !bytes[i].is_ascii_alphabetic() {
+        return None;
+    }
+    let mut j = i + 1;
+    while j < bytes.len() {
+        let c = bytes[j];
+        if c.is_ascii_alphanumeric() || c == b'+' || c == b'-' || c == b'.' {
+            j += 1;
+        } else {
+            break;
+        }
+    }
+    // Need `://` at position j, with at least one char after.
+    if j + 2 < bytes.len() && bytes[j] == b':' && bytes[j + 1] == b'/' && bytes[j + 2] == b'/' {
+        Some(j)
+    } else {
+        None
+    }
+}
+
+/// Scan a url! literal starting at `i`. `scheme_end` is the offset of the
+/// `:` in `://` (returned by `url_scheme_end`). Consumes the scheme, `://`,
+/// and a run of non-delimiter bytes (where `/` is allowed). Returns the end
+/// offset and `TokenKind::Url`.
+fn scan_url(src: &str, i: &mut usize, _scheme_end: usize) -> (usize, TokenKind) {
+    let start = *i;
+    let bytes = src.as_bytes();
+    // Skip scheme + `://`.
+    *i += 1; // first alpha (already validated)
+    while *i < bytes.len() {
+        let c = bytes[*i];
+        if c.is_ascii_alphanumeric() || c == b'+' || c == b'-' || c == b'.' {
+            *i += 1;
+        } else {
+            break;
+        }
+    }
+    // Consume `://`.
+    *i += 3;
+    // Consume url body: non-delimiter (with `/` allowed, like files).
+    while *i < bytes.len() && !is_file_delimiter(bytes[*i]) {
+        *i += 1;
+    }
+    let end = *i;
+    let url = &src[start..end];
+    (end, TokenKind::Url(Rc::from(url)))
 }
 
 /// Length in bytes of the UTF-8 char starting at `first_byte`. Falls back to 1.
@@ -913,5 +1037,110 @@ mod tests {
         assert_eq!(toks[1].span, Span::new(3, 9));
         // SetWord span covers `field:` (bytes 4..10, end exclusive).
         assert_eq!(toks[2].span, Span::new(4, 10));
+    }
+
+    // --- M20 file! / url! literals ---
+
+    #[test]
+    fn file_bare() {
+        assert_eq!(
+            one("%foo/bar.txt"),
+            TokenKind::File(Rc::from("foo/bar.txt"))
+        );
+        assert_eq!(one("%foo"), TokenKind::File(Rc::from("foo")));
+    }
+
+    #[test]
+    fn file_quoted_with_spaces() {
+        assert_eq!(
+            one("%\"with space.txt\""),
+            TokenKind::File(Rc::from("with space.txt"))
+        );
+    }
+
+    #[test]
+    fn file_quoted_with_escapes() {
+        assert_eq!(one("%\"a\\\"b\""), TokenKind::File(Rc::from("a\"b")));
+    }
+
+    #[test]
+    fn file_bare_stops_at_delimiters() {
+        let toks = kinds("%foo/bar.txt]");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::File(Rc::from("foo/bar.txt")),
+                TokenKind::RBracket,
+            ]
+        );
+    }
+
+    #[test]
+    fn file_empty_is_error() {
+        let err = lex("%").unwrap_err();
+        assert!(matches!(err, LexError::InvalidWord { .. }));
+    }
+
+    #[test]
+    fn file_span_covers_percent() {
+        let toks = lex("%foo").expect("lex");
+        assert_eq!(toks[0].span, Span::new(0, 4));
+    }
+
+    #[test]
+    fn url_http() {
+        assert_eq!(
+            one("http://example.com/x"),
+            TokenKind::Url(Rc::from("http://example.com/x"))
+        );
+    }
+
+    #[test]
+    fn url_https() {
+        assert_eq!(
+            one("https://red-lang.org/"),
+            TokenKind::Url(Rc::from("https://red-lang.org/"))
+        );
+    }
+
+    #[test]
+    fn url_file_scheme() {
+        assert_eq!(
+            one("file://localhost/a/b"),
+            TokenKind::Url(Rc::from("file://localhost/a/b"))
+        );
+    }
+
+    #[test]
+    fn url_not_word_without_scheme_separator() {
+        // `foo` is just a word — no `://`, so no url.
+        assert_eq!(one("foo"), TokenKind::Word(Symbol::new("foo")));
+        // `http:foo` (no `//`) is a set-word `http:` then... actually `:` is
+        // non-delimiter so this scans as one word `http:foo` → SetWord? No:
+        // trailing `:` only triggers SetWord when it's a single trailing
+        // colon. `http:foo` has the colon in the middle → Word.
+        assert_eq!(one("http:foo"), TokenKind::Word(Symbol::new("http:foo")));
+    }
+
+    #[test]
+    fn url_scheme_must_start_alpha() {
+        // `1http://x` — starts with a digit, so it's scanned as a number
+        // (stops at the non-digit `h`) then a word; no url.
+        let toks = kinds("1http://x");
+        assert_eq!(toks[0], TokenKind::Integer(1));
+    }
+
+    #[test]
+    fn url_in_block() {
+        let toks = kinds("[http://a/b %foo/bar]");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::LBracket,
+                TokenKind::Url(Rc::from("http://a/b")),
+                TokenKind::File(Rc::from("foo/bar")),
+                TokenKind::RBracket,
+            ]
+        );
     }
 }

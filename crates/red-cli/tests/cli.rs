@@ -98,6 +98,49 @@ fn repl_multiline_block_via_stdin() {
         .stdout("[1 2]\n[1 2]\n");
 }
 
+#[test]
+fn trailing_args_exposed_via_system_options() {
+    // `red script.red a b c` → `system/options/args` is `[a b c]`.
+    let dir = tempfile_dir();
+    let path = dir.join("args.red");
+    fs::write(&path, "Red [] print system/options/args").unwrap();
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg(&path)
+        .arg("a")
+        .arg("b")
+        .arg("c")
+        .assert()
+        .success()
+        .stdout("[\"a\" \"b\" \"c\"]\n");
+}
+
+#[test]
+fn shell_disabled_by_default() {
+    // Without --allow-shell, `call` raises.
+    let dir = tempfile_dir();
+    let path = dir.join("shell.red");
+    fs::write(&path, "Red [] call \"true\"").unwrap();
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg(&path)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("shell disabled"));
+}
+
+#[test]
+fn allow_shell_enables_call() {
+    // With --allow-shell, `call "true"` runs and the script prints the exit code.
+    let dir = tempfile_dir();
+    let path = dir.join("shell.red");
+    fs::write(&path, "Red [] print call \"true\"").unwrap();
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg("--allow-shell")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("0\n");
+}
+
 /// A scratch directory for test fixtures. Reuses `std::env::temp_dir()`; each
 /// test picks a unique name to avoid collisions.
 fn tempfile_dir() -> PathBuf {

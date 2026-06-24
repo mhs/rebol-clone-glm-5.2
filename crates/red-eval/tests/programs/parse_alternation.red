@@ -1,0 +1,5 @@
+Red []
+print parse "aabbcc" [some ["a" | "b" | "c"]]
+print parse "aabbcx" [some ["a" | "b" | "c"]]
+print parse [1 2 3 4] [some [1 | 2 | 3]]
+print parse [1 2 x 4] [some [1 | 2 | 3]]

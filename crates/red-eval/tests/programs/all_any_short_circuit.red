@@ -1,0 +1,7 @@
+Red []
+print all [true 1 2]
+print all [true false 3]
+print any [false 5 6]
+print any [false none]
+print all []
+print any []

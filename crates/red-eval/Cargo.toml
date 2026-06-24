@@ -5,3 +5,7 @@ edition = "2021"
 
 [dependencies]
 red-core = { path = "../red-core" }
+ureq = "2"
+
+[dev-dependencies]
+tempfile = "3"

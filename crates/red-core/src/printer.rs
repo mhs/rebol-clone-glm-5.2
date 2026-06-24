@@ -79,6 +79,8 @@ pub fn mold(value: &Value, out: &mut String) {
             out.push('/');
             out.push_str(sym.as_str());
         }
+        Value::File { path, .. } => mold_file(path, out),
+        Value::Url { url, .. } => out.push_str(url),
         Value::Object(obj) => mold_object(&obj.borrow(), out),
     }
 }
@@ -124,6 +126,8 @@ pub fn form(value: &Value, out: &mut String) {
         | Value::GetWord { sym, .. }
         | Value::LitWord { sym, .. } => out.push_str(sym.as_str()),
         Value::Refinement { sym, .. } => out.push_str(sym.as_str()),
+        Value::File { path, .. } => out.push_str(path),
+        Value::Url { url, .. } => out.push_str(url),
         Value::Block { series, .. } | Value::Paren { series, .. } => {
             let data = series.data.borrow();
             for (n, v) in data.iter().enumerate().skip(series.index) {
@@ -258,6 +262,36 @@ fn mold_string(s: &str, out: &mut String) {
         }
     }
     out.push('"');
+}
+
+/// Mold a file! path. Uses the bare `%path` form when the path contains no
+/// file-delimiter characters (so `%foo/bar.txt` round-trips compactly), and
+/// the quoted `%"..."` form (with string-style escapes) when it does (e.g.
+/// paths with spaces). Either form re-parses to the same value.
+fn mold_file(path: &str, out: &mut String) {
+    let needs_quotes = path.is_empty()
+        || path.as_bytes().iter().any(|c| {
+            matches!(
+                c,
+                b' ' | b'\t'
+                    | b'\r'
+                    | b'\n'
+                    | b'['
+                    | b']'
+                    | b'('
+                    | b')'
+                    | b'{'
+                    | b'}'
+                    | b';'
+                    | b'"'
+            )
+        });
+    out.push('%');
+    if needs_quotes {
+        mold_string(path, out);
+    } else {
+        out.push_str(path);
+    }
 }
 
 #[cfg(test)]

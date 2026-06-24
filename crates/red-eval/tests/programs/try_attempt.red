@@ -1,0 +1,5 @@
+Red []
+print try [1 + "x"]
+print attempt [1 + "x"]
+print try [1 + 2]
+print attempt [1 + 2]

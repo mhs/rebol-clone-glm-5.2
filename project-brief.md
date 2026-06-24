@@ -304,6 +304,21 @@ with a fresh child context.
 - Tests assert against the message-body substring (error fixtures) or the
   rendered `*** Error:` line (CLI tests).
 
+### Sandbox policy (file & shell I/O — M20)
+- `call`/`shell` natives are **off by default** and raise `EvalError::Native`
+  ("shell disabled") unless the CLI is invoked with `--allow-shell`. No test
+  fixture invokes the shell; the one inline test that does is gated on
+  `env.allow_shell = true` set directly in Rust.
+- `read` of a `url!` performs real network I/O via `ureq` (http/https only).
+  Network-dependent tests are marked `#[ignore]` so `cargo test` stays
+  hermetic; run with `cargo test -- --ignored`.
+- File I/O (`read`/`write`/`save`/`exists?`/etc.) operates on the real
+  filesystem relative to `env.cwd` (set from `std::env::current_dir()`).
+  Write tests use the `tempfile` dev-dep for scratch directories; read tests
+  use committed fixtures under `crates/red-eval/tests/fixtures/`.
+- `read/binary` and `write/binary` are stubbed (error) pending the `binary!`
+  type work deferred to v0.3.
+
 ## CLI (`red-cli/src/main.rs`)
 - `red file.red` — load, parse, do, exit code from last value
 - `red` (no args) — minimal REPL using `rustyline`: read line, `load`, `do`, `mold` result, print

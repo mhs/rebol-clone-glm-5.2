@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::context::Context;
@@ -75,6 +76,14 @@ pub struct Env {
     pub call_stack: Vec<CallFrame>,
     pub natives: HashMap<Symbol, Rc<FuncDef>>,
     pub out: Box<dyn Write>,
+    /// Whether `call`/`shell` may execute external commands. Off by default;
+    /// enabled by the CLI `--allow-shell` flag. `call`/`shell` raise
+    /// `EvalError::Native` when this is false (M20 sandbox policy).
+    pub allow_shell: bool,
+    /// Current working directory for file! path resolution. Updated by
+    /// `change-dir`; read by `what-dir`. Relative file paths in `read`/
+    /// `write`/`exists?`/etc. resolve against this.
+    pub cwd: PathBuf,
 }
 
 impl Env {
@@ -92,6 +101,8 @@ impl Env {
             call_stack: Vec::new(),
             natives: HashMap::new(),
             out,
+            allow_shell: false,
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
     }
 }

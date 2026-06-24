@@ -198,36 +198,38 @@ Deferred to v0.3+ (acknowledged but not built here): `char!`, `map!`, `pair!`,
 
 ## Milestone 20 — File & shell I/O
 
-- [ ] Add `Value::File(Rc<str>, span)` variant (lexer: `%foo/bar`)
-- [ ] Add `Value::Url(Rc<str>, span)` variant (lexer: `http://...` etc., scheme detection)
-- [ ] Mold `File` as `%"...escaped..."`, `Url` as the raw string
-- [ ] Implement `file?`/`url?` predicates
-- [ ] Implement `to-file`/`to-url`
-- [ ] Implement `read` (file/url → string) with `/lines` refinement
-- [ ] Implement `read/binary` returning String8 (deferred until String8 supported; stub)
-- [ ] Implement `write` (file + string) and `write/lines`/`append`/`binary` refinements
-- [ ] Implement `load` from file path (currently only source string)
-- [ ] Implement `save` (mold value to file)
-- [ ] Implement `open`/`close`/`read`/`write` over ports (skip full port model;
+- [x] Add `Value::File(Rc<str>, span)` variant (lexer: `%foo/bar`)
+- [x] Add `Value::Url(Rc<str>, span)` variant (lexer: `http://...` etc., scheme detection)
+- [x] Mold `File` as `%"...escaped..."`, `Url` as the raw string
+- [x] Implement `file?`/`url?` predicates
+- [x] Implement `to-file`/`to-url`
+- [x] Implement `read` (file/url → string) with `/lines` refinement
+- [x] Implement `read/binary` returning String8 (deferred until String8 supported; stub)
+- [x] Implement `write` (file + string) and `write/lines`/`append`/`binary` refinements
+- [x] Implement `load` from file path (currently only source string)
+- [x] Implement `save` (mold value to file)
+- [x] Implement `open`/`close`/`read`/`write` over ports (skip full port model;
       expose `read`/`write` directly)
-- [ ] Implement `exists?`/`size?`/`modified?` for files
-- [ ] Implement `dir?`/`make-dir`/`delete`/`rename`/`change-dir`/`what-dir`
-- [ ] Implement `call`/`shell` for running external commands (gated behind a
+- [x] Implement `exists?`/`size?`/`modified?` for files
+- [x] Implement `dir?`/`make-dir`/`delete`/`rename`/`change-dir`/`what-dir`
+- [x] Implement `call`/`shell` for running external commands (gated behind a
       `--allow-shell` CLI flag for safety in test fixtures)
-- [ ] Implement `now` (current date/time as a deferred `date!`-like struct or
-      tuple of integers pending `date!` type)
-- [ ] Implement `wait` (sleep seconds)
-- [ ] Implement `env`/`get-env`/`set-env`
-- [ ] Expose `system/options/args` for script access to CLI args beyond the script path
-- [ ] Update CLI to accept multiple file args and trailing args; pass via `system/options`
-- [ ] Inline `#[test]`: `read %fixtures/hello.txt` returns expected contents
+- [~] Implement `now` (current date/time as a deferred `date!`-like struct or
+      tuple of integers pending `date!` type) — **deferred to v0.3** with a
+      real `date!` type (decision: skip stub in M20)
+- [x] Implement `wait` (sleep seconds)
+- [x] Implement `env`/`get-env`/`set-env`
+- [x] Expose `system/options/args` for script access to CLI args beyond the script path
+- [x] Update CLI to accept multiple file args and trailing args; pass via `system/options`
+- [x] Inline `#[test]`: `read %fixtures/hello.txt` returns expected contents
       (use `tempfile` dev-dep for write tests)
-- [ ] Inline `#[test]`: `write` then `read` round-trips
-- [ ] Inline `#[test]`: `exists? %nonexistent` → false
-- [ ] Inline `#[test]`: `now` returns a value with year/month/day fields accessible
-- [ ] Add golden fixtures: file-copying program, line-count program
-- [ ] Document sandbox policy in `project-brief.md`: no shell by default in tests
-- [ ] `cargo test --workspace` passes
+- [x] Inline `#[test]`: `write` then `read` round-trips
+- [x] Inline `#[test]`: `exists? %nonexistent` → false
+- [~] Inline `#[test]`: `now` returns a value with year/month/day fields accessible
+      — **deferred with `now`**
+- [x] Add golden fixtures: file-copying program, line-count program
+- [x] Document sandbox policy in `project-brief.md`: no shell by default in tests
+- [x] `cargo test --workspace` passes
 
 ## Milestone 21 — Polish & v0.2.0 release
 

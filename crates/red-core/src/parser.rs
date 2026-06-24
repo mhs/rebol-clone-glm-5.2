@@ -187,6 +187,20 @@ impl<'a> Parser<'a> {
                     span: tok.span,
                 })
             }
+            TokenKind::File(path) => {
+                self.advance()?;
+                Ok(Value::File {
+                    path,
+                    span: tok.span,
+                })
+            }
+            TokenKind::Url(url) => {
+                self.advance()?;
+                Ok(Value::Url {
+                    url,
+                    span: tok.span,
+                })
+            }
             // Stray closers at value position are always errors.
             TokenKind::RBracket => Err(ParseError::Unexpected {
                 found: tok.kind,

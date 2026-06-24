@@ -17,6 +17,8 @@
 //!   renders the value's representation).
 //! - `to-word` from a non-string/non-word value raises a `TypeError`.
 
+use std::rc::Rc;
+
 use red_core::form_to_string;
 use red_core::lexer;
 use red_core::parser::load;
@@ -263,6 +265,59 @@ fn to_logic(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value,
     Ok(Value::Logic(truthy(&args[0])))
 }
 
+/// `to-file value` — coerce to `file!`. From `string!` (body becomes path),
+/// `file!` (id), `url!` (body becomes path), or word-family (name becomes
+/// path).
+fn to_file(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "to-file", 1, args.len()));
+    }
+    let v = &args[0];
+    let path: Rc<str> = match v {
+        Value::String { s, .. } => s.clone(),
+        Value::File { path, .. } => path.clone(),
+        Value::Url { url, .. } => url.clone(),
+        w if word_sym(w).is_some() => {
+            let sym = word_sym(w).unwrap();
+            Rc::from(sym.as_str())
+        }
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "string!, file!, url!, or word!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            });
+        }
+    };
+    Ok(Value::file(path))
+}
+
+/// `to-url value` — coerce to `url!`. From `string!` (body becomes url),
+/// `url!` (id), `file!` (body becomes url).
+fn to_url(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "to-url", 1, args.len()));
+    }
+    let v = &args[0];
+    let url: Rc<str> = match v {
+        Value::String { s, .. } => s.clone(),
+        Value::Url { url, .. } => url.clone(),
+        Value::File { path, .. } => path.clone(),
+        w if word_sym(w).is_some() => {
+            let sym = word_sym(w).unwrap();
+            Rc::from(sym.as_str())
+        }
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "string!, file!, url!, or word!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            });
+        }
+    };
+    Ok(Value::url(url))
+}
+
 // ---------------------------------------------------------------------------
 // make <type> <spec>
 // ---------------------------------------------------------------------------
@@ -292,6 +347,8 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
         "float!" | "float" => make_float(spec)?,
         "string!" | "string" => make_string(spec)?,
         "block!" | "block" => make_block(spec)?,
+        "file!" | "file" => make_file(spec)?,
+        "url!" | "url" => make_url(spec)?,
         "object!" | "object" => return crate::object::make_object(spec, env),
         "function!" | "function" => {
             // Original behavior: spec is a packed `[[spec][body]]` block.
@@ -421,6 +478,47 @@ fn make_block(spec: &Value) -> Result<Value, EvalError> {
     })
 }
 
+/// `make file!`:
+/// - from `string!` → file with that path
+/// - from `file!`/`url!` → identity (path carried over)
+/// - from `block!`/`paren!`/word-family → `form` (joined/bare name)
+fn make_file(spec: &Value) -> Result<Value, EvalError> {
+    let path: Rc<str> = match spec {
+        Value::String { s, .. } => s.clone(),
+        Value::File { path, .. } => path.clone(),
+        Value::Url { url, .. } => url.clone(),
+        Value::Block { .. } | Value::Paren { .. } => Rc::from(form_to_string(spec).as_str()),
+        w if word_sym(w).is_some() => Rc::from(form_to_string(spec).as_str()),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "string!, file!, url!, block!, or word!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            });
+        }
+    };
+    Ok(Value::file(path))
+}
+
+/// `make url!`: same shape as `make file!` but produces a `url!`.
+fn make_url(spec: &Value) -> Result<Value, EvalError> {
+    let url: Rc<str> = match spec {
+        Value::String { s, .. } => s.clone(),
+        Value::Url { url, .. } => url.clone(),
+        Value::File { path, .. } => path.clone(),
+        Value::Block { .. } | Value::Paren { .. } => Rc::from(form_to_string(spec).as_str()),
+        w if word_sym(w).is_some() => Rc::from(form_to_string(spec).as_str()),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "string!, file!, url!, block!, or word!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            });
+        }
+    };
+    Ok(Value::url(url))
+}
+
 // ---------------------------------------------------------------------------
 // to <type> <value>
 // ---------------------------------------------------------------------------
@@ -446,6 +544,8 @@ fn to_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
         "get-word!" | "get-word" => to_word_kind(one, "to", WordKind::GetWord),
         "lit-word!" | "lit-word" => to_word_kind(one, "to", WordKind::LitWord),
         "logic!" | "logic" => to_logic(one, &RefineArgs::empty(), env),
+        "file!" | "file" => to_file(one, &RefineArgs::empty(), env),
+        "url!" | "url" => to_url(one, &RefineArgs::empty(), env),
         other => Err(EvalError::Native {
             message: format!("to: {other:?} type not supported in POC"),
             span: args[0].span_or_default(),
@@ -505,6 +605,8 @@ pub fn register_convert_natives(env: &mut Env) {
     reg(env, "to-get-word", to_get_word as NF, 1);
     reg(env, "to-lit-word", to_lit_word as NF, 1);
     reg(env, "to-logic", to_logic as NF, 1);
+    reg(env, "to-file", to_file as NF, 1);
+    reg(env, "to-url", to_url as NF, 1);
 
     // make / to (arity 2)
     reg(env, "make", make_native as NF, 2);
@@ -713,6 +815,47 @@ mod tests {
         assert_eq!(mold_to_string(&val("to-logic none")), "false");
         assert_eq!(mold_to_string(&val("to-logic \"\"")), "true");
         assert_eq!(mold_to_string(&val("to-logic 1")), "true");
+    }
+
+    // --- to-file / to-url (M20) ---
+
+    #[test]
+    fn to_file_from_string() {
+        assert_eq!(
+            mold_to_string(&val("to-file \"foo/bar.txt\"")),
+            "%foo/bar.txt"
+        );
+    }
+
+    #[test]
+    fn to_file_from_url() {
+        assert_eq!(mold_to_string(&val("to-url \"http://x/y\"")), "http://x/y");
+    }
+
+    #[test]
+    fn to_file_from_word() {
+        assert_eq!(mold_to_string(&val("to-file 'foo")), "%foo");
+    }
+
+    #[test]
+    fn to_file_identity() {
+        assert_eq!(mold_to_string(&val("to-file %foo/bar.txt")), "%foo/bar.txt");
+    }
+
+    #[test]
+    fn make_file_from_string() {
+        assert_eq!(mold_to_string(&val("make file! \"a/b.txt\"")), "%a/b.txt");
+    }
+
+    #[test]
+    fn make_url_from_string() {
+        assert_eq!(mold_to_string(&val("make url! \"https://x\"")), "https://x");
+    }
+
+    #[test]
+    fn to_type_dispatcher_for_file_url() {
+        assert_eq!(mold_to_string(&val("to file! \"p.txt\"")), "%p.txt");
+        assert_eq!(mold_to_string(&val("to url! \"ftp://h\"")), "ftp://h");
     }
 
     // --- make ---

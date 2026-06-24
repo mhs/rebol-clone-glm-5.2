@@ -206,6 +206,15 @@ pub enum Value {
     /// token in call sites (`copy /part x` — the spaced form). When adjacent
     /// to a preceding word (`copy/part`) the parser folds it into a `Path`.
     Refinement { sym: Symbol, span: Span },
+    /// `%foo/bar.txt` — a file! literal. Source-origin (the lexer scans the
+    /// `%`-prefixed run); carries the byte-offset span of the whole token.
+    /// `path` is the raw path text without the leading `%` (and without any
+    /// mold-time quoting).
+    File { path: Rc<str>, span: Span },
+    /// `http://example.com/x` — a url! literal. Source-origin (the lexer
+    /// detects `scheme://...` inside a word run); carries the byte-offset span
+    /// of the whole token. `url` is the raw url text including the scheme.
+    Url { url: Rc<str>, span: Span },
     /// `binary!` (optional in brief; included for completeness). Synthetic.
     String8(Vec<u8>),
     /// A caught error value (M16). Produced by `try` when an error is raised
@@ -280,7 +289,9 @@ impl Value {
             | Value::GetPath { span, .. }
             | Value::LitPath { span, .. }
             | Value::SetPath { span, .. }
-            | Value::Refinement { span, .. } => Some(*span),
+            | Value::Refinement { span, .. }
+            | Value::File { span, .. }
+            | Value::Url { span, .. } => Some(*span),
             Value::None
             | Value::Logic(_)
             | Value::Func(_)
@@ -410,6 +421,22 @@ impl Value {
     pub fn refinement(s: &str) -> Self {
         Value::Refinement {
             sym: Symbol::new(s),
+            span: Span::new(0, 0),
+        }
+    }
+
+    /// Constructor shorthand for a file! literal with a zero span (test/REPL use).
+    pub fn file(s: impl Into<Rc<str>>) -> Self {
+        Value::File {
+            path: s.into(),
+            span: Span::new(0, 0),
+        }
+    }
+
+    /// Constructor shorthand for a url! literal with a zero span (test/REPL use).
+    pub fn url(s: impl Into<Rc<str>>) -> Self {
+        Value::Url {
+            url: s.into(),
             span: Span::new(0, 0),
         }
     }

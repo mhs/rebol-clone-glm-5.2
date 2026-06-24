@@ -145,6 +145,8 @@ fn eval_prefix(
         | Value::Func(_)
         | Value::Refinement { .. }
         | Value::Error(_)
+        | Value::File { .. }
+        | Value::Url { .. }
         | Value::Object(_) => Ok(cur),
 
         // Path: a function-headed path is a refined call (`copy/part`,
@@ -1011,6 +1013,25 @@ pub fn run_source_with_exit_output(
     src: &str,
     out: Box<dyn std::io::Write>,
 ) -> Result<(Value, i32), Error> {
+    run_source_with_exit_opts(src, out, &RunOptions::default())
+}
+
+/// CLI run options: `allow_shell` mirrors `Env::allow_shell` (off by default
+/// per the M20 sandbox policy), `args` populates `system/options/args` for
+/// script access to trailing CLI args.
+#[derive(Clone, Debug, Default)]
+pub struct RunOptions {
+    pub allow_shell: bool,
+    pub args: Vec<String>,
+}
+
+/// Like `run_source_with_exit_output` but applies CLI `RunOptions` (allow-shell
+/// flag + trailing args exposed as `system/options/args`) before eval.
+pub fn run_source_with_exit_opts(
+    src: &str,
+    out: Box<dyn std::io::Write>,
+    opts: &RunOptions,
+) -> Result<(Value, i32), Error> {
     let tokens = lexer::lex(src)?;
     let body = if tokens.is_empty() {
         Series::empty()
@@ -1018,7 +1039,16 @@ pub fn run_source_with_exit_output(
         let (_header, body) = parse_program(&tokens)?;
         body
     };
-    run_series_with_exit_output(body, out)
+    run_series_with_exit_opts(body, out, opts)
+}
+
+/// Like `run_series_with_exit_output` but applies CLI `RunOptions`.
+pub fn run_series_with_exit_opts(
+    body: Series,
+    out: Box<dyn std::io::Write>,
+    opts: &RunOptions,
+) -> Result<(Value, i32), Error> {
+    run_series_inner_opts(body, out, opts)
 }
 
 /// Evaluate an already-parsed body series with a fresh environment.
@@ -1046,11 +1076,34 @@ pub fn run_series_with_exit_output(
 /// Shared core: runs the body, catching `EvalError::Quit(code)` as a normal
 /// termination with the given exit code. Other errors propagate as `Error`.
 fn run_series_inner(body: Series, out: Box<dyn std::io::Write>) -> Result<(Value, i32), Error> {
+    run_series_inner_opts(body, out, &RunOptions::default())
+}
+
+/// Shared core with CLI options: installs constants/natives, applies
+/// `allow_shell` and populates `system/options/args`, then evaluates.
+fn run_series_inner_opts(
+    body: Series,
+    out: Box<dyn std::io::Write>,
+    opts: &RunOptions,
+) -> Result<(Value, i32), Error> {
     let ctx = Context::new();
     crate::natives::install_constants(&ctx);
     let ctx_rc = bind_pass(&body, ctx);
     let mut env = Env::new_with_output(ctx_rc, out);
     crate::natives::register_natives(&mut env);
+    env.allow_shell = opts.allow_shell;
+    // Populate system/options/args from CLI args.
+    if !opts.args.is_empty() {
+        let args_block = Series::new(opts.args.iter().map(|a| Value::string(a.clone())).collect());
+        if let Some(Value::Object(sys)) = env.user_ctx.get(&Symbol::new("system")) {
+            if let Some(Value::Object(opts_obj)) = sys.borrow().ctx.get(&Symbol::new("options")) {
+                opts_obj
+                    .borrow()
+                    .ctx
+                    .set(Symbol::new("args"), Value::block(args_block));
+            }
+        }
+    }
     let block = Value::Block {
         series: body,
         span: Span::new(0, 0),

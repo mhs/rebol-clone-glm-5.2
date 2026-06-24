@@ -9,6 +9,7 @@ pub mod binding;
 pub mod context;
 pub mod convert;
 pub mod interp;
+pub mod io;
 pub mod math;
 pub mod natives;
 pub mod object;
@@ -21,7 +22,8 @@ pub use binding::{bind_pass, bind_pass_into};
 pub use context::{Binding, CallFrame, Context, Env, EvalError, FuncDef, NativeFn, RefineArgs};
 pub use interp::{
     eval, run_series, run_series_with_exit_output, run_series_with_output, run_source,
-    run_source_with_exit, run_source_with_exit_output, run_source_with_output,
+    run_source_with_exit, run_source_with_exit_opts, run_source_with_exit_output,
+    run_source_with_output, RunOptions,
 };
 pub use natives::{install_constants, register_natives};
 pub use series::register_series_natives;
