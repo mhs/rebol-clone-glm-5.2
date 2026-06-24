@@ -10,7 +10,7 @@
 //! - `load_source`: convenience combining `lex` + `load`.
 
 use crate::lexer::{Token, TokenKind};
-use crate::value::{Binding, Series, Span, Value};
+use crate::value::{Binding, Series, Span, Symbol, Value};
 
 /// Parse failure. Every variant carries the span of the offending token so
 /// the CLI can later render `file:line:col: error: ...`.
@@ -68,6 +68,23 @@ impl std::error::Error for ParseError {}
 pub struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
+}
+
+/// Result of peeking at the next token to decide if it's a path segment.
+/// Used by [`Parser::assemble_path`].
+enum PathSegment {
+    /// Not a path segment — stop folding.
+    None,
+    /// An adjacent `Refinement` token (`/foo` right after the prior part).
+    Refinement(Symbol, Span),
+    /// An adjacent `Word("/")` — path separator before a paren/integer/
+    /// bracketed value. The caller consumes the `/` and parses the next
+    /// value as a path part.
+    SlashThenValue,
+    /// An adjacent `SetWord` — `obj/field:` produces this after the
+    /// `Refinement(field)` has been folded. The caller consumes it and
+    /// classifies the run as a `SetPath`.
+    SetWord(Symbol, Span),
 }
 
 impl<'a> Parser<'a> {
@@ -184,48 +201,180 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Fold any run of *adjacent* refinement tokens (`/foo`, no whitespace)
-    /// following `head` into a `Value::Path`. A refinement separated by
-    /// whitespace from its predecessor is left as a standalone `Refinement`
-    /// value — the evaluator handles spaced refinement flags at call sites.
-    /// Path parts are stored as `Word` values so molding yields `foo/bar`.
+    /// Fold a run of *adjacent* path segments following `head` into a path
+    /// value. Segments come in two lexical shapes:
+    ///
+    /// - `Refinement(foo)` — the normal `/foo` case. The refinement body
+    ///   starts right where the prior part ended (no whitespace), so we fold
+    ///   it as a `Word` path part.
+    /// - `Word("/")` followed by another value — the `/` is a delimiter so a
+    ///   refinement body starting with `(`, `)`, `[`, `]`, etc. is empty and
+    ///   the lexer emits the bare `Word("/")` (division operator). When that
+    ///   `/` is *adjacent* to the prior part, it's actually a path separator:
+    ///   consume it and parse the next value (`(paren)`, `integer`, etc.) as
+    ///   a path part. This handles `foo/(a+b)/bar` and `foo/2`.
+    ///
+    /// After folding, classify the whole run by its head:
+    /// - `GetWord` head + ≥1 parts → `Value::GetPath`
+    /// - `LitWord` head + ≥1 parts → `Value::LitPath`
+    /// - `Word` head + ≥1 parts, and the token immediately after the run is
+    ///   an adjacent `SetWord` whose name matches the last part →
+    ///   `Value::SetPath` (the lexer splits `obj/field:` into
+    ///   `Word Refinement SetWord`; we consume the SetWord and fold).
+    /// - otherwise → `Value::Path`
+    ///
+    /// A refinement/path-segment separated by whitespace from its
+    /// predecessor is left as a standalone token — the caller sees the
+    /// assembled path (or just the head if no adjacent segments) and the
+    /// standalone token surfaces as a separate value.
     fn assemble_path(&mut self, head: Value, head_span: Span) -> Result<Value, ParseError> {
         let mut parts = vec![head];
         let mut end = head_span.end;
+        let mut last_part_span = head_span;
         loop {
-            // Peek + clone the needed fields so we can release the immutable
-            // borrow before `advance` (which needs `&mut self`).
-            let next = self.peek_opt().and_then(|tok| match &tok.kind {
-                TokenKind::Refinement(sym) => {
-                    // Adjacency: refinement must start where the prior part
-                    // ended (no whitespace between).
-                    if tok.span.start != end {
-                        return None;
-                    }
-                    Some((sym.clone(), tok.span))
-                }
-                _ => None,
-            });
-            match next {
-                Some((sym, span)) => {
+            let action = self.peek_path_segment(end, last_part_span);
+            match action {
+                PathSegment::Refinement(sym, span) => {
                     end = span.end;
-                    self.advance()?;
+                    last_part_span = span;
+                    self.advance()?; // consume the Refinement token
                     parts.push(Value::Word {
                         sym,
                         binding: Binding::Unbound,
                         span,
                     });
                 }
-                None => break,
+                PathSegment::SlashThenValue => {
+                    // Consume the `Word("/")` path separator, then parse the
+                    // next value as a path part. The parsed value retains its
+                    // own span; the path's overall span extends to its end.
+                    self.advance()?; // consume Word("/")
+                    let val = self.parse_value()?;
+                    end = val.span().map(|s| s.end).unwrap_or(end);
+                    last_part_span = val.span().unwrap_or(last_part_span);
+                    parts.push(val);
+                }
+                PathSegment::SetWord(_sym, _span) => {
+                    // The lexer produced `Refinement(field) SetWord(field)` for
+                    // `obj/field:`. We already folded the Refinement as the
+                    // last part; now consume the SetWord and mark the run as
+                    // a SetPath. The SetWord's body == the last part's name
+                    // (guaranteed by the lexer), so we don't need to push a
+                    // duplicate — just consume and classify.
+                    let setword_span = {
+                        if let Some(tok) = self.peek_opt() {
+                            tok.span
+                        } else {
+                            break;
+                        }
+                    };
+                    self.advance()?; // consume the SetWord
+                    end = setword_span.end;
+                    // Demote GetWord/LitWord head to plain Word so molding
+                    // doesn't double up the prefix.
+                    if let Some(Value::GetWord { sym, span, .. })
+                    | Some(Value::LitWord { sym, span }) = parts.first()
+                    {
+                        let s = sym.clone();
+                        let sp = *span;
+                        parts[0] = Value::Word {
+                            sym: s,
+                            binding: Binding::Unbound,
+                            span: sp,
+                        };
+                    }
+                    let path_span = Span::new(head_span.start, end);
+                    return Ok(Value::SetPath {
+                        parts,
+                        span: path_span,
+                    });
+                }
+                PathSegment::None => break,
             }
         }
         if parts.len() == 1 {
             Ok(parts.pop().unwrap())
         } else {
-            Ok(Value::Path {
-                parts,
-                span: Span::new(head_span.start, end),
+            let path_span = Span::new(head_span.start, end);
+            // Classify by head kind. For GetPath/LitPath, the head's `:`/`'`
+            // marker is the *path's* prefix, not the head word's — so demote
+            // the head from GetWord/LitWord to a plain Word so molding
+            // doesn't double up the prefix.
+            Ok(match &parts[0] {
+                Value::GetWord { sym, span, .. } => {
+                    parts[0] = Value::Word {
+                        sym: sym.clone(),
+                        binding: Binding::Unbound,
+                        span: *span,
+                    };
+                    Value::GetPath {
+                        parts,
+                        span: path_span,
+                    }
+                }
+                Value::LitWord { sym, span } => {
+                    parts[0] = Value::Word {
+                        sym: sym.clone(),
+                        binding: Binding::Unbound,
+                        span: *span,
+                    };
+                    Value::LitPath {
+                        parts,
+                        span: path_span,
+                    }
+                }
+                _ => Value::Path {
+                    parts,
+                    span: path_span,
+                },
             })
+        }
+    }
+
+    /// Peek at the next token and decide what kind of path segment it is
+    /// (if any). `prev_end` is the end byte of the previous part; `prev_span`
+    /// is its full span (used for the SetWord overlap check).
+    fn peek_path_segment(&self, prev_end: usize, prev_span: Span) -> PathSegment {
+        let tok = match self.peek_opt() {
+            Some(t) => t,
+            None => return PathSegment::None,
+        };
+        match &tok.kind {
+            // Adjacent Refinement: `/foo` right after the prior part.
+            TokenKind::Refinement(sym) => {
+                if tok.span.start == prev_end {
+                    PathSegment::Refinement(sym.clone(), tok.span)
+                } else {
+                    PathSegment::None
+                }
+            }
+            // `Word("/")` adjacent to the prior part: path separator before
+            // a paren/integer/bracketed value. The lexer emits bare `Word("/")`
+            // when the refinement body would be empty (next char is a
+            // delimiter like `(`).
+            TokenKind::Word(sym) if sym.as_str() == "/" => {
+                if tok.span.start == prev_end {
+                    PathSegment::SlashThenValue
+                } else {
+                    PathSegment::None
+                }
+            }
+            // Adjacent SetWord: `obj/field:` lexes as
+            // `Word(obj) Refinement(field) SetWord(field)`. The SetWord's
+            // span overlaps with the last Refinement's span (they share the
+            // body bytes). Detect via span overlap + name match.
+            TokenKind::SetWord(sym) => {
+                if tok.span.start < prev_span.end && tok.span.end == prev_span.end + 1 {
+                    // Name must match the last part's name. The last part is
+                    // a Word derived from a Refinement; check its symbol.
+                    // (Caller verifies via the _sym; we signal the segment.)
+                    let _ = sym;
+                    PathSegment::SetWord(sym.clone(), tok.span)
+                } else {
+                    PathSegment::None
+                }
+            }
+            _ => PathSegment::None,
         }
     }
 
@@ -615,5 +764,99 @@ mod tests {
         };
         assert!(matches!(&inner[0], Value::Word { sym, .. } if sym.as_str() == "x"));
         assert!(matches!(&inner[1], Value::Refinement { sym, .. } if sym.as_str() == "only"));
+    }
+
+    // --- M19 path variant tests ---
+
+    #[test]
+    fn get_path_parses_and_molds() {
+        assert_eq!(mold_src(":foo/bar"), ":foo/bar");
+    }
+
+    #[test]
+    fn lit_path_parses_and_molds() {
+        assert_eq!(mold_src("'foo/bar"), "'foo/bar");
+    }
+
+    #[test]
+    fn set_path_parses_and_molds() {
+        assert_eq!(mold_src("obj/field:"), "obj/field:");
+    }
+
+    #[test]
+    fn set_path_three_parts() {
+        assert_eq!(mold_src("a/b/c:"), "a/b/c:");
+    }
+
+    #[test]
+    fn path_with_paren_part_parses_and_molds() {
+        assert_eq!(mold_src("foo/(1 + 2)/bar"), "foo/(1 + 2)/bar");
+    }
+
+    #[test]
+    fn path_with_integer_part_parses() {
+        // `foo/2` now parses as a Path (block/integer select), not division.
+        assert_eq!(mold_src("foo/2"), "foo/2");
+    }
+
+    #[test]
+    fn path_with_paren_and_integer() {
+        assert_eq!(mold_src("foo/(x)/2"), "foo/(x)/2");
+    }
+
+    #[test]
+    fn get_path_span_covers_whole_run() {
+        let toks = lex(":foo/bar").unwrap();
+        let body = load(&toks).unwrap();
+        let data = body.data.borrow();
+        match &data[0] {
+            Value::GetPath { span, .. } => {
+                assert_eq!(*span, Span::new(0, 8));
+            }
+            other => panic!("expected GetPath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_path_span_covers_whole_run() {
+        let toks = lex("obj/field:").unwrap();
+        let body = load(&toks).unwrap();
+        let data = body.data.borrow();
+        match &data[0] {
+            Value::SetPath { span, parts, .. } => {
+                // `obj/field:` is 10 bytes; span end exclusive = 10.
+                assert_eq!(*span, Span::new(0, 10));
+                assert_eq!(parts.len(), 2);
+            }
+            other => panic!("expected SetPath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lit_path_span_covers_whole_run() {
+        let toks = lex("'foo/bar").unwrap();
+        let body = load(&toks).unwrap();
+        let data = body.data.borrow();
+        match &data[0] {
+            Value::LitPath { span, .. } => {
+                assert_eq!(*span, Span::new(0, 8));
+            }
+            other => panic!("expected LitPath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn path_with_paren_part_classified_as_path() {
+        let toks = lex("foo/(1 + 2)/bar").unwrap();
+        let body = load(&toks).unwrap();
+        let data = body.data.borrow();
+        match &data[0] {
+            Value::Path { parts, .. } => {
+                assert_eq!(parts.len(), 3);
+                // Middle part should be a Paren.
+                assert!(matches!(parts[1], Value::Paren { .. }));
+            }
+            other => panic!("expected Path, got {other:?}"),
+        }
     }
 }

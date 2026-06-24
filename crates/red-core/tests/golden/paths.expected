@@ -1,1 +1,1 @@
-foo/bar a/b/c :get/path 'lit/path /standalone copy /part
+foo/bar a/b/c :get/path 'lit/path /standalone copy /part obj/field:

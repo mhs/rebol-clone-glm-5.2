@@ -113,6 +113,33 @@ fn gen_value(_depth: u32) -> BoxedStrategy<Value> {
                     parts,
                     span: Span::new(0, 0),
                 }),
+                // Get-path: `:a/b` re-parses as a GetPath. The mold emits
+                // `:a/b` (prefix on the whole path, head demoted to Word).
+                prop::collection::vec(
+                    "[a-z][a-z0-9]{0,8}".prop_map(|s: String| Value::Word {
+                        sym: red_core::Symbol::new(&s),
+                        binding: red_core::Binding::Unbound,
+                        span: Span::new(0, 0),
+                    }),
+                    2..4,
+                )
+                .prop_map(|parts| Value::GetPath {
+                    parts,
+                    span: Span::new(0, 0),
+                }),
+                // Lit-path: `'a/b` re-parses as a LitPath.
+                prop::collection::vec(
+                    "[a-z][a-z0-9]{0,8}".prop_map(|s: String| Value::Word {
+                        sym: red_core::Symbol::new(&s),
+                        binding: red_core::Binding::Unbound,
+                        span: Span::new(0, 0),
+                    }),
+                    2..4,
+                )
+                .prop_map(|parts| Value::LitPath {
+                    parts,
+                    span: Span::new(0, 0),
+                }),
             ]
         },
     )

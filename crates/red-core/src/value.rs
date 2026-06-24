@@ -186,8 +186,21 @@ pub enum Value {
     /// the span of the whole `foo/bar` run. Used both for data selection
     /// (`block/2`, `obj/field` — M19) and for refined function calls
     /// (`copy/part`, `find/case` — M13). Path parts are stored as `Word`
-    /// values so molding yields `foo/bar`.
+    /// values so molding yields `foo/bar`. Parens (`foo/(a+b)/bar`) may also
+    /// appear as parts; the evaluator evaluates them in place when walking.
     Path { parts: Vec<Value>, span: Span },
+    /// `:foo/bar` — a get-path. Source-origin. Like `GetWord`, resolves its
+    /// head and walks the field chain, returning the value at the path
+    /// *without* invoking it (so `:obj/method` yields the function value,
+    /// not the result of calling it).
+    GetPath { parts: Vec<Value>, span: Span },
+    /// `'foo/bar` — a lit-path. Source-origin. Returns the path itself as
+    /// data (mirrors `LitWord`).
+    LitPath { parts: Vec<Value>, span: Span },
+    /// `obj/field:` — a set-path. Source-origin. Evaluates the following
+    /// expression and writes it into the final field/slot identified by
+    /// walking the path. Mirrors `SetWord`.
+    SetPath { parts: Vec<Value>, span: Span },
     /// `/foo` — a refinement word. Source-origin. Appears standalone in
     /// function spec blocks (`func [x /only y]`) and as a refinement-flag
     /// token in call sites (`copy /part x` — the spaced form). When adjacent
@@ -264,6 +277,9 @@ impl Value {
             | Value::Block { span, .. }
             | Value::Paren { span, .. }
             | Value::Path { span, .. }
+            | Value::GetPath { span, .. }
+            | Value::LitPath { span, .. }
+            | Value::SetPath { span, .. }
             | Value::Refinement { span, .. } => Some(*span),
             Value::None
             | Value::Logic(_)
@@ -361,6 +377,30 @@ impl Value {
     /// Parts are typically `Value::Word` values.
     pub fn path(parts: Vec<Value>) -> Self {
         Value::Path {
+            parts,
+            span: Span::new(0, 0),
+        }
+    }
+
+    /// Constructor shorthand for a get-path with a zero span (test/REPL use).
+    pub fn get_path(parts: Vec<Value>) -> Self {
+        Value::GetPath {
+            parts,
+            span: Span::new(0, 0),
+        }
+    }
+
+    /// Constructor shorthand for a lit-path with a zero span (test/REPL use).
+    pub fn lit_path(parts: Vec<Value>) -> Self {
+        Value::LitPath {
+            parts,
+            span: Span::new(0, 0),
+        }
+    }
+
+    /// Constructor shorthand for a set-path with a zero span (test/REPL use).
+    pub fn set_path(parts: Vec<Value>) -> Self {
+        Value::SetPath {
             parts,
             span: Span::new(0, 0),
         }

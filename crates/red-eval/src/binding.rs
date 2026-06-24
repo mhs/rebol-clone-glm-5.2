@@ -334,10 +334,13 @@ fn attach_local_bindings(series: &Series, ctx: &Rc<Context>) {
                     *binding = Binding::Local(Rc::clone(ctx), idx);
                 }
             }
-            // Path: bind only the head word (the function or object being
-            // navigated). Tail parts are refinement/field names looked up
-            // by symbol at eval time, not variables.
-            Value::Path { parts, .. } => {
+            // Path family: bind only the head word (the function or object
+            // being navigated). Tail parts are refinement/field names looked
+            // up by symbol at eval time, not variables.
+            Value::Path { parts, .. }
+            | Value::GetPath { parts, .. }
+            | Value::LitPath { parts, .. }
+            | Value::SetPath { parts, .. } => {
                 if let Some(Value::Word { sym, binding, .. })
                 | Some(Value::GetWord { sym, binding, .. }) = parts.first_mut()
                 {
@@ -431,7 +434,10 @@ fn attach_use_inner(data: &mut [Value], child_ctx: &Rc<Context>, user_ctx: &Rc<C
                     *binding = Binding::Local(Rc::clone(user_ctx), idx);
                 }
             }
-            Value::Path { parts, .. } => {
+            Value::Path { parts, .. }
+            | Value::GetPath { parts, .. }
+            | Value::LitPath { parts, .. }
+            | Value::SetPath { parts, .. } => {
                 if let Some(Value::Word { sym, binding, .. })
                 | Some(Value::GetWord { sym, binding, .. }) = parts.first_mut()
                 {
@@ -467,7 +473,10 @@ fn attach_func_bindings(series: &Series, func_ctx: &Context, user_ctx: &Rc<Conte
                     *binding = Binding::Local(Rc::clone(user_ctx), idx);
                 }
             }
-            Value::Path { parts, .. } => {
+            Value::Path { parts, .. }
+            | Value::GetPath { parts, .. }
+            | Value::LitPath { parts, .. }
+            | Value::SetPath { parts, .. } => {
                 if let Some(Value::Word { sym, binding, .. })
                 | Some(Value::GetWord { sym, binding, .. }) = parts.first_mut()
                 {

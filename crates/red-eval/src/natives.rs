@@ -122,6 +122,9 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Paren { .. } => "paren!",
         Value::Func(_) => "function!",
         Value::Path { .. } => "path!",
+        Value::GetPath { .. } => "get-path!",
+        Value::LitPath { .. } => "lit-path!",
+        Value::SetPath { .. } => "set-path!",
         Value::Refinement { .. } => "refinement!",
         Value::Error(_) => "error!",
         Value::Object(_) => "object!",
@@ -1616,6 +1619,9 @@ pub fn register_natives(env: &mut Env) {
 
     // Objects & contexts (M18)
     crate::object::register_object_natives(env);
+
+    // Path natives (M19)
+    crate::path::register_path_natives(env);
 }
 
 /// Install the predefined constant words (`none`, `true`, `false`, `newline`)

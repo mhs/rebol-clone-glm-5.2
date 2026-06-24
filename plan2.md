@@ -171,27 +171,30 @@ Deferred to v0.3+ (acknowledged but not built here): `char!`, `map!`, `pair!`,
 
 - [x] Replace `Value::Path(Vec<Value>)` with
       `Value::Path { parts: Vec<Value>, span: Span }`
-- [ ] Lex/parse paths: `foo/bar/baz`, `:foo/bar` (get-path), `'foo/bar` (lit-path)
-- [ ] Add `GetPath` and `LitPath` value variants
-- [ ] Mold paths back including nested `foo/(a+b)/bar` parens
-- [ ] Implement path evaluation:
+- [x] Lex/parse paths: `foo/bar/baz`, `:foo/bar` (get-path), `'foo/bar` (lit-path)
+- [x] Add `GetPath` and `LitPath` value variants
+- [x] Mold paths back including nested `foo/(a+b)/bar` parens
+- [x] Implement path evaluation:
       - `object/word` → object slot lookup (depends on M18)
       - `block/integer` → `pick` by 1-based index
-      - `string/integer` → char pick (deferred until char!; stub error)
+      - `string/integer` → char pick (returns codepoint as integer; full
+        char! support deferred until char! type exists)
       - `map/word` → map lookup (deferred until map!)
       - `context/word` → context slot
       - `func/refinement` → bound refinement reference (deferred)
-- [ ] Implement `set-path` evaluation: `obj/field: value` writes into object slot
-- [ ] Implement path-of-path chaining: `obj/a/b`
-- [ ] Implement `path?`/`get-path?`/`lit-path?` predicates
-- [ ] Implement `to-path`/`to-get-path`/`to-lit-path`
-- [ ] Implement `in object 'word` returning a path value as alternative form
-- [ ] Inline `#[test]`: `o: make object! [a: 1] o/a` → 1 (ties M18 + M19)
-- [ ] Inline `#[test]`: `b: [10 20 30] b/2` → 20
-- [ ] Inline `#[test]`: `o/a: 5 o/a` → 5
-- [ ] Inline `#[test]`: nested path `obj/inner/x` resolves through object graph
-- [ ] Update golden fixtures: replace `select`-on-block idioms with paths where natural
-- [ ] `cargo test --workspace` passes
+- [x] Implement `set-path` evaluation: `obj/field: value` writes into object slot
+- [x] Implement path-of-path chaining: `obj/a/b`
+- [x] Implement `path?`/`get-path?`/`lit-path?` predicates
+- [x] Implement `to-path`/`to-get-path`/`to-lit-path`
+- [~] Implement `in object 'word` returning a path value as alternative form
+      (deferred: `in` kept returning a bound word; `o/field` path syntax
+      covers the use case)
+- [x] Inline `#[test]`: `o: make object! [a: 1] o/a` → 1 (ties M18 + M19)
+- [x] Inline `#[test]`: `b: [10 20 30] b/2` → 20
+- [x] Inline `#[test]`: `o/a: 5 o/a` → 5
+- [x] Inline `#[test]`: nested path `obj/inner/x` resolves through object graph
+- [x] Update golden fixtures: replace `select`-on-block idioms with paths where natural
+- [x] `cargo test --workspace` passes
 
 ## Milestone 20 — File & shell I/O
 

@@ -71,14 +71,10 @@ pub fn mold(value: &Value, out: &mut String) {
             out.push_str("make error! ");
             mold_string(&err.message, out);
         }
-        Value::Path { parts, .. } => {
-            for (i, p) in parts.iter().enumerate() {
-                if i > 0 {
-                    out.push('/');
-                }
-                mold(p, out);
-            }
-        }
+        Value::Path { parts, .. } => mold_path_parts(parts, None, None, out),
+        Value::GetPath { parts, .. } => mold_path_parts(parts, Some(':'), None, out),
+        Value::LitPath { parts, .. } => mold_path_parts(parts, Some('\''), None, out),
+        Value::SetPath { parts, .. } => mold_path_parts(parts, None, Some(':'), out),
         Value::Refinement { sym, .. } => {
             out.push('/');
             out.push_str(sym.as_str());
@@ -139,14 +135,10 @@ pub fn form(value: &Value, out: &mut String) {
         }
         Value::Func(_) => out.push_str("#[function]"),
         Value::Error(err) => out.push_str(&err.message),
-        Value::Path { parts, .. } => {
-            for (i, p) in parts.iter().enumerate() {
-                if i > 0 {
-                    out.push('/');
-                }
-                form(p, out);
-            }
-        }
+        Value::Path { parts, .. } => form_path_parts(parts, None, None, out),
+        Value::GetPath { parts, .. } => form_path_parts(parts, Some(':'), None, out),
+        Value::LitPath { parts, .. } => form_path_parts(parts, Some('\''), None, out),
+        Value::SetPath { parts, .. } => form_path_parts(parts, None, Some(':'), out),
         Value::Object(obj) => {
             // form renders just the inner body (no `make object!` wrapper),
             // space-joined, matching `form` of a block.
@@ -213,6 +205,43 @@ fn form_object_body(obj: &ObjectDef, out: &mut String) {
         out.push_str(sym.as_str());
         out.push_str(": ");
         form(&val, out);
+    }
+}
+
+/// Mold a path's parts joined by `/`, with optional prefix (`:` for get-path,
+/// `'` for lit-path) and optional suffix (`:` for set-path). Each part is
+/// molded via [`mold`]; paren parts mold as `(...)` so `foo/(a+b)/bar`
+/// round-trips.
+fn mold_path_parts(parts: &[Value], prefix: Option<char>, suffix: Option<char>, out: &mut String) {
+    if let Some(p) = prefix {
+        out.push(p);
+    }
+    for (i, p) in parts.iter().enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        mold(p, out);
+    }
+    if let Some(s) = suffix {
+        out.push(s);
+    }
+}
+
+/// Like [`mold_path_parts`] but each part is `form`ed (so a paren part renders
+/// its evaluated-look, and word parts render their bare name). The prefix/
+/// suffix are still emitted in mold-style so the variant is recognizable.
+fn form_path_parts(parts: &[Value], prefix: Option<char>, suffix: Option<char>, out: &mut String) {
+    if let Some(p) = prefix {
+        out.push(p);
+    }
+    for (i, p) in parts.iter().enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        form(p, out);
+    }
+    if let Some(s) = suffix {
+        out.push(s);
     }
 }
 

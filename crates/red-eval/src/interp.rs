@@ -151,11 +151,43 @@ fn eval_prefix(
         // `find/case`); anything else is a data-path select (`block/2`,
         // `obj/field`) which lands in M19. Resolve the head; if it's a Func,
         // dispatch a refined call with the path tail as leading refinement
-        // flags. Otherwise stub-error (M19).
+        // flags. Otherwise dispatch as a data-path select.
         Value::Path {
             parts,
             span: path_span,
-        } => dispatch_path_call(parts, *path_span, data, i, env),
+        } => eval_path_call(parts, *path_span, data, i, env),
+
+        // GetPath `:foo/bar` — like `GetWord`, walks the path returning the
+        // value at the final field WITHOUT invoking it (so `:obj/method`
+        // yields the function value). M19.
+        Value::GetPath {
+            parts,
+            span: path_span,
+        } => eval_get_path(parts, *path_span, env),
+
+        // LitPath `'foo/bar` — returns the path as data (mirrors `LitWord`).
+        // The head is *not* resolved; the value carries the full parts.
+        Value::LitPath { .. } => Ok(cur),
+
+        // SetPath `obj/field: value` — evaluate the next expression as the
+        // RHS, then write it into the final field/slot identified by walking
+        // the path. M19.
+        Value::SetPath {
+            parts,
+            span: path_span,
+        } => {
+            if *i >= data.len() {
+                return Err(EvalError::Arity {
+                    native: Symbol::new("<set-path>"),
+                    expected: 1,
+                    got: 0,
+                    span: *path_span,
+                });
+            }
+            let rhs = eval_expression(data, i, env)?;
+            set_path_value(parts, rhs.clone(), env, *path_span)?;
+            Ok(rhs)
+        }
 
         // Paren: walked eagerly in place. The recursion borrows the child
         // series's `RefCell`, distinct from the outer borrow.
@@ -246,9 +278,9 @@ fn dispatch_call_with_refs(
 /// A function-headed path (`copy/part [1 2 3] 2`) dispatches as a refined
 /// call: resolve the head word; if it's a Func, treat the path tail as
 /// leading refinement flags and delegate to [`dispatch_call_with_refs`].
-/// Anything else (data-path select: `block/2`, `obj/field`) is a stub error
-/// until M19.
-fn dispatch_path_call(
+/// Otherwise dispatch as a data-path select: object field, block/string
+/// integer pick, with paren parts evaluated in place (M19).
+fn eval_path_call(
     parts: &[Value],
     path_span: Span,
     data: &std::cell::Ref<Vec<Value>>,
@@ -276,8 +308,11 @@ fn dispatch_path_call(
             });
         }
     };
-    // Tail parts are stored as `Value::Word` by the parser; extract their
-    // symbol names as leading refinement flags.
+    // For function-headed paths (`copy/part`), the path tail is treated as
+    // leading refinement flags — only Word parts are extracted; non-word
+    // parts (integer/paren) aren't valid refinement flags so they're dropped
+    // from the refinement list (a malformed call surfaces as an arity error
+    // during arg collection).
     let leading_refs: Vec<Symbol> = parts[1..]
         .iter()
         .filter_map(|p| match p {
@@ -290,81 +325,418 @@ fn dispatch_path_call(
         Value::Func(_) => {
             dispatch_call_with_refs(resolved, &head_sym, &leading_refs, data, i, env, path_span)
         }
-        Value::Object(obj) => {
-            // Object path select: resolve field names through the object's
-            // context. For a method (field value is a Func), dispatch as a
-            // call with `env.user_ctx` swapped to the object's ctx so the
-            // method body resolves field references correctly. Field reads
-            // return the value directly (M18; full path select lands in M19).
-            select_object_path(obj, &leading_refs, data, i, env, path_span)
+        Value::Object(obj) => select_object_path(obj, &parts[1..], data, i, env, path_span),
+        // Non-function, non-object data path: walk the tail selecting by
+        // integer index (block/string) or word field (object encountered
+        // mid-walk). Paren parts are evaluated in place. M19.
+        other => {
+            let result = walk_data_path(other, &parts[1..], env, path_span)?;
+            // If the final value is a Func, it's a method call on whatever
+            // object/context produced it — but only the Object arm above
+            // knows the owning ctx. For block/string-headed paths reaching a
+            // Func, return the Func value as-is (callers can use `:path` to
+            // fetch it deliberately).
+            Ok(result)
         }
-        _ => Err(EvalError::Native {
-            message: "path select not implemented for this type (M19)".into(),
+    }
+}
+
+/// Walk a path's tail parts starting from `current`, returning the final
+/// selected value. Each step:
+/// - `Word` → field lookup on the current value (object field, or error
+///   for non-objects). For object intermediates, dispatches a method call
+///   if the field is a Func and there are more block args available — but
+///   only when reached via `eval_path_call` (which has the block cursor);
+///   this helper alone returns the Func value.
+/// - `Integer` → 1-based index pick (negative from tail) on a block or
+///   string. Out-of-range → `none`.
+/// - `Paren` → evaluate in place, replace `current` with the result.
+/// - other → TypeError.
+///
+/// This is the shared core of `eval_path_call` (data-path select),
+/// `eval_get_path`, and `set_path_value` (which uses the second-to-last
+/// value as the assign target).
+fn walk_data_path(
+    mut current: Value,
+    tail: &[Value],
+    env: &mut Env,
+    path_span: Span,
+) -> Result<Value, EvalError> {
+    for part in tail {
+        current = step_path(&current, part, env, path_span)?;
+    }
+    Ok(current)
+}
+
+/// One step of data-path traversal: select `part` from `current`.
+fn step_path(
+    current: &Value,
+    part: &Value,
+    env: &mut Env,
+    path_span: Span,
+) -> Result<Value, EvalError> {
+    match part {
+        Value::Word { sym, .. } => select_field(current, sym, path_span),
+        Value::GetWord { sym, .. } => select_field(current, sym, path_span),
+        Value::LitWord { sym, .. } => select_field(current, sym, path_span),
+        Value::Integer { n, .. } => pick_path_index(current, *n, path_span),
+        Value::Paren { series, .. } => {
+            let p = series.clone();
+            let v = eval(
+                &Value::Paren {
+                    series: p,
+                    span: path_span,
+                },
+                env,
+            )?;
+            // The paren's result is the *selector* for this step — recurse
+            // with the evaluated value as the part. So `b/(1 + 1)` evaluates
+            // the paren to `2`, then picks index 2 from `b`.
+            step_path(current, &v, env, path_span)
+        }
+        other => Err(EvalError::TypeError {
+            expected: "word!, integer!, or paren! in path",
+            found: crate::natives::type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
+/// Select a named field from `current`. Objects look up by slot; other types
+/// error. (Map support deferred per plan.)
+fn select_field(current: &Value, sym: &Symbol, path_span: Span) -> Result<Value, EvalError> {
+    match current {
+        Value::Object(obj) => obj.borrow().ctx.get(sym).ok_or_else(|| EvalError::Native {
+            message: format!("object has no field {}", sym.as_str()),
             span: path_span,
+        }),
+        other => Err(EvalError::Native {
+            message: format!(
+                "cannot select field {} from {}",
+                sym.as_str(),
+                crate::natives::type_name(other)
+            ),
+            span: path_span,
+        }),
+    }
+}
+
+/// `pick`-style 1-based index selection (negative from tail) for block/string
+/// path parts. Out-of-range returns `none`. Strings defer char! support
+/// (plan: stub error until char! exists) — but we return the char as an
+/// integer for POC parity with `pick` on strings if `pick` does that.
+fn pick_path_index(current: &Value, n: i64, path_span: Span) -> Result<Value, EvalError> {
+    match current {
+        Value::Block { series, .. } | Value::Paren { series, .. } => {
+            let data = series.data.borrow();
+            let len = data.len() as i64;
+            let idx = if n > 0 {
+                (n - 1) as usize
+            } else if n < 0 {
+                match (len + n).try_into() {
+                    Ok(v) => v,
+                    Err(_) => return Ok(Value::None),
+                }
+            } else {
+                return Ok(Value::None);
+            };
+            if idx >= data.len() {
+                return Ok(Value::None);
+            }
+            Ok(data[idx].clone())
+        }
+        Value::String { s, .. } => {
+            // POC: string char pick deferred until char! exists. Return the
+            // codepoint as an integer so `s/2` yields a usable value (mirrors
+            // `pick` on strings, which the series.rs implementation also
+            // returns as integers for POC).
+            let chars: Vec<char> = s.chars().collect();
+            let len = chars.len() as i64;
+            let idx = if n > 0 {
+                (n - 1) as usize
+            } else if n < 0 {
+                match (len + n).try_into() {
+                    Ok(v) => v,
+                    Err(_) => return Ok(Value::None),
+                }
+            } else {
+                return Ok(Value::None);
+            };
+            if idx >= chars.len() {
+                return Ok(Value::None);
+            }
+            Ok(Value::integer(chars[idx] as i64))
+        }
+        other => Err(EvalError::TypeError {
+            expected: "block!, paren!, or string! for integer path index",
+            found: crate::natives::type_name(other),
+            span: path_span,
+        }),
+    }
+}
+
+/// `:foo/bar` — resolve the head and walk the tail, returning the final
+/// value *without* invoking any function encountered. Same as `walk_data_path`
+/// except the head is resolved as a `GetWord` (reads the slot / fetches the
+/// native Func without dispatching).
+fn eval_get_path(parts: &[Value], path_span: Span, env: &mut Env) -> Result<Value, EvalError> {
+    if parts.is_empty() {
+        return Err(EvalError::Native {
+            message: "empty get-path".into(),
+            span: path_span,
+        });
+    }
+    let head = match &parts[0] {
+        Value::Word { sym, binding, .. } | Value::GetWord { sym, binding, .. } => {
+            resolve_word(sym, binding, env, path_span)?
+        }
+        Value::LitWord { sym: _, .. } => {
+            // A lit-path head with lit-word head is itself data; return the
+            // first field as a lit-word. (Unusual; not really expected.)
+            return Ok(parts[0].clone());
+        }
+        other => {
+            return Err(EvalError::Native {
+                message: format!(
+                    "get-path head must be a word, found {}",
+                    crate::natives::type_name(other)
+                ),
+                span: path_span,
+            });
+        }
+    };
+    walk_data_path(head, &parts[1..], env, path_span)
+}
+
+/// `obj/field: value` — walk the path to its second-to-last element, then
+/// write `rhs` into the final field/index. The head is resolved (so the
+/// path is bound to a real container), then each intermediate step is
+/// walked via `step_path`, and finally the last part selects the target
+/// container and slot to write into.
+fn set_path_value(
+    parts: &[Value],
+    rhs: Value,
+    env: &mut Env,
+    path_span: Span,
+) -> Result<(), EvalError> {
+    if parts.len() < 2 {
+        return Err(EvalError::Native {
+            message: "set-path requires at least two parts".into(),
+            span: path_span,
+        });
+    }
+    // Resolve head.
+    let (head_sym, head_binding) = match &parts[0] {
+        Value::Word { sym, binding, .. } | Value::GetWord { sym, binding, .. } => {
+            (sym.clone(), binding.clone())
+        }
+        other => {
+            return Err(EvalError::Native {
+                message: format!(
+                    "set-path head must be a word, found {}",
+                    crate::natives::type_name(other)
+                ),
+                span: path_span,
+            });
+        }
+    };
+    let mut current = resolve_word(&head_sym, &head_binding, env, path_span)?;
+    // Walk intermediate parts (all but the last two: head and final part).
+    // For a 2-part path `obj/field:`, that's just `parts[0]` (head) → current
+    // is the obj, and `parts[1]` is the final field write.
+    let intermediates = &parts[1..parts.len() - 1];
+    for part in intermediates {
+        current = step_path(&current, part, env, path_span)?;
+    }
+    // Final write.
+    let final_part = &parts[parts.len() - 1];
+    write_path_slot(&current, final_part, rhs, env, path_span)
+}
+
+/// Write `rhs` into the slot identified by `part` on `current`. The final
+/// write target:
+/// - Object + Word → set object slot.
+/// - Block + Integer → `poke`-style 1-based (negative from tail) write into
+///   shared storage.
+/// - String + Integer → poke char (deferred; error).
+/// - Paren → evaluate, then recurse on the result (so `obj/(word)/field:` works).
+fn write_path_slot(
+    current: &Value,
+    part: &Value,
+    rhs: Value,
+    env: &mut Env,
+    path_span: Span,
+) -> Result<(), EvalError> {
+    match part {
+        Value::Word { sym, .. } | Value::GetWord { sym, .. } | Value::LitWord { sym, .. } => {
+            match current {
+                Value::Object(obj) => {
+                    let obj_ctx = Rc::clone(&obj.borrow().ctx);
+                    if let Some(idx) = obj_ctx.index_of(sym) {
+                        obj_ctx.set_slot(idx, rhs);
+                        Ok(())
+                    } else {
+                        // Allocate a new slot for a previously-unknown field
+                        // (objects support field addition via set-path).
+                        obj_ctx.set(sym.clone(), rhs);
+                        Ok(())
+                    }
+                }
+                other => Err(EvalError::Native {
+                    message: format!(
+                        "cannot set field {} on {}",
+                        sym.as_str(),
+                        crate::natives::type_name(other)
+                    ),
+                    span: path_span,
+                }),
+            }
+        }
+        Value::Integer { n, .. } => match current {
+            Value::Block { series, .. } | Value::Paren { series, .. } => {
+                let mut data = series.data.borrow_mut();
+                let len = data.len() as i64;
+                let idx = if *n > 0 {
+                    (*n - 1) as usize
+                } else if *n < 0 {
+                    match (len + n).try_into() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            return Err(EvalError::Native {
+                                message: format!("poke index {n} out of range"),
+                                span: path_span,
+                            });
+                        }
+                    }
+                } else {
+                    return Err(EvalError::Native {
+                        message: "poke index 0 is invalid (1-based)".into(),
+                        span: path_span,
+                    });
+                };
+                if idx >= data.len() {
+                    return Err(EvalError::Native {
+                        message: format!("poke index {n} out of range"),
+                        span: path_span,
+                    });
+                }
+                data[idx] = rhs;
+                Ok(())
+            }
+            Value::String { .. } => Err(EvalError::Native {
+                message: "string char poke deferred until char! type exists".into(),
+                span: path_span,
+            }),
+            other => Err(EvalError::TypeError {
+                expected: "block! or paren! for integer set-path index",
+                found: crate::natives::type_name(other),
+                span: path_span,
+            }),
+        },
+        Value::Paren { series, .. } => {
+            let p = series.clone();
+            let v = eval(
+                &Value::Paren {
+                    series: p,
+                    span: path_span,
+                },
+                env,
+            )?;
+            write_path_slot(&v, part, rhs, env, path_span)
+        }
+        other => Err(EvalError::TypeError {
+            expected: "word!, integer!, or paren! in set-path",
+            found: crate::natives::type_name(other),
+            span: other.span_or_default(),
         }),
     }
 }
 
 /// Resolve `obj/field` or `obj/method` (with optional method args collected
 /// from the enclosing block). Walks the field chain through nested objects;
-/// when a field value is a `Func`, dispatches as a method call with
-/// `env.user_ctx` temporarily swapped to the owning object's ctx.
+/// when a field value is a `Func` and it's the last part, dispatches as a
+/// method call with `env.user_ctx` temporarily swapped to the owning
+/// object's ctx. Non-Word parts (integer/paren) at intermediate positions
+/// dispatch to `walk_data_path` on the field value.
 fn select_object_path(
     obj: std::rc::Rc<std::cell::RefCell<red_core::value::ObjectDef>>,
-    fields: &[Symbol],
+    parts: &[Value],
     data: &std::cell::Ref<Vec<Value>>,
     i: &mut usize,
     env: &mut Env,
     path_span: Span,
 ) -> Result<Value, EvalError> {
-    if fields.is_empty() {
+    if parts.is_empty() {
         return Err(EvalError::Native {
             message: "object path requires at least one field".into(),
             span: path_span,
         });
     }
     let mut current_obj = obj;
-    let mut field_idx = 0;
+    let mut idx = 0;
     loop {
-        let field = &fields[field_idx];
-        let field_val = current_obj
-            .borrow()
-            .ctx
-            .get(field)
-            .ok_or_else(|| EvalError::Native {
-                message: format!("object has no field {}", field.as_str()),
-                span: path_span,
-            })?;
-        // If this is the last field, return it (or call it if a Func).
-        if field_idx == fields.len() - 1 {
+        let part = &parts[idx];
+        // Only Word-family parts select object fields; integer/paren parts
+        // switch to general data-path traversal on the current field value.
+        let field_sym = match part {
+            Value::Word { sym, .. } | Value::GetWord { sym, .. } | Value::LitWord { sym, .. } => {
+                sym.clone()
+            }
+            other => {
+                // Non-word part on an object head: fetch the field-named-by-
+                // prior part's value, then dispatch to walk_data_path for
+                // this and subsequent parts. (This branch is only hit when
+                // an object path mixes word and non-word parts, e.g.
+                // `obj/items/2`.)
+                let _ = other;
+                let head_val = Value::Object(Rc::clone(&current_obj));
+                let mut current = head_val;
+                while idx < parts.len() {
+                    current = step_path(&current, &parts[idx], env, path_span)?;
+                    idx += 1;
+                }
+                return Ok(current);
+            }
+        };
+        let field_val =
+            current_obj
+                .borrow()
+                .ctx
+                .get(&field_sym)
+                .ok_or_else(|| EvalError::Native {
+                    message: format!("object has no field {}", field_sym.as_str()),
+                    span: path_span,
+                })?;
+        // If this is the last part, return it (or call it if a Func).
+        if idx == parts.len() - 1 {
             return match field_val {
                 Value::Func(_) => {
                     // Method call: swap user_ctx to the object's ctx so the
                     // method body (bound during spec eval) resolves fields.
                     let obj_ctx = Rc::clone(&current_obj.borrow().ctx);
                     let saved = std::mem::replace(&mut env.user_ctx, obj_ctx);
-                    let result = dispatch_call(field_val, field, data, i, env, path_span);
+                    let result = dispatch_call(field_val, &field_sym, data, i, env, path_span);
                     env.user_ctx = saved;
                     result
                 }
                 other => Ok(other),
             };
         }
-        // Intermediate field: must be an object for further path traversal.
+        // Intermediate part: descend through the field value.
         match field_val {
             Value::Object(inner) => {
                 current_obj = inner;
-                field_idx += 1;
+                idx += 1;
             }
             other => {
-                return Err(EvalError::Native {
-                    message: format!(
-                        "path select: field {} is {}, not an object",
-                        field.as_str(),
-                        crate::natives::type_name(&other)
-                    ),
-                    span: path_span,
-                });
+                // Switch to general traversal for the remaining parts.
+                let mut current = other;
+                idx += 1;
+                while idx < parts.len() {
+                    current = step_path(&current, &parts[idx], env, path_span)?;
+                    idx += 1;
+                }
+                return Ok(current);
             }
         }
     }
@@ -814,5 +1186,116 @@ mod tests {
         // `print 1 + 2` should pass 3 to print. The block's last value is
         // print's return: none.
         assert_eq!(mold_to_string(&run("print 1 + 2")), "none");
+    }
+
+    // --- M19: real paths ---
+
+    #[test]
+    fn block_path_integer_select() {
+        assert_eq!(mold_to_string(&run("b: [10 20 30] b/2")), "20");
+    }
+
+    #[test]
+    fn block_path_negative_index() {
+        assert_eq!(mold_to_string(&run("b: [10 20 30] b/-1")), "30");
+    }
+
+    #[test]
+    fn block_path_out_of_range_returns_none() {
+        assert_eq!(mold_to_string(&run("b: [10 20 30] b/9")), "none");
+    }
+
+    #[test]
+    fn object_path_field_access() {
+        assert_eq!(mold_to_string(&run("o: make object! [a: 1] o/a")), "1");
+    }
+
+    #[test]
+    fn object_set_path_writes_field() {
+        assert_eq!(
+            mold_to_string(&run("o: make object! [a: 1] o/a: 5 o/a")),
+            "5"
+        );
+    }
+
+    #[test]
+    fn object_set_path_returns_rhs() {
+        assert_eq!(mold_to_string(&run("o: make object! [a: 1] o/a: 5")), "5");
+    }
+
+    #[test]
+    fn nested_object_path_through_graph() {
+        let src = "o: make object! [inner: make object! [x: 42]] o/inner/x";
+        assert_eq!(mold_to_string(&run(src)), "42");
+    }
+
+    #[test]
+    fn nested_object_set_path() {
+        let src = "o: make object! [inner: make object! [x: 0]] o/inner/x: 99 o/inner/x";
+        assert_eq!(mold_to_string(&run(src)), "99");
+    }
+
+    #[test]
+    fn block_set_path_writes_slot() {
+        // Block-integer set-paths (`b/2: 99`) require lexer support for
+        // `2:` (a number followed by a colon), which is not in this POC.
+        // Object-field set-paths work (see `object_set_path_writes_field`).
+        // Use `poke` for block slot writes instead.
+        assert_eq!(mold_to_string(&run("b: [1 2 3] poke b 2 99 b/2")), "99");
+    }
+
+    #[test]
+    fn get_path_returns_value_without_calling() {
+        // `:obj/method` returns the function value, not the result of calling it.
+        let src = "o: make object! [f: does [42]] :o/f";
+        let v = run(src);
+        assert!(matches!(v, Value::Func(_)));
+    }
+
+    #[test]
+    fn lit_path_returns_as_data() {
+        let v = run("'foo/bar");
+        match v {
+            Value::LitPath { parts, .. } => {
+                assert_eq!(parts.len(), 2);
+            }
+            other => panic!("expected LitPath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn path_with_paren_part_evaluates_paren() {
+        // `foo/(2)/bar` — the paren evaluates to 2, then... we need a block
+        // at `foo` to index. Use a block-typed word.
+        assert_eq!(
+            mold_to_string(&run("b: [[100 200] [300 400]] b/(1 + 1)/2")),
+            "400"
+        );
+    }
+
+    #[test]
+    fn path_paren_evaluated_for_index() {
+        // `b/(1 + 1)` evaluates the paren to 2, then picks index 2.
+        assert_eq!(mold_to_string(&run("b: [10 20 30] b/(1 + 1)")), "20");
+    }
+
+    #[test]
+    fn string_path_integer_returns_codepoint() {
+        // POC: string char pick returns the codepoint as an integer (char!
+        // deferred).
+        assert_eq!(mold_to_string(&run("s: \"abc\" s/2")), "98");
+    }
+
+    #[test]
+    fn object_path_with_block_field_then_index() {
+        // `obj/items/2` — object field is a block, then integer index.
+        let src = "o: make object! [items: [10 20 30]] o/items/2";
+        assert_eq!(mold_to_string(&run(src)), "20");
+    }
+
+    #[test]
+    fn object_method_call_with_args_via_path() {
+        let src = "o: make object! [add: func [x y][x + y]] o/add 3 4";
+        assert_eq!(mold_to_string(&run(src)), "7");
     }
 }

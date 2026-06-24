@@ -449,6 +449,30 @@ fn scan_refinement(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexEr
             span: Span::new(start, end),
         });
     }
+    // Set-path support (M19): if the refinement body ends with a single
+    // trailing `:`, the user wrote `obj/field:` — we want this to lex as
+    // `Refinement("field")` followed by `SetWord("field")` so the parser
+    // can fold the run into a `SetPath`. To produce both tokens, back the
+    // cursor up to the start of the body (so the main loop re-scans
+    // `field:` as a SetWord on the next iteration) and return the
+    // Refinement with its span ending just before the `:`. The two tokens'
+    // spans overlap in source (both cover `field`), which is fine — spans
+    // are only for error reporting.
+    let body_bytes = body.as_bytes();
+    if body_bytes.len() >= 2 && body_bytes[body_bytes.len() - 1] == b':' {
+        let body_no_colon = &body[..body.len() - 1];
+        // Reject `field::` (double trailing colon) — that would produce a
+        // Refinement + a malformed SetWord. Let classify_word catch it by
+        // leaving the body as-is and falling through.
+        if !body_no_colon.is_empty() && !body_no_colon.ends_with(':') {
+            // Span end = position of the trailing `:`.
+            let ref_end = end - 1;
+            // Back the cursor up to the start of the body so the main loop
+            // scans `field:` as a SetWord next.
+            *i = start + 1;
+            return Ok((ref_end, TokenKind::Refinement(Symbol::new(body_no_colon))));
+        }
+    }
     Ok((end, TokenKind::Refinement(Symbol::new(body))))
 }
 
@@ -847,5 +871,47 @@ mod tests {
     fn refinement_span_covers_leading_slash() {
         let toks = lex("/part").expect("lex");
         assert_eq!(toks[0].span, Span::new(0, 5));
+    }
+
+    // --- M19 set-path lexing ---
+
+    #[test]
+    fn set_path_splits_into_refinement_and_setword() {
+        // `obj/field:` lexes as Word(obj) Refinement(field) SetWord(field).
+        // The parser folds this run into a `SetPath` value.
+        let toks = kinds("obj/field:");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::Word(Symbol::new("obj")),
+                TokenKind::Refinement(Symbol::new("field")),
+                TokenKind::SetWord(Symbol::new("field")),
+            ]
+        );
+    }
+
+    #[test]
+    fn set_path_three_segments() {
+        // `a/b/c:` → Word(a) Refinement(b) Refinement(c) SetWord(c)
+        let toks = kinds("a/b/c:");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::Word(Symbol::new("a")),
+                TokenKind::Refinement(Symbol::new("b")),
+                TokenKind::Refinement(Symbol::new("c")),
+                TokenKind::SetWord(Symbol::new("c")),
+            ]
+        );
+    }
+
+    #[test]
+    fn set_path_refinement_span_excludes_trailing_colon() {
+        let toks = lex("obj/field:").expect("lex");
+        // Refinement span covers `/field` (bytes 3..9, end exclusive), not
+        // the trailing `:`.
+        assert_eq!(toks[1].span, Span::new(3, 9));
+        // SetWord span covers `field:` (bytes 4..10, end exclusive).
+        assert_eq!(toks[2].span, Span::new(4, 10));
     }
 }
