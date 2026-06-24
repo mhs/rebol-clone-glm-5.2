@@ -327,14 +327,31 @@ fn num_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalError> {
 
 // ---------------------------------------------------------------------------
 // Logic: and, or (infix), not (prefix)
+//
+// `and`/`or` dispatch on operand type (M17): both `logic!` → logic op;
+// both `integer!` → bitwise op; otherwise fall back to the truthiness-based
+// logic op (preserves the pre-M17 behavior for mixed/other truthy values
+// like `none and true`).
 // ---------------------------------------------------------------------------
 
 fn and_op(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
-    Ok(Value::Logic(truthy(&args[0]) && truthy(&args[1])))
+    match (&args[0], &args[1]) {
+        (Value::Logic(a), Value::Logic(b)) => Ok(Value::Logic(*a && *b)),
+        (Value::Integer { n: a, .. }, Value::Integer { n: b, .. }) => {
+            Ok(Value::integer(*a & *b))
+        }
+        _ => Ok(Value::Logic(truthy(&args[0]) && truthy(&args[1]))),
+    }
 }
 
 fn or_op(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
-    Ok(Value::Logic(truthy(&args[0]) || truthy(&args[1])))
+    match (&args[0], &args[1]) {
+        (Value::Logic(a), Value::Logic(b)) => Ok(Value::Logic(*a || *b)),
+        (Value::Integer { n: a, .. }, Value::Integer { n: b, .. }) => {
+            Ok(Value::integer(*a | *b))
+        }
+        _ => Ok(Value::Logic(truthy(&args[0]) || truthy(&args[1]))),
+    }
 }
 
 fn not_op(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
@@ -1334,6 +1351,8 @@ pub fn register_natives(env: &mut Env) {
         .insert(Symbol::new("*"), infix_native(multiply as NativeFn, 2));
     env.natives
         .insert(Symbol::new("/"), infix_native(divide as NativeFn, 2));
+    env.natives
+        .insert(Symbol::new("//"), infix_native(crate::math::modulo as NativeFn, 2));
 
     // Comparison (M7, infix)
     env.natives
@@ -1505,6 +1524,9 @@ pub fn register_natives(env: &mut Env) {
 
     // String manipulation natives (M15)
     crate::strings::register_string_natives(env);
+
+    // Math + bitwise natives (M17)
+    crate::math::register_math_natives(env);
 }
 
 /// Install the predefined constant words (`none`, `true`, `false`, `newline`)

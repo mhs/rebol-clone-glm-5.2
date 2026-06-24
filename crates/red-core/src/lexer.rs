@@ -409,10 +409,17 @@ fn is_delimiter(c: u8) -> bool {
 fn scan_refinement(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError> {
     let start = *i;
     let bytes = src.as_bytes();
-    *i += 1; // consume `/`
-             // If the next char would start a number (`digit`, or `-` + digit), the
-             // `/` is the division operator, not a refinement. Leave `*i` after the
-             // `/` so the main loop scans the number next.
+    *i += 1; // consume first `/`
+    // `//` → modulo operator (a single `Word("//")` token). This must be
+    // checked before the number/refinement classification below so that
+    // `7 // 3` lexes as three tokens, not `7`, `/`, `/`, `3`.
+    if bytes.get(*i) == Some(&b'/') {
+        *i += 1;
+        return Ok((*i, TokenKind::Word(Symbol::new("//"))));
+    }
+    // If the next char would start a number (`digit`, or `-` + digit), the
+    // `/` is the division operator, not a refinement. Leave `*i` after the
+    // `/` so the main loop scans the number next.
     let next = bytes.get(*i).copied();
     let starts_number = match next {
         Some(c) if c.is_ascii_digit() => true,
@@ -758,6 +765,26 @@ mod tests {
     fn bare_slash_is_division_word() {
         // `/` alone is the division operator (a word), not a refinement.
         assert_eq!(one("/"), TokenKind::Word(Symbol::new("/")));
+    }
+
+    #[test]
+    fn double_slash_is_modulo_word() {
+        // `//` is the modulo operator — a single word token.
+        assert_eq!(one("//"), TokenKind::Word(Symbol::new("//")));
+    }
+
+    #[test]
+    fn modulo_expression_splits() {
+        // `7 // 3` lexes as three tokens (integer, modulo word, integer).
+        let toks = kinds("7 // 3");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::Integer(7),
+                TokenKind::Word(Symbol::new("//")),
+                TokenKind::Integer(3),
+            ]
+        );
     }
 
     #[test]

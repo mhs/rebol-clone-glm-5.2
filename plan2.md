@@ -115,26 +115,26 @@ Deferred to v0.3+ (acknowledged but not built here): `char!`, `map!`, `pair!`,
 
 ## Milestone 17 — Math + bitwise
 
-- [ ] Implement `//` (modulo) for integers and floats
-- [ ] Implement `abs`, `negate`, `add`/`subtract`/`multiply`/`divide` as word
+- [x] Implement `//` (modulo) for integers and floats
+- [x] Implement `abs`, `negate`, `add`/`subtract`/`multiply`/`divide` as word
       aliases for `+ - * /`
-- [ ] Implement `min`/`max` (any-orderable values: int/float/char/string)
-- [ ] Implement `round` (and `/to`/`/even` refinements)
-- [ ] Implement `random` (and `/seed`/`/only`/`/secure`)
-- [ ] Implement `power` (`**`); defer trig (`sin`/`cos`/`tan`/`sqrt`/`log`) to
+- [x] Implement `min`/`max` (any-orderable values: int/float/char/string)
+- [x] Implement `round` (and `/to`/`/even` refinements)
+- [x] Implement `random` (and `/seed`/`/only`/`/secure`)
+- [x] Implement `power` (`**`); defer trig (`sin`/`cos`/`tan`/`sqrt`/`log`) to
       a later plan
-- [ ] Implement `even?`/`odd?`
-- [ ] Implement bitwise on integers: `and`/`or`/`xor`/`complement`/
+- [x] Implement `even?`/`odd?`
+- [x] Implement bitwise on integers: `and`/`or`/`xor`/`complement`/
       `shift-left`/`shift-right` (separate from logic `and`/`or` via type dispatch)
-- [ ] Resolve `and`/`or` ambiguity: logic operands → logic op; integer operands → bitwise
-- [ ] Implement `to-integer` from `#"a"` char (deferred until char! exists; stub for now)
-- [ ] Inline `#[test]`: `7 // 3` → 1, `7.0 // 3.0` → 1.0
-- [ ] Inline `#[test]`: `min 3 5` → 3
-- [ ] Inline `#[test]`: `round 3.6` → 4, `round/to 3.14159 0.01` → 3.14
-- [ ] Inline `#[test]`: `random 100` returns int in `0..100`
-- [ ] Inline `#[test]`: `5 and 3` → 1 (bitwise); `true and false` → false (logic)
-- [ ] Add golden fixtures
-- [ ] `cargo test --workspace` passes
+- [x] Resolve `and`/`or` ambiguity: logic operands → logic op; integer operands → bitwise
+- [x] Implement `to-integer` from `#"a"` char (deferred until char! exists; stub for now)
+- [x] Inline `#[test]`: `7 // 3` → 1, `7.0 // 3.0` → 1.0
+- [x] Inline `#[test]`: `min 3 5` → 3
+- [x] Inline `#[test]`: `round 3.6` → 4, `round/to 3.14159 0.01` → 3.14
+- [x] Inline `#[test]`: `random 100` returns int in `0..100`
+- [x] Inline `#[test]`: `5 and 3` → 1 (bitwise); `true and false` → false (logic)
+- [x] Add golden fixtures
+- [x] `cargo test --workspace` passes
 
 ## Milestone 18 — Objects & contexts
 
