@@ -68,7 +68,11 @@ fn native_err(from: &Value, msg: impl Into<String>) -> EvalError {
 
 /// `a // b` — remainder. Int+Int → Int (C-style `%`, sign of dividend);
 /// any Float involved → Float (`%`). Zero divisor → error.
-pub(crate) fn modulo(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn modulo(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
     let a = as_number(&args[0]).ok_or_else(|| num_type_err(&args[0]))?;
     let b = as_number(&args[1]).ok_or_else(|| num_type_err(&args[1]))?;
     match (a, b) {
@@ -153,31 +157,62 @@ fn add_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value
         .expect("`+` native registered before math")
         .native
         .expect("`+` is a native");
-    plus(&[args[0].clone(), args[1].clone()], &RefineArgs::empty(), env)
+    plus(
+        &[args[0].clone(), args[1].clone()],
+        &RefineArgs::empty(),
+        env,
+    )
 }
 
 fn subtract_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "subtract", 2, args.len()));
     }
-    let f = env.natives.get(&Symbol::new("-")).expect("`-` native").native.unwrap();
-    f(&[args[0].clone(), args[1].clone()], &RefineArgs::empty(), env)
+    let f = env
+        .natives
+        .get(&Symbol::new("-"))
+        .expect("`-` native")
+        .native
+        .unwrap();
+    f(
+        &[args[0].clone(), args[1].clone()],
+        &RefineArgs::empty(),
+        env,
+    )
 }
 
 fn multiply_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "multiply", 2, args.len()));
     }
-    let f = env.natives.get(&Symbol::new("*")).expect("`*` native").native.unwrap();
-    f(&[args[0].clone(), args[1].clone()], &RefineArgs::empty(), env)
+    let f = env
+        .natives
+        .get(&Symbol::new("*"))
+        .expect("`*` native")
+        .native
+        .unwrap();
+    f(
+        &[args[0].clone(), args[1].clone()],
+        &RefineArgs::empty(),
+        env,
+    )
 }
 
 fn divide_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "divide", 2, args.len()));
     }
-    let f = env.natives.get(&Symbol::new("/")).expect("`/` native").native.unwrap();
-    f(&[args[0].clone(), args[1].clone()], &RefineArgs::empty(), env)
+    let f = env
+        .natives
+        .get(&Symbol::new("/"))
+        .expect("`/` native")
+        .native
+        .unwrap();
+    f(
+        &[args[0].clone(), args[1].clone()],
+        &RefineArgs::empty(),
+        env,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -196,9 +231,7 @@ fn num_ordering(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalError> {
         (Num::Float(x), Num::Int(y)) => x
             .partial_cmp(&(y as f64))
             .unwrap_or(std::cmp::Ordering::Equal),
-        (Num::Float(x), Num::Float(y)) => {
-            x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
-        }
+        (Num::Float(x), Num::Float(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
     })
 }
 
@@ -247,7 +280,11 @@ fn round_half(x: f64, even: bool) -> f64 {
         return if x >= 0.0 { whole + 1.0 } else { whole - 1.0 };
     }
     // Half away from zero.
-    if x >= 0.0 { whole + 1.0 } else { whole - 1.0 }
+    if x >= 0.0 {
+        whole + 1.0
+    } else {
+        whole - 1.0
+    }
 }
 
 fn round_native(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
@@ -372,7 +409,11 @@ fn random_native(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Va
 
 /// `a ** b` (and `power a b`). Both integers with non-negative exponent →
 /// integer power; otherwise float via `f64::powf`. Integer overflow wraps.
-pub(crate) fn power(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn power(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "power", 2, args.len()));
     }
@@ -441,17 +482,23 @@ fn odd_q(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, Ev
 
 /// `a xor b` — bitwise XOR on integers (infix). Logic operands fall back to
 /// the truthiness-based XOR (returns logic).
-pub(crate) fn xor_op(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn xor_op(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
     match (&args[0], &args[1]) {
-        (Value::Integer { n: a, .. }, Value::Integer { n: b, .. }) => {
-            Ok(Value::integer(*a ^ *b))
-        }
+        (Value::Integer { n: a, .. }, Value::Integer { n: b, .. }) => Ok(Value::integer(*a ^ *b)),
         (Value::Logic(a), Value::Logic(b)) => Ok(Value::Logic(*a != *b)),
         _ => Ok(Value::Logic(truthy(&args[0]) != truthy(&args[1]))),
     }
 }
 
-fn complement_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+fn complement_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(arity_err(args, "complement", 1, args.len()));
     }
@@ -596,7 +643,13 @@ pub fn register_math_natives(env: &mut Env) {
     reg(env, "max", max_native as NF, 2, false);
 
     // round (+ /to + /even).
-    reg_refined(env, "round", round_native as NF, 1, &[("to", 1), ("even", 0)]);
+    reg_refined(
+        env,
+        "round",
+        round_native as NF,
+        1,
+        &[("to", 1), ("even", 0)],
+    );
 
     // random (+ /seed + /only + /secure). `/seed` reuses the positional value
     // as the seed (0 refinement args), matching Red's `random/seed value` form.
@@ -631,8 +684,8 @@ pub fn register_math_natives(env: &mut Env) {
 mod tests {
     use super::*;
     use crate::binding::bind_pass;
-    use crate::natives::{install_constants, register_natives};
     use crate::interp::eval;
+    use crate::natives::{install_constants, register_natives};
     use red_core::context::Context;
     use red_core::parser::load_source;
     use red_core::printer::mold_to_string;
@@ -727,10 +780,7 @@ mod tests {
 
     #[test]
     fn add_alias_concatenates_strings() {
-        assert_eq!(
-            mold_to_string(&val("add \"ab\" \"cd\"")),
-            "\"abcd\""
-        );
+        assert_eq!(mold_to_string(&val("add \"ab\" \"cd\"")), "\"abcd\"");
     }
 
     // --- min / max ---

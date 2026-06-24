@@ -135,32 +135,37 @@ fn func_form_skip(data: &[Value], i: usize) -> Option<usize> {
 /// child context built at runtime by `use_native`. The slots are populated
 /// during eval, not here.
 pub(crate) fn collect_setwords(series: &Series, ctx: &Context) {
+    collect_setwords_inner(series, ctx, None);
+}
+
+/// Like `collect_setwords` but skips SetWords whose name is already in
+/// `shadow` (the user/definition context). Used by `bind_function_body` so
+/// that body SetWords naming outer words (e.g. object fields) are NOT
+/// allocated as function-locals — they resolve to the outer context instead.
+fn collect_setwords_inner(series: &Series, ctx: &Context, shadow: Option<&Context>) {
     let data = series.data.borrow();
     let n = data.len();
     let mut i = 0;
     while i < n {
-        // `use [words] body` — skip the whole form (use + words block + body
-        // block) so use-locals don't get allocated into the user context.
         if use_body_index(&data, i).is_some() {
             i += 3;
             continue;
         }
-        // `func [spec] [body]` / `function [spec] [body]` / `does [body]` —
-        // skip the whole form so the body's SetWords don't leak into the
-        // user context (they're function-local, allocated by
-        // `bind_function_body` at creation time).
         if let Some(skip) = func_form_skip(&data, i) {
             i += skip;
             continue;
         }
         match &data[i] {
             Value::SetWord { sym, .. } => {
-                ctx.slot_index(sym.clone());
+                let in_shadow = shadow.map(|s| s.has(sym)).unwrap_or(false);
+                if !in_shadow {
+                    ctx.slot_index(sym.clone());
+                }
                 i += 1;
             }
             Value::Block { series: s, .. } | Value::Paren { series: s, .. } => {
                 let child = s.clone();
-                collect_setwords(&child, ctx);
+                collect_setwords_inner(&child, ctx, shadow);
                 i += 1;
             }
             _ => i += 1,
@@ -384,7 +389,10 @@ pub fn bind_function_body(fd: &mut FuncDef, user_ctx: &Rc<Context>) {
         fd.ctx.slot_index(local.clone());
     }
     // 4. Body-local SetWords + loop vars become function-local slots.
-    collect_setwords(&fd.body, &fd.ctx);
+    //    Pass `user_ctx` as shadow so SetWords naming outer words (e.g. object
+    //    fields when the func is a method) are NOT allocated as function-locals
+    //    — they resolve to the outer context via `attach_func_bindings`.
+    collect_setwords_inner(&fd.body, &fd.ctx, Some(user_ctx));
     collect_loop_vars(&fd.body, &fd.ctx);
     // 5. Attach bindings: function-local first, then outer user-ctx refs.
     attach_func_bindings(&fd.body, &fd.ctx, user_ctx);

@@ -1,0 +1,4 @@
+[x y z get-sum]
+[10 20 30 #[function]]
+[10 20 30 #[function]]
+60

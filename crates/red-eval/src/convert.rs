@@ -292,6 +292,7 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
         "float!" | "float" => make_float(spec)?,
         "string!" | "string" => make_string(spec)?,
         "block!" | "block" => make_block(spec)?,
+        "object!" | "object" => return crate::object::make_object(spec, env),
         "function!" | "function" => {
             // Original behavior: spec is a packed `[[spec][body]]` block.
             let packed = expect_block(&[args[0].clone(), spec.clone()], 1, "make")?;

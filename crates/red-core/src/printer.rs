@@ -1,7 +1,7 @@
 //! `mold`: value → Red source text. Inverse of the parser; round-trip
 //! property is `mold(parse(s)) == normalize(s)`.
 
-use crate::value::Value;
+use crate::value::{ObjectDef, Value};
 
 /// Append the Red source form of `value` to `out`.
 pub fn mold(value: &Value, out: &mut String) {
@@ -83,6 +83,7 @@ pub fn mold(value: &Value, out: &mut String) {
             out.push('/');
             out.push_str(sym.as_str());
         }
+        Value::Object(obj) => mold_object(&obj.borrow(), out),
     }
 }
 
@@ -146,6 +147,12 @@ pub fn form(value: &Value, out: &mut String) {
                 form(p, out);
             }
         }
+        Value::Object(obj) => {
+            // form renders just the inner body (no `make object!` wrapper),
+            // space-joined, matching `form` of a block.
+            let o = obj.borrow();
+            form_object_body(&o, out);
+        }
     }
 }
 
@@ -164,6 +171,48 @@ fn mold_float(f: f64, out: &mut String) {
     out.push_str(&s);
     if !s.contains('.') && !s.contains('e') && !s.contains("inf") && !s.contains("NaN") {
         out.push_str(".0");
+    }
+}
+
+fn mold_object(obj: &ObjectDef, out: &mut String) {
+    out.push_str("make object! [");
+    let words = obj.ctx.words();
+    let slots = obj.ctx.slots.borrow();
+    let mut first = true;
+    for sym in words.iter() {
+        if sym.as_str() == "self" {
+            continue; // skip self-reference (would infinite-loop)
+        }
+        let idx = obj.ctx.index_of(sym).unwrap();
+        let val = slots[idx].borrow();
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+        out.push_str(sym.as_str());
+        out.push_str(": ");
+        mold(&val, out);
+    }
+    out.push(']');
+}
+
+fn form_object_body(obj: &ObjectDef, out: &mut String) {
+    let words = obj.ctx.words();
+    let slots = obj.ctx.slots.borrow();
+    let mut first = true;
+    for sym in words.iter() {
+        if sym.as_str() == "self" {
+            continue;
+        }
+        let idx = obj.ctx.index_of(sym).unwrap();
+        let val = slots[idx].borrow();
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+        out.push_str(sym.as_str());
+        out.push_str(": ");
+        form(&val, out);
     }
 }
 

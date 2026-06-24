@@ -144,7 +144,8 @@ fn eval_prefix(
         | Value::Block { .. }
         | Value::Func(_)
         | Value::Refinement { .. }
-        | Value::Error(_) => Ok(cur),
+        | Value::Error(_)
+        | Value::Object(_) => Ok(cur),
 
         // Path: a function-headed path is a refined call (`copy/part`,
         // `find/case`); anything else is a data-path select (`block/2`,
@@ -289,10 +290,83 @@ fn dispatch_path_call(
         Value::Func(_) => {
             dispatch_call_with_refs(resolved, &head_sym, &leading_refs, data, i, env, path_span)
         }
+        Value::Object(obj) => {
+            // Object path select: resolve field names through the object's
+            // context. For a method (field value is a Func), dispatch as a
+            // call with `env.user_ctx` swapped to the object's ctx so the
+            // method body resolves field references correctly. Field reads
+            // return the value directly (M18; full path select lands in M19).
+            select_object_path(obj, &leading_refs, data, i, env, path_span)
+        }
         _ => Err(EvalError::Native {
-            message: "path select not implemented (M19)".into(),
+            message: "path select not implemented for this type (M19)".into(),
             span: path_span,
         }),
+    }
+}
+
+/// Resolve `obj/field` or `obj/method` (with optional method args collected
+/// from the enclosing block). Walks the field chain through nested objects;
+/// when a field value is a `Func`, dispatches as a method call with
+/// `env.user_ctx` temporarily swapped to the owning object's ctx.
+fn select_object_path(
+    obj: std::rc::Rc<std::cell::RefCell<red_core::value::ObjectDef>>,
+    fields: &[Symbol],
+    data: &std::cell::Ref<Vec<Value>>,
+    i: &mut usize,
+    env: &mut Env,
+    path_span: Span,
+) -> Result<Value, EvalError> {
+    if fields.is_empty() {
+        return Err(EvalError::Native {
+            message: "object path requires at least one field".into(),
+            span: path_span,
+        });
+    }
+    let mut current_obj = obj;
+    let mut field_idx = 0;
+    loop {
+        let field = &fields[field_idx];
+        let field_val = current_obj
+            .borrow()
+            .ctx
+            .get(field)
+            .ok_or_else(|| EvalError::Native {
+                message: format!("object has no field {}", field.as_str()),
+                span: path_span,
+            })?;
+        // If this is the last field, return it (or call it if a Func).
+        if field_idx == fields.len() - 1 {
+            return match field_val {
+                Value::Func(_) => {
+                    // Method call: swap user_ctx to the object's ctx so the
+                    // method body (bound during spec eval) resolves fields.
+                    let obj_ctx = Rc::clone(&current_obj.borrow().ctx);
+                    let saved = std::mem::replace(&mut env.user_ctx, obj_ctx);
+                    let result = dispatch_call(field_val, field, data, i, env, path_span);
+                    env.user_ctx = saved;
+                    result
+                }
+                other => Ok(other),
+            };
+        }
+        // Intermediate field: must be an object for further path traversal.
+        match field_val {
+            Value::Object(inner) => {
+                current_obj = inner;
+                field_idx += 1;
+            }
+            other => {
+                return Err(EvalError::Native {
+                    message: format!(
+                        "path select: field {} is {}, not an object",
+                        field.as_str(),
+                        crate::natives::type_name(&other)
+                    ),
+                    span: path_span,
+                });
+            }
+        }
     }
 }
 

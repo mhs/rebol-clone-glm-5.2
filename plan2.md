@@ -138,34 +138,34 @@ Deferred to v0.3+ (acknowledged but not built here): `char!`, `map!`, `pair!`,
 
 ## Milestone 18 — Objects & contexts
 
-- [ ] Extend `Value` with `Object(Rc<RefCell<ObjectDef>>)` variant
-- [ ] Define `ObjectDef { words: Vec<Symbol>, values: Vec<RefCell<Value>>,
+- [x] Extend `Value` with `Object(Rc<RefCell<ObjectDef>>)` variant
+- [x] Define `ObjectDef { words: Vec<Symbol>, values: Vec<RefCell<Value>>,
       parent: Option<Rc<RefCell<ObjectDef>>>, self_word: Symbol }`
-- [ ] Implement `make object! [spec-block]`:
+- [x] Implement `make object! [spec-block]`:
       - New context, bind spec words to it, eval body with `self` bound
-- [ ] Implement `object` keyword (alias for `make object!`)
-- [ ] Implement `context` keyword (alias)
-- [ ] Implement prototype inheritance: child object inherits parent's words,
+- [x] Implement `object` keyword (alias for `make object!`)
+- [x] Implement `context` keyword (alias)
+- [x] Implement prototype inheritance: child object inherits parent's words,
       writes create new slots in child
-- [ ] Implement `in object 'word` (deferred from Milestone 9) returning a
+- [x] Implement `in object 'word` (deferred from Milestone 9) returning a
       bound-word value pointing into the object's slot
-- [ ] Implement `set [words] [values]` and `get [words]` returning block
-- [ ] Implement `words-of`/`values-of` for objects and contexts
-- [ ] Implement `reflect object 'words` / `'values`
-- [ ] Implement `bind` of a block to an object (existing native extended)
-- [ ] Implement object mold: `make object! [a: 1 b: 2]`
-- [ ] Support `self` reference inside object spec body
-- [ ] Implement `object?` predicate
-- [ ] Implement `same?`/`not-same?` (reference identity) for objects
-- [ ] Inline `#[test]`: `o: make object! [a: 5] o/a` → 5 (via `select` or path
+- [x] Implement `set [words] [values]` and `get [words]` returning block
+- [x] Implement `words-of`/`values-of` for objects and contexts
+- [x] Implement `reflect object 'words` / `'values`
+- [x] Implement `bind` of a block to an object (existing native extended)
+- [x] Implement object mold: `make object! [a: 1 b: 2]`
+- [x] Support `self` reference inside object spec body
+- [x] Implement `object?` predicate
+- [x] Implement `same?`/`not-same?` (reference identity) for objects
+- [x] Inline `#[test]`: `o: make object! [a: 5] o/a` → 5 (via `select` or path
       stub until M19)
-- [ ] Inline `#[test]`: object method calling self:
+- [x] Inline `#[test]`: object method calling self:
       `o: make object! [n: 0 inc: does [n: n + 1]] o/inc o/n` → 1
-- [ ] Inline `#[test]`: inheritance: child `make object! parent [...]` sees parent words
-- [ ] Inline `#[test]`: `in o 'a` returns a usable bound word
-- [ ] Inline `#[test]`: `words-of o` → `[a n inc]`
-- [ ] Add golden fixtures for object-oriented programs
-- [ ] `cargo test --workspace` passes
+- [x] Inline `#[test]`: inheritance: child `make object! parent [...]` sees parent words
+- [x] Inline `#[test]`: `in o 'a` returns a usable bound word
+- [x] Inline `#[test]`: `words-of o` → `[a n inc]`
+- [x] Add golden fixtures for object-oriented programs
+- [x] `cargo test --workspace` passes
 
 ## Milestone 19 — Real paths
 

@@ -81,4 +81,14 @@ impl Context {
     pub fn set_slot(&self, idx: usize, val: Value) {
         *self.slots.borrow()[idx].borrow_mut() = val;
     }
+
+    /// Words in declaration order. Used by `words-of`/`values-of`/`reflect`
+    /// for both contexts and objects (M18).
+    pub fn words(&self) -> Vec<Symbol> {
+        let names = self.names.borrow();
+        let mut ordered: Vec<(Symbol, usize)> =
+            names.iter().map(|(s, &i)| (s.clone(), i)).collect();
+        ordered.sort_by_key(|(_, i)| *i);
+        ordered.into_iter().map(|(s, _)| s).collect()
+    }
 }

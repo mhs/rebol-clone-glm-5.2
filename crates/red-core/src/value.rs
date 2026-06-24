@@ -200,6 +200,10 @@ pub enum Value {
     /// span of its own (the originating error's span is not preserved across
     /// the catch boundary in the POC).
     Error(Rc<ErrorValue>),
+    /// An object (M18): a word→value context with optional prototype parent.
+    /// Synthetic — produced by `make object!`/`object`/`context`; carries no
+    /// source span of its own.
+    Object(Rc<RefCell<ObjectDef>>),
 }
 
 /// Payload of a `Value::Error`. POC keeps just the message body; a fuller
@@ -207,6 +211,40 @@ pub enum Value {
 #[derive(Clone, Debug)]
 pub struct ErrorValue {
     pub message: String,
+}
+
+/// An object: an ordered word→value context plus an optional prototype
+/// (parent) object. The context (`Rc<Context>`) is the same shape as the
+/// user context, so it can be temporarily installed as `env.user_ctx` during
+/// spec evaluation and method calls (mirroring the `use` native). Words
+/// inside method bodies bind to `Binding::Local(obj_ctx, idx)` via the
+/// standard binding pass — no special binding variant is needed (M18).
+///
+/// Inheritance is **copy-based**: `make object! parent [spec]` pre-seeds the
+/// child context with copies of the parent's words+values, then evaluates the
+/// spec block (which can override). The `parent` pointer is retained for
+/// reference/identity purposes.
+#[derive(Clone, Debug)]
+pub struct ObjectDef {
+    pub ctx: Rc<Context>,
+    pub parent: Option<Rc<RefCell<ObjectDef>>>,
+    pub self_word: Symbol,
+}
+
+impl Default for ObjectDef {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ObjectDef {
+    pub fn new() -> Self {
+        Self {
+            ctx: Rc::new(Context::new()),
+            parent: None,
+            self_word: Symbol::new("self"),
+        }
+    }
 }
 
 impl Value {
@@ -231,7 +269,8 @@ impl Value {
             | Value::Logic(_)
             | Value::Func(_)
             | Value::String8(_)
-            | Value::Error(_) => None,
+            | Value::Error(_)
+            | Value::Object(_) => None,
         }
     }
 
@@ -341,6 +380,11 @@ impl Value {
         Value::Error(Rc::new(ErrorValue {
             message: message.into(),
         }))
+    }
+
+    /// Constructor shorthand for an object wrapping `obj_def`.
+    pub fn object(obj_def: ObjectDef) -> Self {
+        Value::Object(Rc::new(RefCell::new(obj_def)))
     }
 }
 

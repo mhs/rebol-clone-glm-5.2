@@ -23,7 +23,7 @@ use std::rc::Rc;
 use red_core::context::Context;
 use red_core::parser::load_source;
 use red_core::printer::mold_to_string;
-use red_core::value::{FuncDef, Series, Span, Symbol, Value};
+use red_core::value::{Binding, FuncDef, Series, Span, Symbol, Value};
 use red_core::{Env, EvalError, NativeFn, RefineArgs};
 
 use crate::interp::{eval, eval_expression};
@@ -124,6 +124,7 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Path { .. } => "path!",
         Value::Refinement { .. } => "refinement!",
         Value::Error(_) => "error!",
+        Value::Object(_) => "object!",
     }
 }
 
@@ -249,6 +250,19 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::None, Value::None) => true,
         (Value::Logic(x), Value::Logic(y)) => x == y,
         (Value::Error(a), Value::Error(b)) => a.message == b.message,
+        (Value::Object(a), Value::Object(b)) => {
+            // Shallow value equality: same words, same slot values.
+            let a = a.borrow();
+            let b = b.borrow();
+            let aw = a.ctx.words();
+            let bw = b.ctx.words();
+            aw.len() == bw.len()
+                && aw.iter().zip(bw.iter()).all(|(x, y)| x == y)
+                && aw
+                    .iter()
+                    .filter(|s| s.as_str() != "self")
+                    .all(|s| values_equal(&a.ctx.get(s).unwrap(), &b.ctx.get(s).unwrap()))
+        }
         _ => false,
     }
 }
@@ -337,9 +351,7 @@ fn num_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalError> {
 fn and_op(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     match (&args[0], &args[1]) {
         (Value::Logic(a), Value::Logic(b)) => Ok(Value::Logic(*a && *b)),
-        (Value::Integer { n: a, .. }, Value::Integer { n: b, .. }) => {
-            Ok(Value::integer(*a & *b))
-        }
+        (Value::Integer { n: a, .. }, Value::Integer { n: b, .. }) => Ok(Value::integer(*a & *b)),
         _ => Ok(Value::Logic(truthy(&args[0]) && truthy(&args[1]))),
     }
 }
@@ -347,9 +359,7 @@ fn and_op(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, E
 fn or_op(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     match (&args[0], &args[1]) {
         (Value::Logic(a), Value::Logic(b)) => Ok(Value::Logic(*a || *b)),
-        (Value::Integer { n: a, .. }, Value::Integer { n: b, .. }) => {
-            Ok(Value::integer(*a | *b))
-        }
+        (Value::Integer { n: a, .. }, Value::Integer { n: b, .. }) => Ok(Value::integer(*a | *b)),
         _ => Ok(Value::Logic(truthy(&args[0]) || truthy(&args[1]))),
     }
 }
@@ -1078,58 +1088,132 @@ fn return_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<V
 // Binding natives: get, set, value?, use, bind (M9)
 // ---------------------------------------------------------------------------
 
-/// `get 'word` — returns the value bound to `word` in the user context.
-/// Errors if the word has no value. The word operand is a lit-word (`'foo`)
-/// or an unbound word (`foo`).
+/// `get 'word` — returns the value bound to `word`. If the word carries a
+/// `Binding::Local` (e.g. the result of `in object 'word`), reads from that
+/// context; otherwise falls back to `env.user_ctx`. Also accepts a block of
+/// words, returning a block of their values (M18).
 fn get_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
-    if args.len() != 1 {
+    if args.is_empty() {
         return Err(arity_err(args, "get", 1, args.len()));
     }
-    let sym = match &args[0] {
-        Value::LitWord { sym, .. } => sym.clone(),
-        Value::Word { sym, .. } => sym.clone(),
-        other => {
-            return Err(EvalError::TypeError {
-                expected: "word!",
-                found: type_name(other),
-                span: other.span_or_default(),
-            })
-        }
-    };
-    env.user_ctx
-        .get(&sym)
-        .ok_or_else(|| EvalError::UnboundWord {
-            sym,
-            span: args[0].span_or_default(),
-        })
+    // Block form: `get [a b c]` → `[val-a val-b val-c]`.
+    if let Value::Block { series, .. } = &args[0] {
+        let data = series.data.borrow();
+        let results: Vec<Value> = data
+            .iter()
+            .map(|w| get_one(w, env, w.span_or_default()))
+            .collect::<Result<_, _>>()?;
+        return Ok(Value::Block {
+            series: Series::new(results),
+            span: Span::new(0, 0),
+        });
+    }
+    get_one(&args[0], env, args[0].span_or_default())
 }
 
-/// `set 'word value` — writes `value` into `word`'s slot in the user context
-/// (the word must have been pre-allocated by `bind_pass`). Returns the value.
+fn get_one(v: &Value, env: &mut Env, span: Span) -> Result<Value, EvalError> {
+    match v {
+        Value::LitWord { sym, .. } => env.user_ctx.get(sym).ok_or_else(|| EvalError::UnboundWord {
+            sym: sym.clone(),
+            span,
+        }),
+        Value::Word { sym, binding, .. } | Value::GetWord { sym, binding, .. } => match binding {
+            Binding::Local(ctx, idx) => Ok(ctx.slot_value(*idx)),
+            Binding::Func(idx) => {
+                let frame = env
+                    .call_stack
+                    .last()
+                    .ok_or_else(|| EvalError::UnboundWord {
+                        sym: sym.clone(),
+                        span,
+                    })?;
+                Ok(frame.ctx.slot_value(*idx))
+            }
+            Binding::Unbound => env.user_ctx.get(sym).ok_or_else(|| EvalError::UnboundWord {
+                sym: sym.clone(),
+                span,
+            }),
+        },
+        other => Err(EvalError::TypeError {
+            expected: "word!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
+/// `set 'word value` — writes `value` into `word`'s slot. If the word carries
+/// a `Binding::Local` (e.g. from `in object 'word`), writes to that context;
+/// otherwise writes to `env.user_ctx`. Also accepts block operands:
+/// `set [a b] [1 2]` sets each word in parallel (M18). Returns the value(s).
 fn set_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "set", 2, args.len()));
     }
-    let sym = match &args[0] {
-        Value::LitWord { sym, .. } => sym.clone(),
-        Value::Word { sym, .. } => sym.clone(),
-        other => {
-            return Err(EvalError::TypeError {
-                expected: "word!",
-                found: type_name(other),
-                span: other.span_or_default(),
-            })
+    // Block form: `set [a b c] [1 2 3]` or `set [a b c] 99` (all get 99).
+    if let Value::Block { series, .. } = &args[0] {
+        let words_data = series.data.borrow().clone();
+        let values: Vec<Value> = if let Value::Block { series: vs, .. } = &args[1] {
+            vs.data.borrow().clone()
+        } else {
+            vec![args[1].clone(); words_data.len()]
+        };
+        for (w, v) in words_data.iter().zip(values.iter()) {
+            set_one(w, v.clone(), env)?;
         }
-    };
+        return Ok(args[1].clone());
+    }
     let val = args[1].clone();
-    if let Some(idx) = env.user_ctx.index_of(&sym) {
-        env.user_ctx.set_slot(idx, val.clone());
-        Ok(val)
-    } else {
-        Err(EvalError::UnboundWord {
-            sym,
-            span: args[0].span_or_default(),
-        })
+    set_one(&args[0], val.clone(), env)?;
+    Ok(val)
+}
+
+fn set_one(v: &Value, val: Value, env: &mut Env) -> Result<(), EvalError> {
+    match v {
+        Value::LitWord { sym, .. } => {
+            if let Some(idx) = env.user_ctx.index_of(sym) {
+                env.user_ctx.set_slot(idx, val);
+                Ok(())
+            } else {
+                Err(EvalError::UnboundWord {
+                    sym: sym.clone(),
+                    span: v.span_or_default(),
+                })
+            }
+        }
+        Value::Word { sym, binding, .. } | Value::SetWord { sym, binding, .. } => match binding {
+            Binding::Local(ctx, idx) => {
+                ctx.set_slot(*idx, val);
+                Ok(())
+            }
+            Binding::Func(idx) => {
+                let frame = env
+                    .call_stack
+                    .last_mut()
+                    .ok_or_else(|| EvalError::UnboundWord {
+                        sym: sym.clone(),
+                        span: v.span_or_default(),
+                    })?;
+                frame.ctx.set_slot(*idx, val);
+                Ok(())
+            }
+            Binding::Unbound => {
+                if let Some(idx) = env.user_ctx.index_of(sym) {
+                    env.user_ctx.set_slot(idx, val);
+                    Ok(())
+                } else {
+                    Err(EvalError::UnboundWord {
+                        sym: sym.clone(),
+                        span: v.span_or_default(),
+                    })
+                }
+            }
+        },
+        other => Err(EvalError::TypeError {
+            expected: "word!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
     }
 }
 
@@ -1351,8 +1435,10 @@ pub fn register_natives(env: &mut Env) {
         .insert(Symbol::new("*"), infix_native(multiply as NativeFn, 2));
     env.natives
         .insert(Symbol::new("/"), infix_native(divide as NativeFn, 2));
-    env.natives
-        .insert(Symbol::new("//"), infix_native(crate::math::modulo as NativeFn, 2));
+    env.natives.insert(
+        Symbol::new("//"),
+        infix_native(crate::math::modulo as NativeFn, 2),
+    );
 
     // Comparison (M7, infix)
     env.natives
@@ -1527,6 +1613,9 @@ pub fn register_natives(env: &mut Env) {
 
     // Math + bitwise natives (M17)
     crate::math::register_math_natives(env);
+
+    // Objects & contexts (M18)
+    crate::object::register_object_natives(env);
 }
 
 /// Install the predefined constant words (`none`, `true`, `false`, `newline`)

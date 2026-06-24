@@ -410,9 +410,9 @@ fn scan_refinement(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexEr
     let start = *i;
     let bytes = src.as_bytes();
     *i += 1; // consume first `/`
-    // `//` → modulo operator (a single `Word("//")` token). This must be
-    // checked before the number/refinement classification below so that
-    // `7 // 3` lexes as three tokens, not `7`, `/`, `/`, `3`.
+             // `//` → modulo operator (a single `Word("//")` token). This must be
+             // checked before the number/refinement classification below so that
+             // `7 // 3` lexes as three tokens, not `7`, `/`, `/`, `3`.
     if bytes.get(*i) == Some(&b'/') {
         *i += 1;
         return Ok((*i, TokenKind::Word(Symbol::new("//"))));

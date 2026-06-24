@@ -11,6 +11,7 @@ pub mod convert;
 pub mod interp;
 pub mod math;
 pub mod natives;
+pub mod object;
 pub mod parse;
 pub mod series;
 pub mod strings;
