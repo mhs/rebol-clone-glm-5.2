@@ -1,0 +1,496 @@
+# Plan 3: Bytecode VM & Performance (v0.3)
+
+Execution checklist extending the v0.2.0 baseline in `plan2.md`. v0.3 rewrites
+the evaluator from a tree-walking interpreter (`interp.rs`) to a **bytecode
+compiler + stack VM** in the SICP-5.5 / Lua-ish tradition: blocks compile to a
+flat instruction stream, words resolve via **lexical addressing** (frame depth
++ slot index) where statically analyzable, falling back to the existing dynamic
+`Context` slot mechanism for `bind`/`use`/`make object!`/`do`-on-data cases.
+
+Per `project-brief.md`, GUI/draw/VID/reactive dialects remain **permanently out
+of scope**.
+
+Deferred to v0.4+ (acknowledged, not built here): `char!`, `map!`, `pair!`,
+`tuple!`, `date!`, `bitset!`, modules/`import`, first-class error values with
+fields, `compose`, full port model, trig math, `parse` advanced rules
+(`collect`/`keep`/`match`/`case`), closures (`closure!`), real `binary!` type.
+v0.3 is a **performance release**; the language surface freezes at v0.2.
+
+Non-goal: JIT, native codegen, or a register VM. The target is a 5-20x
+speedup over the tree-walker on compute-heavy programs while preserving
+**exact** observable behavior (golden parity, error parity).
+
+## Design summary
+
+- **IR**: a flat `Vec<Instr>` per compiled block. Instr is a tagged enum
+  (`Const(ValueIdx)`, `LoadLocal(depth, slot)`, `LoadGlobal(slot)`,
+  `LoadDynamic(Symbol)` for unresolved, `SetLocal/SetGlobal/SetDynamic`,
+  `Call(FuncIdx, argc)`, `TailCall`, `Jump`, `JumpIfFalse`, `Pop`, `Return`,
+  `MakeFunc(...)`, `EnterBlock`, `DropTo(n)`, ...). Constants live in a per-block
+  `pool: Vec<Value>`.
+- **Frames**: each call pushes a `Frame { func: Rc<FuncDef>, locals: Vec<Value>,
+  depth: usize }`. Lexical addressing = `(depth, slot)`; the VM walks up
+  `env.call_stack` `depth` times to find the defining frame. Falls back to
+  `Binding::Local(Context, slot)` semantics for dynamically bound words.
+- **Compile vs. interpret split**:
+  - Top-level script body, `func`/`does`/`function` bodies, and `if`/`either`/
+    `while`/`until`/`repeat`/`loop`/`foreach`/`forall`/`switch`/`case` block
+    args are compiled (these are *code*).
+  - `do`/`reduce`/`compose`/`parse`/`bind`/`use` on a runtime-constructed or
+    `bind`-altered block fall back to the **legacy tree-walker**, kept in-tree
+    as `interp_legacy.rs` for correctness. A compiled block carries a flag
+    `needs_rebind: bool`; if `bind` mutates it, the compiled form is discarded
+    and the walker is used. (Phase 2 may add recompile-on-rebind.)
+- **Natives**: a native becomes a `Primitive` instr whose handler is the
+  existing `NativeFn`. Refinements stay as-is; the compiler emits
+  `PushArg`+`PushRefinement` instructions and the native handler runs
+  unchanged.
+- **Tail calls**: `if`/`either`/loop bodies in tail position emit `TailCall`/
+  `TailReenter`; the VM reuses the current frame (no `Frame` push), giving
+  constant-stack loops and self-recursion.
+- **Homoiconicity preserved**: `Value::Block` is untouched as data. Compilation
+  is a side cache keyed off `FuncDef::compiled`; `mold`/`mold(parse(mold(v)))`
+  parity is unchanged. A `Block` passed as data (not `do`-ed) is never compiled.
+
+## Milestone Pre-22 - Baseline benchmarks + harness
+
+Establish a measurement foundation *before* any VM work begins. The goal is to
+(1) confirm the tree-walker's hot spots are where we expect (function-call
+overhead, word resolution, loop dispatch), (2) produce numbers the v0.3 VM
+work can be compared against, and (3) set up regress-guarding infrastructure
+so later milestones can prove the speedup rather than assert it.
+
+This milestone ships **no behavior change**: it only adds benches, a
+call-depth counter, and a benchmark-fixture program set. All numbers are
+captured in `BENCHMARKS.md` (committed) so the VM milestones have a written
+baseline to point at.
+
+- [ ] Add `criterion` to `crates/red-eval/Cargo.toml [dev-dependencies]`
+- [ ] Add `[[bench]]` entry `name = "eval"`, `harness = false` to
+      `crates/red-eval/Cargo.toml`
+- [ ] Create `crates/red-eval/benches/eval.rs` with a `criterion_group`/
+      `criterion_main` harness
+- [ ] Add `crates/red-eval/benches/programs/` with `.red` fixture sources
+      (kept on disk so they are inspectable and reusable by the VM benches
+      later):
+      - `fib.red` - naive recursive `fib 30` (function-call + recursion hot
+        path)
+      - `sum_loop.red` - `repeat` accumulator to 1,000,000 (loop overhead)
+      - `sum_while.red` - same loop via `while` (alt. loop native)
+      - `ackermann.red` - `ackermann 3 5` (deep recursion, worst case for the
+        tree-walker's call stack)
+      - `foreach_block.red` - `foreach x block [acc: acc + x]` over a 100k
+        block (series iteration)
+      - `block_build.red` - `append` into a block 10k times (series mutation)
+      - `parse_heavy.red` - a `parse` run over a 10k-char string (parse
+        dialect overhead; expected to be VM-neutral since parse stays on the
+        walker)
+      - `string_concat.red` - `rejoin` over a 1k-element reduced block
+        (string + reduce path)
+      - `func_call_heavy.red` - tight `does` invocation 1M times (pure
+        function-call overhead, the canonical VM win case)
+      - `ackermann_small.red` - `ackermann 2 5` (smaller, faster CI-friendly
+        variant for the regress guard)
+- [ ] In `benches/eval.rs`, one `bench_function` per fixture: read source,
+      call `run_source`, black-box the returned `Value` via
+      `criterion::black_box`. Each bench uses `BatchSize::SmallInput` for the
+      per-iteration `run_source` setup
+- [ ] Add a `benches/eval.rs` micro-bench group targeting *just* `eval` on a
+      pre-built `Env` (skip lex/parse/bind) so the bench isolates eval cost:
+      - `eval_literal` - `eval(Integer(5))`
+      - `eval_word_lookup` - `eval(word)` after `x: 5`
+      - `eval_setword` - `eval(setword + literal)`
+      - `eval_call_native` - `eval(1 + 2)` (single native call)
+      - `eval_call_user` - `eval(square 5)` where `square: func [x][x * x]`
+      - `eval_paren` - `eval((1 + 2))`
+- [ ] Add `Env::max_frame_depth: usize` counter (test/debug only, behind a
+      `#[cfg(any(test, feature = "stats"))]` gate) incremented on every
+      `CallFrame` push; used by later milestones to prove tail-call stack
+      height is bounded. Reset on each `run_source` call.
+- [ ] Add `Env::instr_count: u64` counter (same gate) incremented in
+      `interp::eval`'s main loop; gives an operation-count metric independent
+      of wall time. Used in M30 to correlate VM instr count with walker
+      instr count.
+- [ ] Gate both counters behind a new `stats` cargo feature on `red-eval` so
+      release builds pay zero cost. Document in `architecture.md`.
+- [ ] Run the benches on the developer's machine (macOS for this repo) and
+      record numbers in a new `BENCHMARKS.md` at the repo root:
+      - One table per fixture group with `mean`, `p99`, `throughput`
+      - Note the host CPU, Rust toolchain version, and `cargo bench` flags
+      - Add a "Baseline (v0.2.0 tree-walker)" section header so the VM
+        results in M30 land under a "v0.3.0 VM" header for direct comparison
+- [ ] Run benches with `--bench eval -- --profile-time=5` (shorter than the
+      default 10s sample) for faster CI-like turnaround; record both short and
+      full-sample numbers
+- [ ] Add `crates/red-eval/benches/README.md` explaining how to run benches,
+      how to compare two runs (`critcmp`), and what regress-guard threshold
+      M30 will enforce (10%)
+- [ ] Inline `#[test]`: each `.red` fixture in `benches/programs/` produces a
+      deterministic `Integer` or `String` result (so the bench is measuring
+      real work, not an error path). Asserts the expected value.
+- [ ] Inline `#[test]`: `Env::max_frame_depth` after `ackermann 3 5` > 0 and
+      < 1000 (sanity bound); after `sum_loop 1000000` < 50 (loops reuse one
+      frame)
+- [ ] Inline `#[test]`: `Env::instr_count` after `1 + 2` is within an
+      expected small range (documents what counts as one "instr")
+- [ ] Inline `#[test]`: with `stats` feature off, `Env` has no counter
+      fields (compile-time check via `cfg`)
+- [ ] `cargo test --workspace` passes (no `stats` feature)
+- [ ] `cargo test --workspace --features red-eval/stats` passes
+- [ ] `cargo bench --bench eval` runs to completion without errors (numbers
+      recorded in `BENCHMARKS.md`)
+- [ ] Commit `BENCHMARKS.md` with the baseline table; tag the baseline as
+      `v0.2.0-baseline-bench` so M30 can pull it for comparison
+
+## Milestone 22 - IR + value-model prep
+
+- [ ] Create `crates/red-eval/src/vm/mod.rs` with submodules
+      `ir.rs`, `compiler.rs`, `vm.rs`, `frame.rs`, `pool.rs`
+- [ ] Define `Instr` enum (all variants above, plus `Halt`)
+- [ ] Define `CompiledBlock { instrs: Rc<[Instr]>, pool: Rc<[Value]>,
+      n_locals: usize, freevars: Vec<Symbol>, source_span: Span,
+      needs_rebind: bool, arity: usize }`
+- [ ] Define `Frame { func: Option<Rc<FuncDef>>, locals: Vec<Value>,
+      depth: usize, block: CompiledBlock, pc: usize }`
+- [ ] Add `FuncDef::compiled: Option<Rc<CompiledBlock>>` lazily-filled cache
+      (avoid a new public `Value` variant; keep compilation off the data model)
+- [ ] Add `FuncDef::freevars: Vec<Symbol>` field (lexical capture list)
+- [ ] Extend `Binding` with `Lexical(usize, usize)` = `(depth, slot)` for
+      statically-resolved words (keeps `Local`/`Func` for dynamic path)
+- [ ] Add `Binding::is_lexical()` / `as_lexical()` helpers
+- [ ] Inline `#[test]`: `Instr` round-trips through `Debug` + a tiny
+      `disasm(block)` helper used by later tests
+- [ ] Inline `#[test]`: `CompiledBlock` clones cheaply (Rc-backed)
+- [ ] `cargo test --workspace` passes (no behavior change yet; new code
+      unused)
+
+## Milestone 23 - Lexical analyzer + free-variable pass
+
+- [ ] Create `crates/red-eval/src/vm/lex.rs` (compile-time lexical analysis,
+      not to be confused with `red-core::lexer`)
+- [ ] Walk a parsed block, tracking a compile-time `Scope { bindings:
+      HashMap<Symbol, (depth, slot)>, parent: Option<Box<Scope>>, depth: usize }`
+- [ ] On `SetWord`: allocate a slot in the current scope; emit binding as
+      `Lexical(0, slot)` for the word and as `Lexical(depth, slot)` if seen
+      later in a deeper scope
+- [ ] On `Word`: resolve via scope chain; if found emit `Lexical(d, slot)`; if
+      not found, leave as `Unbound` -> compiler emits `LoadDynamic(sym)` (the VM
+      falls back to the runtime user context at call time)
+- [ ] Compute `freevars` per block: words referenced in a child scope that
+      resolve to an ancestor scope are free variables of the block; capture
+      list goes on `FuncDef::freevars` at `MakeFunc` time
+- [ ] Handle `use [words] block` and `bind block ctx`: mark the resulting
+      block `needs_rebind = true` so the VM never uses its compiled form for
+      it; the legacy walker handles these
+- [ ] Handle `make object!` and `context` bodies: `needs_rebind = true`
+      (object spec body is walked by the object constructor, not compiled)
+- [ ] Inline `#[test]`: `square: func [x][x * x]` -> `x` is `Lexical(0, 0)`,
+      no freevars
+- [ ] Inline `#[test]`: `outer: func [y][inner: func [][y] inner]` ->
+      `inner`'s freevars = `[y]`
+- [ ] Inline `#[test]`: unbound script word `foo` left as `Unbound`
+- [ ] Inline `#[test]`: `use [x][x: 1 x]` -> block flagged `needs_rebind`
+- [ ] `cargo test --workspace` passes
+
+## Milestone 24 - Compiler (block -> Instr stream)
+
+- [ ] Create `crates/red-eval/src/vm/compiler.rs`
+- [ ] Implement `pub fn compile_block(block: &Series, scope: &Scope) ->
+      Result<CompiledBlock, CompileError>`
+- [ ] Emit `Const(i)` for literals (Integer/Float/String/None/Logic/File/Url/
+      Refinement) - interned into the block's pool
+- [ ] Emit `LoadLocal(d, slot)` for `Word` with `Binding::Lexical`
+- [ ] Emit `LoadDynamic(sym)` for `Word` with `Binding::Unbound` (resolved at
+      VM entry from `env.user_ctx`)
+- [ ] Emit `LoadGlobal(slot)` for `Word` with `Binding::Local(user_ctx, slot)`
+      (script-top-level words already bound to user ctx at load time)
+- [ ] Emit `SetLocal(d, slot)` / `SetGlobal(slot)` / `SetDynamic(sym)` for
+      `SetWord`
+- [ ] Emit `GetWord` -> `LoadDynamic` (fetch value, do not call)
+- [ ] Emit `LitWord` -> `Const`
+- [ ] Emit `Call(native_idx, argc)` for a `Word` in operator position whose
+      binding resolves to a native (registered in `env.natives` at compile
+      time via a snapshot) - argv collected from following `argc` values
+- [ ] Emit `CallUser(func_local, argc)` for a `Word` in operator position
+      bound to a `Value::Func` slot
+- [ ] Emit `MakeFunc(spec_idx, body_idx, freevars)` for `func`/`does`/
+      `function` native invocations when args are literal blocks (common case);
+      otherwise emit `Call` to the native as fallback
+- [ ] Emit `Pop` for non-tail positions whose result is unused (matches the
+      tree-walker's "return last value" rule - last value stays on stack,
+      intermediate values are popped)
+- [ ] Emit `Return` at block end
+- [ ] Refinement handling: when a `Refinement` value appears in arg position,
+      emit `MarkRefine` followed by its args and `EndRefine`; natives see the
+      same `RefineArgs` struct the VM assembles from the stack marks
+- [ ] Paths: `obj/field` in operator-position-free form emits a `GetPath`
+      instr that performs the M19 path-resolution at runtime (no compile-time
+      resolution of paths; they are dynamic). `SetPath` emits `SetPath`.
+- [ ] Implement `CompileError { span, kind }` with `Kind` =
+      `UnboundInOperatorPosition`, `MalformedSpec`, `ArityMismatch`
+- [ ] Inline `#[test]`: compile `5` -> `[Const(0), Return]`, pool=[5]
+- [ ] Inline `#[test]`: compile `foo: 5 foo` ->
+      `[Const(0), SetGlobal(0), LoadGlobal(0), Return]`
+- [ ] Inline `#[test]`: compile `1 + 2` ->
+      `[Const(0), Const(1), Call(+, 2), Return]`
+- [ ] Inline `#[test]`: compile `if true [42]` ->
+      `[Const(true), JumpIfFalse(L1), Const(42), L1: Return]`
+- [ ] Inline `#[test]`: compile `func [x][x * x]` emits `MakeFunc` with
+      freevars=[]
+- [ ] Inline `#[test]`: compile a recursive factorial emits `MakeFunc` whose
+      body contains `CallUser(0, 1)` referencing its own slot
+- [ ] `cargo test --workspace` passes (compiler still unused at runtime)
+
+## Milestone 25 - Stack VM core
+
+- [ ] Create `crates/red-eval/src/vm/vm.rs`
+- [ ] Define `Vm { frames: Vec<Frame>, stack: Vec<Value>, env: &mut Env }`
+- [ ] Implement `pub fn run(block: CompiledBlock, env: &mut Env) ->
+      Result<Value, EvalError>` - the entry point for a compiled top-level
+- [ ] Implement dispatch over each `Instr` variant; one `match` arm per
+      variant, hot path documented
+- [ ] `Const(i)` -> push `pool[i].clone()`
+- [ ] `LoadLocal(d, slot)` -> walk `frames` back `d` entries, push
+      `frames[len-1-d].locals[slot].clone()`
+- [ ] `LoadGlobal(slot)` -> push `env.user_ctx.slot(slot).clone()`
+- [ ] `LoadDynamic(sym)` -> look up `sym` in `env.user_ctx`; if absent,
+      `EvalError::UnboundWord` (same behavior as tree-walker)
+- [ ] `SetLocal/SetGlobal/SetDynamic` -> mirror loads
+- [ ] `Call(native_idx, argc)` -> slice `stack[len-argc..]`, call
+      `env.natives[idx](args, refine_args, env)`, pop argc, push result
+- [ ] `CallUser(func_slot, argc)` -> read `Value::Func(rc)` from the slot,
+      push a new `Frame` with `locals = argv + freevar captures` (captured from
+      the defining frame per `FuncDef::freevars`), recurse into `run` on the
+      body's `CompiledBlock` (compiling it lazily if `FuncDef::compiled` is
+      `None`)
+- [ ] `TailCall`/`TailReenter` -> overwrite current frame's `locals` and `pc`
+      instead of pushing; verify the call stack shrinks in a stress test
+- [ ] `Jump`/`JumpIfFalse` -> mutate `pc`
+- [ ] `Pop` -> `stack.pop()`
+- [ ] `Return` -> `break` out of the current frame's instr loop, returning
+      top-of-stack (or `None` if empty)
+- [ ] `MakeFunc` -> build a `FuncDef`, compile its body with the current scope
+      as parent, attach freevar captures as `Rc<RefCell<...>>` slots (shallow
+      capture; full closures still out of scope), store on the slot
+- [ ] `EnterBlock`/`DropTo(n)` -> for nested `reduce`-style evaluation, restore
+      stack height
+- [ ] `GetPath`/`SetPath` -> delegate to the existing M19 path resolver
+      (`path.rs`) - no duplication
+- [ ] `Halt` -> end top-level run
+- [ ] `EvalError` reuse: keep the exact same `EvalError` variants and
+      `render_error` paths; the VM just raises them with the same spans
+- [ ] `Return`/`Break`/`Continue` control-flow unwinds: emit/raise as
+      `EvalError::Return` etc.; native `return` and loop natives catch them
+      exactly as in the tree-walker
+- [ ] Inline `#[test]`: VM runs `5` -> `Integer(5)`
+- [ ] Inline `#[test]`: VM runs `1 + 2` -> `Integer(3)`
+- [ ] Inline `#[test]`: VM runs `foo: 5 foo` -> `Integer(5)`
+- [ ] Inline `#[test]`: VM runs `if true [42]` -> `Integer(42)`
+- [ ] Inline `#[test]`: VM runs `square: func [x][x * x] square 5` -> `Integer(25)`
+- [ ] Inline `#[test]`: VM runs recursive `fact 5` -> `Integer(120)`, call-stack
+      height stays bounded when compiled with tail calls
+- [ ] `cargo test --workspace` passes (VM available but not yet the default)
+
+## Milestone 26 - Native bridge + refinement dispatch on the VM
+
+- [ ] Adapt `NativeFn` to be callable from both the tree-walker and the VM:
+      keep the existing signature; the VM assembles `&[Value]` and
+      `&RefineArgs` from the stack before invoking
+- [ ] Implement VM-side `RefineArgs` assembly: `MarkRefine(sym)` pushes a
+      sentinel; `EndRefine` collects args since the mark; the resulting map is
+      handed to the native handler
+- [ ] Audit every native in `natives.rs`/`series.rs`/`strings.rs`/`math.rs`/
+      `convert.rs`/`binding.rs`/`parse.rs`/`path.rs`/`object.rs`/`io.rs`:
+      - Native reads `args[i]` -> unchanged
+      - Native calls back into `eval` (e.g. `do`, `reduce`, `if`, `either`,
+        `loop`, `foreach`, `func` body invocation) -> add a `dispatch_block`
+        shim that picks VM vs. walker based on the block's `needs_rebind` flag
+        and the active `Env` mode
+- [ ] Implement `Env::mode: EvalMode { Walk, Vm }` toggle so natives know
+      which evaluator to recurse into
+- [ ] `do block` native: if `block`'s compiled form exists and
+      `needs_rebind == false`, run via VM; else fall back to walker
+- [ ] `reduce` native: same logic
+- [ ] `if`/`either`/`while`/`until`/`repeat`/`loop`/`foreach`/`forall`/
+      `switch`/`case` block args: compiled at script-load time, run via VM
+- [ ] `parse` dialect: keep on the walker (it does its own control flow over
+      the rule block; no benefit compiling it). `parse` rule blocks get
+      `needs_rebind = true`
+- [ ] `bind`/`use`/`in`/`set` over blocks: set `needs_rebind = true` on the
+      target block (drops its compiled cache)
+- [ ] Inline `#[test]`: `copy/part [1 2 3] 2` runs through the VM
+- [ ] Inline `#[test]`: `find/case [a A b] 'A` runs through the VM
+- [ ] Inline `#[test]`: `foreach x [1 2 3][print x]` -> "1\n2\n3\n" via VM
+- [ ] Inline `#[test]`: `switch 2 [1 ["a"] 2 ["b"]]` -> "b" via VM
+- [ ] Inline `#[test]`: `do bind [x][x: 5]` correctly falls back to walker
+- [ ] `cargo test --workspace` passes
+
+## Milestone 27 - FuncDef compiled-cache + lazy compilation
+
+- [ ] At `MakeFunc` time, compile the body and store on `FuncDef::compiled`
+- [ ] Add `FuncDef::compile_on_call(&mut self, env: &Env)` for funcs created
+      outside the compiler (e.g. `make function!` called at runtime on a
+      dynamically-built spec) - lazily compiles on first invocation
+- [ ] Invalidate `compiled` when `bind` touches the body: any `bind`/`use`
+      call on a `Value::Func` clears `FuncDef::compiled = None` and sets
+      `needs_rebind = true` on the body block
+- [ ] Invalidate `compiled` when the body's words' bindings change to
+      `Lexical` from a different scope (defensive: clear on any rebind)
+- [ ] Add an `Env`-level compiled-block cache keyed by `Series` identity
+      (`Rc<RefCell<...>>` ptr + index) for non-function blocks that are `do`-ed
+      repeatedly (e.g. a loop body block passed around); LRU or unlimited,
+      decide based on profiling
+- [ ] Inline `#[test]`: a `func` invoked twice compiles its body exactly once
+      (use a counter)
+- [ ] Inline `#[test]`: `bind` of a func body invalidates the compiled cache
+- [ ] Inline `#[test]`: `make function!` at runtime lazily compiles on first
+      call, not at `make` time
+- [ ] `cargo test --workspace` passes
+
+## Milestone 28 - Tail-call optimization + loop-body compilation
+
+- [ ] Detect tail position in the compiler: the last instr-producing form of a
+      block, and the last form of an `if`/`either`/`switch`/`case` branch, is
+      in tail position
+- [ ] A `CallUser` in tail position emits `TailCall` instead of `CallUser`
+- [ ] A self-reference (function calling itself by its bound name) in tail
+      position emits `TailReenter` (cheaper: same `FuncDef`, just reset
+      `locals` and `pc`)
+- [ ] Loops: `loop`/`while`/`until`/`repeat`/`foreach`/`forall` bodies compile
+      to inner `CompiledBlock`s; the loop native invokes the VM with
+      `EvalMode::Vm` and the body block's compiled form; `break`/`continue`
+      raise `EvalError::Break`/`Continue` caught by the loop native exactly as
+      in the walker
+- [ ] Verify constant stack height for `loop` over a long counter via an
+      inline stress test
+- [ ] Verify constant stack height for self-recursive `fact` written with
+      accumulator + tail call
+- [ ] Inline `#[test]`: `repeat i 1000000 [if i > 999999 [print i]]` runs
+      without stack overflow (would overflow the tree-walker)
+- [ ] Inline `#[test]`: tail-recursive `count-down n acc` runs at
+      `count-down 100000 0` without stack growth
+- [ ] Inline `#[test]`: `loop [break]` exits cleanly via `EvalError::Break`
+- [ ] `cargo test --workspace` passes
+
+## Milestone 29 - Flip the default + golden parity
+
+- [ ] Set `Env::mode = Vm` by default in `run_source`
+- [ ] Add `--walk` CLI flag to force the tree-walker (for debugging + parity
+      tests)
+- [ ] Rename existing `interp.rs` -> `interp_legacy.rs`; create a new thin
+      `interp.rs` that dispatches on `Env::mode`
+- [ ] Audit every `red-eval/tests/programs/*.red` golden fixture: stdout must
+      match byte-for-byte in VM mode
+- [ ] Audit every `red-cli/tests/cli.rs` assertion in VM mode
+- [ ] Audit every error fixture: the rendered `*** Error:` line must match
+      exactly (spans preserved through compilation)
+- [ ] Add a parity test harness: run each program fixture in both `Walk` and
+      `Vm` modes, assert identical stdout+stderr
+- [ ] Inline `#[test]`: every `#[test]` in `red-eval` runs in VM mode (set
+      `Env::mode = Vm` in a common test helper)
+- [ ] Inline `#[test]`: parity test for `mold(parse(mold(v)))` unaffected
+      (compilation never touches the data-model side)
+- [ ] `cargo test --workspace` passes in VM mode
+- [ ] `cargo test --workspace` passes with `--features force-walk` (or env
+      var) running every test in `Walk` mode too
+
+## Milestone 30 - Performance measurement + hot-path tuning
+
+- [ ] Add `crates/red-eval/benches/` with `criterion` dev-dep
+- [ ] Bench programs: `fib 30` (recursive), `sum-to 1000000` (loop),
+      `ackermann 3 5`, `parse`-heavy fixture, `foreach` over a 100k block,
+      `sort` a 10k block with a user comparison function
+- [ ] Establish baseline numbers vs. the legacy walker (keep walker callable
+      behind `--walk` for A/B comparison)
+- [ ] Profile with `perf` (Linux) / `Instruments` (macOS); identify hot instr
+      arms
+- [ ] Optimize `LoadLocal`/`LoadGlobal`: avoid `Vec` index bounds checks
+      where statically safe (use `get_unchecked` only behind a debug-asserted
+      fast path)
+- [ ] Optimize `Const`: small-value tagging for `Integer`/`None`/`Logic` (skip
+      pool indirection) if profiling warrants
+- [ ] Optimize `Call`: pre-resolve native indices at compile time (already
+      done); ensure no `HashMap` lookup at call time
+- [ ] Optimize frame push/pop: pre-allocate `Vec` capacity; consider a slab
+      allocator for `Frame` if allocation shows up
+- [ ] Optimize `String` clone: `Rc<str>` already cheap; verify no accidental
+      deep copies in the hot path
+- [ ] Document findings in `architecture.md` ("Performance" section)
+- [ ] Bench target: >= 5x speedup on `fib 30` and `sum-to 1000000` vs. walker
+- [ ] Inline `#[test]`: bench results regress-guard (criterion stores a
+      baseline; CI fails on >10% regression)
+- [ ] `cargo test --workspace` passes; `cargo bench` runs
+
+## Milestone 31 - Disassembler + debug ergonomics
+
+- [ ] Implement `disasm(block: &CompiledBlock) -> String` formatting
+      instructions with pool values inlined for readability
+- [ ] Add `--disasm <file.red>` CLI flag: compile the script and print the
+      disassembly to stdout, do not run
+- [ ] Add `--disasm-func <name>` CLI flag: print the disassembly of a named
+      `func` after loading the script
+- [ ] Add `Env::trace: bool` -> VM appends one line per executed instr to
+      stderr (gated behind `--trace` flag); off by default
+- [ ] Add span-annotated disassembly: each instr carries the `Span` of its
+      originating source value; `disasm` prints `file:line:col` alongside
+- [ ] Improve VM error messages: when an `EvalError` is raised inside the VM,
+      include the offending instr's span and the disasm of the surrounding
+      function body (last 5 instrs) in the error's debug form (not the
+      user-facing `*** Error:` line, which stays identical to the walker)
+- [ ] Inline `#[test]`: `--disasm examples/fib.red` output contains
+      `MakeFunc`, `CallUser`, `TailReenter`
+- [ ] Inline `#[test]`: `--trace` of `1 + 2` produces >= 4 instr lines
+- [ ] Add a `crates/red-eval/tests/disasm/` golden suite: `*.red` ->
+      `*.disasm.expected`
+- [ ] `cargo test --workspace` passes
+
+## Milestone 32 - Property tests + fuzzing the VM
+
+- [ ] Extend the existing `proptest` round-trip to compile+VM-run: for a
+      generated small `Value` tree, `mold(vm_run(compile(parse(mold(v)))))`
+      == `mold(walk_run(parse(mold(v))))`
+- [ ] Property test: for any small generated program, VM mode and Walk mode
+      produce identical stdout (capture both)
+- [ ] Property test: for any small generated program, the call-stack depth at
+      the end of execution is <= a small constant (e.g. 32) when the program
+      is tail-recursive - assert via a test-only `Env::max_frame_depth` counter
+- [ ] Property test: compilation is idempotent - compiling a block twice
+      yields identical `CompiledBlock`s (modulo pool dedup order)
+- [ ] Add `cargo-fuzz` target fuzzing `run_source(arbitrary_bytes)` ->
+      VM must not panic (may error, may not abort). Distinguish panics (bugs)
+      from `EvalError`s (graceful)
+- [ ] Inline `#[test]`: proptest minimal case reduction produces a readable
+      shrink
+- [ ] `cargo test --workspace` passes; `cargo fuzz run run_source` runs
+      (separate job)
+
+## Milestone 33 - Walker removal prep + cleanup
+
+- [ ] Audit `interp_legacy.rs` usage: keep it as the path for
+      `needs_rebind`-flagged blocks and `Env::mode == Walk`; remove any dead
+      branches
+- [ ] Consolidate `dispatch_block` shim into a single `pub fn eval_block(block,
+      env) -> Result<Value, EvalError>` used by all natives, choosing VM vs.
+      walker centrally
+- [ ] Remove the now-unused direct `eval` call sites in natives that were
+      bypassing the shim
+- [ ] Run clippy on workspace; fix warnings
+- [ ] Run `cargo fmt --all --check`
+- [ ] Update `project-brief.md`:
+      - Add "Execution model" section: bytecode compiler + stack VM, lexical
+        addressing, tail calls, walker retained for `bind`/`use`/`do`-on-data
+        fallback
+      - Note language surface frozen at v0.2 for v0.3
+      - Note `--walk`/`--disasm`/`--trace` CLI flags
+- [ ] Update `architecture.md`:
+      - Add "Compiler" section (scope analysis, freevars, tail-position
+        detection)
+      - Add "VM" section (frames, stack, instr dispatch, refinement
+        assembly, native bridge)
+      - Add "Performance" section from M30
+      - Update the overview mermaid diagram to include a `Compile` node
+        between `Bind` and `Eval`
+- [ ] Update `README.md` quickstart with `--disasm` and `--walk` flags
+- [ ] Final `cargo test --workspace` green in VM mode
+- [ ] Final `cargo test --workspace` green in Walk mode (parity)
+- [ ] Tag release `v0.3.0`
