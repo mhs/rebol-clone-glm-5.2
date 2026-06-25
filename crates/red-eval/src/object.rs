@@ -284,7 +284,7 @@ fn reflect_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<V
         "words" => words_of_native(&[args[0].clone()], &RefineArgs::empty(), env),
         "values" => values_of_native(&[args[0].clone()], &RefineArgs::empty(), env),
         other => Err(EvalError::Native {
-            message: format!("reflect: {other:?} not supported for objects"),
+            message: format!("reflect: {other} not supported for objects"),
             span: args[1].span_or_default(),
         }),
     }

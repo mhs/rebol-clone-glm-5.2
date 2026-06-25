@@ -11,10 +11,10 @@ mod repl;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-const VERSION: &str = "red 0.1.0";
+const VERSION: &str = "red 0.2.0";
 
 const HELP: &str = "\
-red — a POC Red clone
+red — a Red subset clone
 
 USAGE:
     red [--allow-shell] <file.red> [args...]   Load and evaluate a Red source file

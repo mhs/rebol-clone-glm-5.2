@@ -246,13 +246,34 @@ fn load_extended(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<V
             })?;
             Ok(Value::block(body))
         }
-        Value::File { path, .. } => {
+        Value::File { path, span } => {
             let p = resolve_path(path, _env);
             let contents =
                 std::fs::read_to_string(&p).map_err(|e| io_err(&args[0], &p, "cannot load", e))?;
-            let body = load_source(&contents).map_err(|e| EvalError::Native {
-                message: e.to_string(),
-                span: Span::new(0, 0),
+            // The loaded file's contents are a separate source buffer from
+            // the script that called `load`. A lex/parse error inside the
+            // loaded file refers to byte offsets in *that* buffer, not the
+            // caller's — so we translate the inner error's span into a
+            // `line:col` within the loaded file and fold it into the message
+            // body. The outer span points at the `load %file` call site (the
+            // `file!` literal), so the user can navigate to the call too.
+            let body = load_source(&contents).map_err(|e| {
+                let inner_span = e.span();
+                let loc = if let Some(sp) = inner_span {
+                    if sp.is_default() {
+                        String::new()
+                    } else {
+                        let map = red_core::LineMap::new(&contents);
+                        let (line, col) = map.line_col(sp.start);
+                        format!(" at {}:{}:{} ", p.display(), line, col)
+                    }
+                } else {
+                    String::new()
+                };
+                EvalError::Native {
+                    message: format!("load{}: {}", loc, e),
+                    span: *span,
+                }
             })?;
             Ok(Value::block(body))
         }

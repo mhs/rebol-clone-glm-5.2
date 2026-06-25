@@ -371,30 +371,36 @@ fn walk_data_path(
 }
 
 /// One step of data-path traversal: select `part` from `current`.
+/// `_path_span` is retained in the signature for caller symmetry with
+/// `walk_data_path`/`set_path_value`; per-step errors localize to the
+/// part's own span instead.
 fn step_path(
     current: &Value,
     part: &Value,
     env: &mut Env,
-    path_span: Span,
+    _path_span: Span,
 ) -> Result<Value, EvalError> {
+    // Localize per-step errors to the offending part's own span (not the
+    // whole path's) so a multi-segment path can pinpoint the bad segment.
+    let part_span = part.span_or_default();
     match part {
-        Value::Word { sym, .. } => select_field(current, sym, path_span),
-        Value::GetWord { sym, .. } => select_field(current, sym, path_span),
-        Value::LitWord { sym, .. } => select_field(current, sym, path_span),
-        Value::Integer { n, .. } => pick_path_index(current, *n, path_span),
+        Value::Word { sym, .. } => select_field(current, sym, part_span),
+        Value::GetWord { sym, .. } => select_field(current, sym, part_span),
+        Value::LitWord { sym, .. } => select_field(current, sym, part_span),
+        Value::Integer { n, .. } => pick_path_index(current, *n, part_span),
         Value::Paren { series, .. } => {
             let p = series.clone();
             let v = eval(
                 &Value::Paren {
                     series: p,
-                    span: path_span,
+                    span: part_span,
                 },
                 env,
             )?;
             // The paren's result is the *selector* for this step — recurse
             // with the evaluated value as the part. So `b/(1 + 1)` evaluates
             // the paren to `2`, then picks index 2 from `b`.
-            step_path(current, &v, env, path_span)
+            step_path(current, &v, env, part_span)
         }
         other => Err(EvalError::TypeError {
             expected: "word!, integer!, or paren! in path",
@@ -819,10 +825,17 @@ fn collect_call_args(
             let mut collected = Vec::with_capacity(ref_args_spec.len());
             for _ in 0..ref_args_spec.len() {
                 if *i >= data.len() {
-                    return Err(EvalError::Arity {
-                        native: sym.clone(),
-                        expected: arity + ref_args_spec.len(),
-                        got: args.len() + collected.len(),
+                    // Refinement-arg exhaustion: name the refinement so the
+                    // user knows *which* `/ref` is missing its argument,
+                    // rather than a generic positional-arity message.
+                    return Err(EvalError::Native {
+                        message: format!(
+                            "{}: refinement /{} expects {} argument(s), got {}",
+                            sym.as_str(),
+                            ref_name.as_str(),
+                            ref_args_spec.len(),
+                            collected.len(),
+                        ),
                         span,
                     });
                 }

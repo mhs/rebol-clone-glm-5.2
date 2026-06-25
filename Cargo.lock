@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "red-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "assert_cmd",
  "predicates",
@@ -608,14 +608,14 @@ dependencies = [
 
 [[package]]
 name = "red-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "red-eval"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "red-core",
  "tempfile",

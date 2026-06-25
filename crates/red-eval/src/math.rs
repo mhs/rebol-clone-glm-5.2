@@ -843,7 +843,7 @@ mod tests {
     fn random_float_in_range() {
         let v = val("random 1.0");
         match v {
-            Value::Float { f, .. } => assert!(f >= 0.0 && f < 1.0, "got {f}"),
+            Value::Float { f, .. } => assert!((0.0..1.0).contains(&f), "got {f}"),
             other => panic!("expected float, got {other:?}"),
         }
     }

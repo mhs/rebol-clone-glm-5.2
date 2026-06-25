@@ -233,21 +233,27 @@ Deferred to v0.3+ (acknowledged but not built here): `char!`, `map!`, `pair!`,
 
 ## Milestone 21 — Polish & v0.2.0 release
 
-- [ ] Audit `EvalError` rendering for new error sources (refinement arity,
+- [x] Audit `EvalError` rendering for new error sources (refinement arity,
       path resolution, object slot missing, file not found)
-- [ ] Add spans to all new value variants (`File`, `Url`, `Path`, `Object`)
-- [ ] Extend `LineMap` to cover `read`-time file errors (separate source buffer)
-- [ ] Golden fixture per new error case
-- [ ] Property test: extend `mold(parse(mold(v)))` to cover `Path`, `GetPath`,
+- [x] Add spans to all new value variants (`File`, `Url`, `Path`, `Object` —
+      `Object` is synthetic by design; the rest carry source spans)
+- [x] Extend `LineMap` to cover `read`-time file errors (separate source buffer)
+      — `load %file` parse errors fold the loaded file's `file:line:col:` into
+      the message body (the inner buffer isn't visible to `render_error`)
+- [x] Golden fixture per new error case (`refinement_arity`, `path_resolution`,
+      `path_not_object`, `load_parse_error`)
+- [x] Property test: extend `mold(parse(mold(v)))` to cover `Path`, `GetPath`,
       `LitPath`, `File`, `Url`; skip `Object` (not source-origin)
-- [ ] Update `red-core/tests/golden/` to cover all new literals
-- [ ] Expand `red-eval/tests/programs/` to 30-40 fixtures
-- [ ] Run clippy + `cargo fmt --all --check`; fix
-- [ ] Update `project-brief.md` and `architecture.md`:
+- [x] Update `red-core/tests/golden/` to cover all new literals (`files`,
+      `paths`, `url`, `file_quoted`)
+- [x] Expand `red-eval/tests/programs/` to 30-40 fixtures (now ~85 program
+      fixtures + ~18 error fixtures)
+- [x] Run clippy + `cargo fmt --all --check`; fix
+- [x] Update `project-brief.md` and `architecture.md`:
       - Add `Object`/`File`/`Url`/`Path`/`GetPath`/`LitPath` to value model
       - Document refinement dispatch in architecture
       - Document path resolution rules
       - Note `char!`/`map!`/`date!` still deferred to v0.3
-- [ ] Add `README.md` with quickstart, supported features, known gaps
-- [ ] Final `cargo test --workspace` green
+- [x] Add `README.md` with quickstart, supported features, known gaps
+- [x] Final `cargo test --workspace` green
 - [ ] Tag release `v0.2.0`

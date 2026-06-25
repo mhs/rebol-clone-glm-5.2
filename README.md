@@ -5,21 +5,22 @@ language, implemented in Rust. Red is a homoiconic, block-structured
 descendant of Rebol — code is data, evaluation is prefix-style and eager,
 and "dialects" are blocks interpreted by custom mini-interpreters.
 
-This repo is a **POC** (`v0.1.0-poc`). It implements a usable Red subset —
-lexer, parser, tree-walking evaluator, full series model, real word
-binding, functions, the `parse` dialect, and a REPL. The roadmap to `v0.2.0`
-with objects, file I/O, refinements, and more is tracked in
-[`plan2.md`](./plan2.md).
+This repo is a **Red subset interpreter** (`v0.2.0`). It implements a usable
+slice of Red — lexer, parser, tree-walking evaluator, full series model, real
+word binding, functions, the `parse` dialect, **objects**, **real paths**,
+**refinements**, type conversions, string/control-flow/math natives, file &
+shell I/O, and a REPL. The build history is tracked in [`plan.md`](./plan.md)
+(v0.1) and [`plan2.md`](./plan2.md) (v0.2).
 
 ## Status
 
-- **Tagged:** `v0.1.0-poc`
+- **Tagged:** `v0.2.0`
 - **Workspace:** three crates — `red-core` (value model + lexer + parser + printer),
   `red-eval` (interpreter + natives + `parse`), `red-cli` (binary + REPL).
 - **Tests:** `cargo test --workspace` green. Golden fixtures in
-  `crates/red-core/tests/golden/` (round-trip) and
-  `crates/red-eval/tests/programs/` (program execution). CLI tests via
-  `assert_cmd`.
+  `crates/red-core/tests/golden/` (round-trip), `crates/red-eval/tests/programs/`
+  (program execution), and `crates/red-eval/tests/programs_errors/` (error
+  rendering). CLI tests via `assert_cmd`.
 
 ## Build & run
 
@@ -29,7 +30,8 @@ cargo test  --workspace
 cargo run  -p red-cli -- examples/hello.red     # → Hello, World!
 cargo run  -p red-cli                            # → REPL (no args)
 cargo run  -p red-cli -- --help
-cargo run  -p red-cli -- --version               # → red 0.1.0
+cargo run  -p red-cli -- --version               # → red 0.2.0
+cargo run  -p red-cli -- --allow-shell examples/call.red   # enable call/shell
 ```
 
 ## What's implemented
@@ -38,14 +40,18 @@ cargo run  -p red-cli -- --version               # → red 0.1.0
 - `Red []` header + bare-body scripts (`load` for the latter).
 - Lexing: whitespace-delimited words, `;` line comments, `"..."` (with
   escapes) and `{...}` (multi-line, nested-brace) strings, integers, floats
-  (with exponents), `[...]` blocks, `(...)` parens.
-- Parsing: recursive descent, every value carries a byte-offset `Span`.
-- Printing (`mold`): round-trips `mold(parse(s)) == normalize(s)`.
+  (with exponents), `[...]` blocks, `(...)` parens, `/refinement` words,
+  `%file` literals, `scheme://url` literals.
+- Parsing: recursive descent, every source-origin value carries a byte-offset
+  `Span`; paths (`foo/bar`, `:foo/bar`, `'foo/bar`, `obj/field:`) fold from
+  word + `/word` adjacency.
+- Printing (`mold`): round-trips `mold(parse(s)) == normalize(s)` for the
+  reparseable variants (property-tested).
 
 ### Value types
 `None`, `Logic`, `Integer`, `Float`, `String`, `Word`/`SetWord`/`GetWord`/
-`LitWord`, `Block`, `Paren`, `Func`, `Path` (stub — full paths deferred to v0.2,
-see `plan2.md` M19).
+`LitWord`, `Block`, `Paren`, `Func`, `Path`/`GetPath`/`LitPath`/`SetPath`,
+`Refinement`, `File`, `Url`, `Object`, `Error`, `String8` (stub).
 
 ### Evaluation
 - Tree-walk `eval(Value, &mut Env)`.
@@ -56,34 +62,60 @@ see `plan2.md` M19).
 - SetWord at script top level binds into the user context.
 - Function bodies get bound at `func`/`does` creation time, not at load.
 
-### Natives (~70)
-- **I/O:** `print`, `prin`, `probe`.
-- **Arithmetic / comparison / logic:** `+ - * /`, `= <> < > <= >=`, `and or not`.
+### Natives (~140)
+- **I/O:** `print`, `prin`, `probe`, `form`, `mold`.
+- **Arithmetic / comparison / logic:** `+ - * / //`, `**` (power), `= <> < >
+  <= >=`, `and or not` (logic + bitwise on integers), `abs`, `negate`,
+  `add`/`subtract`/`multiply`/`divide`, `min`, `max`, `round` (`/to`/`/even`),
+  `random` (`/seed`/`/only`/`/secure`), `even?`, `odd?`, `complement`,
+  `shift-left`, `shift-right`.
 - **Control flow:** `if`, `either`, `loop`, `repeat`, `until`, `while`,
-  `do`, `reduce`, `break`, `continue`.
+  `do`, `reduce`, `break`, `continue`, `switch` (`/default`/`/case`), `case`
+  (`/default`/`/all`), `default`, `all`, `any`, `try`, `attempt`, `catch`/
+  `throw`, `cause-error`, `function` (auto-locals), `comment`, `exit`/`quit`.
 - **Series (full model):** `first` `second` `third` `last` `next` `back` `at`
   `skip` `head` `tail` `index?` `length?` `pick` `poke` `select` `find`
-  `append` `insert` `change` `remove` `clear` `take` `copy` `empty?` `block?`
-  `paren?` `series?` `any-block?` `foreach` `forall`.
+  (`/case`/`/part`) `append` (`/only`) `insert` `change` `remove` `clear`
+  `take` `copy` (`/part`) `empty?` `block?` `paren?` `series?` `any-block?`
+  `foreach` `forall`.
 - **Functions / binding:** `func`, `does`, `make function!`, `function?`,
-  `return`, `bind`, `use`, `get`, `set`, `value?`. Recursion works; closures
-  are explicitly out of scope.
+  `return`, `bind`, `use`, `in`, `get`, `set`, `value?`. Recursion works;
+  closures are explicitly out of scope.
+- **Refinements:** general `/ref` dispatch — `copy/part`, `find/case`,
+  `split/with`, `trim/auto`, `replace/all`, `round/to`, user `func [x /with y]`,
+  etc. Refinement-arg exhaustion names the offending refinement.
+- **Strings:** `rejoin`, `reform`, `join`, `split` (`/with`), `trim`
+  (`/auto` `/with` `/lines` `/all`), `replace` (`/all`), `uppercase`/
+  `lowercase` (`/part`), `suffix?`. `+` concatenates two strings; `find`
+  does substring search; `copy` on a string honors `/part`.
+- **Type conversions:** `to-integer`, `to-float`, `to-string`, `to-block`,
+  `to-word`/`to-set-word`/`to-get-word`/`to-lit-word`, `to-logic`, `to-file`,
+  `to-url`, `to-path`/`to-get-path`/`to-lit-path`, `make`, `to`, `form`.
+- **Objects:** `make object!`, `object`, `context`, `in`, `words-of`,
+  `values-of`, `reflect`, `object?`, `same?`. Prototype inheritance, `self`
+  reference, method calls via `o/method` paths.
+- **Paths:** `obj/field`, `block/2`, `string/3`, `obj/field: value`
+  (set-path), `:obj/method` (get-path), `'foo/bar` (lit-path), nested
+  `obj/inner/x`, paren selectors `b/(1 + 1)`.
+- **File & shell I/O:** `read` (`/lines`), `write` (`/lines`/`/append`),
+  `load`, `save`, `exists?`, `size?`, `modified?`, `dir?`, `make-dir`,
+  `delete`, `rename`, `change-dir`, `what-dir`, `call`/`shell`
+  (`--allow-shell` gated), `wait`, `env`/`get-env`/`set-env`, `system/options/args`.
+  `read` of `url!` fetches via `ureq` (http/https).
 - **Dialect:** `parse` — matcher subset over string! and block! inputs:
   `skip`, `to`, `thru`, `end`, `none`, `any`, `some`, `opt`, `while`, `|`
   (alternative), `copy 'word rule`, `set 'word rule`, `[...]` grouping,
   `(...)` Red side-effects. Backtracking via cursor save/restore.
 - **Constants:** `none`, `true`, `false`, `newline` bound in the user context.
-- **Strings (M15):** `rejoin`, `reform`, `join`, `split` (`/with`), `trim`
-  (`/auto` `/with` `/lines` `/all`), `replace` (`/all`), `uppercase`/
-  `lowercase` (`/part`), `suffix?`. `+` concatenates two strings; `find`
-  does substring search (returns tail-from-match or `none`); `copy` on a
-  string honors `/part`.
 
 ### Errors
 Unified `Error` (Lex / Parse / Eval). Every error carries a `Span`; the CLI
 renders `*** Error: [file:line:col: ]<msg>` using a precomputed line map.
-`Return`/`Break`/`Continue` are control-flow unwinds caught by the function
-call shim and loop natives respectively.
+Path-step errors localize to the offending part's span; `load %file` parse
+errors fold the loaded file's `file:line:col:` into the message body.
+`Return`/`Break`/`Continue`/`Throw`/`Quit` are control-flow unwinds caught by
+the function-call shim, loop natives, `catch`, and the script entry point.
+`try`/`attempt` catch errors as `Error` values.
 
 ## Examples
 
@@ -159,26 +191,26 @@ rebol-clone/
   `HashMap<Symbol, NativeFn>` lookup. Real Red pre-binds native references at
   load; deferred.
 
-## Known gaps (v0.1)
+## Known gaps (v0.2)
 
 See [`project-brief.md`](./project-brief.md) and [`plan2.md`](./plan2.md) for
 the authoritative list. Headlines:
 
-- **No objects / `make object!` / `in`** — only user context + function
-  contexts. (plan2 M18)
 - **No closures** — `func` shallow-copies args per call.
-- **Paths are a stub** (`Value::Path(Vec<Value>)`, no real navigation).
-  (plan2 M19)
-- **No file/shell I/O, `read`/`write`/`now`/`call`.** (plan2 M20)
-- **No refinements** (`/part`, `/case`, etc.) as a general mechanism — a few
-  behaviors are hard-coded. (plan2 M13)
-- **No `char!`, `map!`, `pair!`, `tuple!`, `date!`, `bitset!`, `binary!`.**
+- **No `char!`, `map!`, `pair!`, `tuple!`, `date!`, `bitset!`** (and
+  `binary!`/`String8` is a stub). `now`/string char pick are deferred with
+  `date!`/`char!`.
 - **`parse` matcher subset only** — `collect`/`keep`/`match`/grammar
   extraction/`case` flag deferred.
 - **No modules / `import` / `export`.**
-- **No error values** as first-class data (`make error!`, `try` returning
-  them). `cause-error` is a stub.
+- **Error values are partial** — `try`/`attempt` catch errors as `Error`
+  values carrying just the message; a full error model (code/type/args,
+  `make error!` with fields) is deferred to v0.3. `cause-error` is a stub.
 - **No `compose`.**
+- **Object path method calls** work for `o/method` followed by trailing
+  block args; `func/refinement` bound refinement references are deferred.
+- **`read/binary`/`write/binary`** stubbed pending `binary!`.
+- **No trig math** (`sin`/`cos`/`tan`/`sqrt`/`log`).
 - **GUI / `draw` / `vid` / reactive dialects are permanently out of scope.**
 
 ## License

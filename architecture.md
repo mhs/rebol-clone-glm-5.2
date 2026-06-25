@@ -54,6 +54,8 @@ pub enum Binding {
 
 pub struct FuncDef {
     pub params: Vec<Symbol>,
+    pub refinements: Vec<(Symbol, Vec<Symbol>)>,  // (refinement word, its arg words) — M13
+    pub locals: Vec<Symbol>,                      // explicit `<local>` words for `function` — M16
     pub body: Series,
     pub ctx: Context,
     pub native: Option<NativeFn>,
@@ -61,14 +63,42 @@ pub struct FuncDef {
     pub infix: bool,
 }
 
-pub type NativeFn = fn(&[Value], &mut Env) -> Result<Value, EvalError>;
+pub type NativeFn = fn(&[Value], &RefineArgs, &mut Env) -> Result<Value, EvalError>;
 ```
 
-`Value`, `Context`, `Env`, `EvalError` defined as in the brief. Every source-
-origin `Value` variant (`Integer`/`Float`/`String`/word-family/`Block`/`Paren`)
-carries the byte-offset `Span` of its originating token so eval-time errors
-can render `file:line:col:`. Synthetic variants (`None`/`Logic`/`Func`/`Path`/
-`String8`) are produced at runtime and carry no span.
+### Value variants (v0.2)
+
+```rust
+pub enum Value {
+    None, Logic(bool),
+    Integer { n: i64, span: Span },
+    Float { f: f64, span: Span },
+    String { s: Rc<str>, span: Span },
+    Word { sym, binding, span }, SetWord { .. }, GetWord { .. }, LitWord { .. },
+    Block { series: Series, span: Span }, Paren { series: Series, span: Span },
+    Func(Rc<FuncDef>),                                    // synthetic — no span
+    Path { parts: Vec<Value>, span: Span },              // foo/bar      — M19
+    GetPath { parts: Vec<Value>, span: Span },           // :foo/bar     — M19
+    LitPath { parts: Vec<Value>, span: Span },           // 'foo/bar     — M19
+    SetPath { parts: Vec<Value>, span: Span },           // obj/field:   — M19
+    Refinement { sym: Symbol, span: Span },              // /foo         — M13
+    File { path: Rc<str>, span: Span },                  // %foo/bar     — M20
+    Url { url: Rc<str>, span: Span },                    // http://…     — M20
+    String8(Vec<u8>),                                     // binary! (POC stub)
+    Error(Rc<ErrorValue>),                                // caught error value — M16
+    Object(Rc<RefCell<ObjectDef>>),                      // make object! — M18 (synthetic, no span)
+}
+```
+
+Every source-origin variant (`Integer`/`Float`/`String`/word-family/`Block`/`Paren`/
+`Path`/`GetPath`/`LitPath`/`SetPath`/`Refinement`/`File`/`Url`) carries the byte-offset
+`Span` of its originating token so eval-time errors can render `file:line:col:`.
+Synthetic variants (`None`/`Logic`/`Func`/`String8`/`Error`/`Object`) are produced at
+runtime and carry no span.
+
+`Value`, `Context`, `Env`, `EvalError` defined as in the brief. Span flow is
+covered above — synthetic variants omit the span and fall back to `Span::new(0,0)`
+in error rendering.
 
 ## Lexer (`red-core/src/lexer.rs`)
 
@@ -83,6 +113,9 @@ pub enum TokenKind {
     SetWord(Symbol),
     GetWord(Symbol),
     LitWord(Symbol),
+    Refinement(Symbol),   // /foo — M13
+    File(Rc<str>),         // %foo/bar — M20
+    Url(Rc<str>),          // scheme://… detected inside a word run — M20
     LBracket, RBracket,
     LParen,  RParen,
 }
@@ -304,8 +337,8 @@ binding pass simple.)
 ### Native dispatch
 When a `Word` resolves to a `Value::Func(fd)` whose `native` is `Some(f)`:
 - Collect arguments by evaluating the next N values in the current block
-  (N = `fd.params.len()`). For POC, all natives have fixed arity.
-- Call `f(args, env)`.
+  (N = `fd.params.len()`).
+- Call `f(args, refs, env)`.
 - For non-native `Func` values (user-defined via `func`/`does`):
   - Push a `CallFrame { ctx: child_ctx(fd), func: Some(fd) }` where
     `child_ctx` binds each param symbol to the corresponding arg.
@@ -313,6 +346,56 @@ When a `Word` resolves to a `Value::Func(fd)` whose `native` is `Some(f)`:
   - Pop frame.
 - `return` native: `Err(EvalError::Return(value))` caught by the function
   call shim and converted to the return value.
+
+### Refinement dispatch (M13)
+A function spec may declare refinements: `func [x /with y]` populates
+`FuncDef.refinements` with `("with", ["y"])`. At a call site, refinements
+arrive in two shapes:
+- **Path form** (`copy/part x`) — the parser folds `copy` + `/part` into a
+  `Value::Path` whose tail words are extracted as *leading refinements*
+  before dispatch.
+- **Spaced form** (`copy /part x`) — `collect_call_args` peeks the next
+  value; a matching `Value::Refinement` token is consumed and the
+  refinement is activated.
+
+`collect_call_args` walks positional params first, then `fd.refinements`
+in declaration order. An activated refinement collects its arg words; an
+absent refinement contributes nothing. The result is `args: &[Value]`
+plus a `RefineArgs` map of `name -> &[Value]`. `NativeFn` takes both:
+`fn(args, refs, env)`. Natives query `refs.has(&sym)` / `refs.get(&sym)`.
+Refinement-arg exhaustion raises `EvalError::Native` naming the offending
+refinement (e.g. `"copy: refinement /part expects 1 argument(s), got 0"`)
+rather than a generic arity message.
+
+### Path resolution (M19)
+`Value::Path` (and `GetPath`/`LitPath`/`SetPath`) is assembled by the
+parser when a word is immediately followed by `/word` tokens. Evaluation:
+- **Function-headed** (`copy/part …`) — the tail is treated as leading
+  refinements and dispatched via the refinement collector above.
+- **Object-headed** (`obj/field`) — `obj` resolves, then `select_object_path`
+  walks the tail. Each `Word` part selects an object slot; the final part
+  may be a method call if the selected value is a `Func` and trailing
+  block args are available.
+- **Data-headed** (`block/2`, `string/3`) — `walk_data_path` steps through
+  the tail: `Word` → object field select; `Integer` → 1-based `pick`
+  (negative from tail, out-of-range → `none`); `Paren` → evaluated in
+  place as the selector (`b/(1 + 1)`).
+
+Per-step errors (missing field, type mismatch) localize to the offending
+part's own span, not the whole path's. `SetPath` (`obj/field: value`)
+walks to the second-to-last part, then writes the evaluated RHS into the
+final field (object slot) or index (`poke`).
+
+### Objects (M18)
+`Value::Object(Rc<RefCell<ObjectDef>>)` wraps an ordered word→value
+`Context` plus an optional prototype `parent`. `make object! [spec]`
+evaluates the spec block with `self` bound to a fresh context; set-words
+in the spec populate slots. Inheritance is copy-based: a child
+`make object! parent [...]` pre-seeds from the parent's words/values, then
+evaluates the spec (which may override). Method bodies bind to the
+object's context via the standard binding pass — no special binding
+variant. `in object 'word` returns a `Word` bound into the object's slot;
+`words-of`/`values-of`/`reflect` introspect it.
 
 ### Block vs Paren
 `eval` walks both `Block` and `Paren` the same way when entered explicitly.
@@ -339,8 +422,11 @@ inline or via its `Series`'s token span).
 ## Cross-cutting
 
 - **Span flow**: lex→parse→eval. Every source-origin `Value` carries its
-  token span; synthetic variants (`None`/`Logic`/`Func`/`Path`/`String8`)
-  carry none and fall back to the zero span.
+  token span; synthetic variants (`None`/`Logic`/`Func`/`String8`/`Error`/
+  `Object`) carry none and fall back to the zero span. Path-step errors
+  localize to the offending part's span; `load %file` parse errors fold
+  the loaded file's `file:line:col:` into the message body (the separate
+  source buffer isn't visible to the outer `render_error`).
 - **Symbol interning**: `Symbol(Rc<str>)` — `string_cache` was tried early
   on but dropped in favor of the simpler `Rc<str>` newtype (no profiling
   need surfaced).
@@ -350,10 +436,15 @@ inline or via its `Series`'s token span).
 - **No precedence parsing**: Red is prefix/eager, so the parser has no
   expression grammar — every value is one token (or one bracketed group).
 - **Printer round-trip gaps (POC)**: `Func` molds as `#[function]`,
-  `String8` as `#{hex}`, and `NaN`/`inf` floats have no lexer literal — none
-  reparse. The property test in `red-core/tests/property.rs` excludes these
-  variants. Positioned series (`index != 0`) also don't round-trip to their
-  head form (mold renders from the cursor).
+  `String8` as `#{hex}`, `Error` as `make error! "..."`, and `NaN`/`inf`
+  floats have no lexer literal — none reparse. The property test in
+  `red-core/tests/property.rs` excludes these variants (and `Object`,
+  which is not source-origin). Positioned series (`index != 0`) also
+  don't round-trip to their head form (mold renders from the cursor).
+- **Deferred to v0.3+** (acknowledged, not built): `char!`, `map!`,
+  `pair!`, `tuple!`, `date!`, `bitset!`, modules/`import`, error values
+  as fully first-class data, `compose`, the full port model, trig math,
+  and `parse` advanced rules (`collect`/`keep`/`match`/`case` flag).
 
 ## Testing touchpoints
 

@@ -1,5 +1,12 @@
 # Plan: Proof-of-Concept Red Clone in Rust
 
+> **Status (v0.2):** The original scope below (lexer/parser/evaluator/series/
+> binding/functions/`parse`) shipped as `v0.1.0-poc`. `plan2.md` extends it to
+> `v0.2.0` with refinements, type conversions, string natives, control-flow
+> expansion, math/bitwise, **objects**, **real paths**, and **file/shell I/O**.
+> This document has been updated to reflect the v0.2 value model and known-gap
+> list; `architecture.md` covers the new dispatch/path/object internals.
+
 ## Goals
 - Lexer → parser → tree-walking evaluator for a small Red subset
 - `Red []` header convention, stdout-only I/O
@@ -69,12 +76,16 @@ enum Binding {
 
 struct FuncDef {
     params: Vec<Symbol>,
+    refinements: Vec<(Symbol, Vec<Symbol>)>,  // (refinement word, its arg words) — M13
+    locals: Vec<Symbol>,                      // explicit <local> words for `function` — M16
     body: Series,
     ctx: Context,            // definition context (parent for lookups)
-    native: Option<fn(&[Value], &mut Env) -> Result<Value, EvalError>>,
+    native: Option<NativeFn>,
     variadic: bool,
     infix: bool,
 }
+
+type NativeFn = fn(&[Value], &RefineArgs, &mut Env) -> Result<Value, EvalError>;
 
 enum Value {
     None,
@@ -88,9 +99,23 @@ enum Value {
     LitWord { sym: Symbol, span: Span },     // 'foo
     Block { series: Series, span: Span },    // [...] — code is data
     Paren { series: Series, span: Span },    // (...)
-    Func(Rc<FuncDef>),
-    Path(Vec<Value>),                        // foo/bar (simple select-on-block only in POC)
-    String8(Vec<u8>),                        // binary #"..." (optional, skip in POC)
+    Func(Rc<FuncDef>),                        // synthetic — no span
+    Path { parts: Vec<Value>, span: Span },              // foo/bar      — M19
+    GetPath { parts: Vec<Value>, span: Span },           // :foo/bar     — M19
+    LitPath { parts: Vec<Value>, span: Span },           // 'foo/bar     — M19
+    SetPath { parts: Vec<Value>, span: Span },           // obj/field:   — M19
+    Refinement { sym: Symbol, span: Span },              // /foo         — M13
+    File { path: Rc<str>, span: Span },                  // %foo/bar     — M20
+    Url { url: Rc<str>, span: Span },                    // http://…     — M20
+    String8(Vec<u8>),                        // binary! (POC stub — deferred)
+    Error(Rc<ErrorValue>),                   // caught error value — M16
+    Object(Rc<RefCell<ObjectDef>>),          // make object! — M18 (synthetic, no span)
+}
+
+struct ObjectDef {
+    ctx: Rc<Context>,
+    parent: Option<Rc<RefCell<ObjectDef>>>,
+    self_word: Symbol,
 }
 ```
 
@@ -161,10 +186,16 @@ binding, not just dynamic lookup.
   (Red-style "has no value") rather than falling back to a global chain.
 - `bind`, `use`, `in`, `value?`, `get`, `set` natives to manipulate bindings
   explicitly.
-- Known gap: **objects** (`make object!`, `object` context inheritance) are
-  out of scope; only the user context + function contexts exist.
+- Known gap: **objects** (`make object!`, `object` context inheritance) —
+  implemented in v0.2 (M18): `Value::Object`, `make object!`/`object`/
+  `context`, prototype inheritance, `in`, `words-of`/`values-of`/`reflect`,
+  `self` reference.
 - Known gap: **closures** (`closure!`) deferred; `func` uses shallow copy of
   args on each call.
+- Known gap (v0.3): `char!`, `map!`, `pair!`, `tuple!`, `date!`, `bitset!`,
+  full `binary!`, modules/`import`, error values as first-class data,
+  `compose`, the full port model, trig math, and `parse` advanced rules
+  (`collect`/`keep`/`match`/`case` flag) remain deferred. See `plan2.md`.
 
 ### Spans
 Each `Block`/`Paren` retains the span of its `[...]`/`(...)` delimiters;
@@ -180,8 +211,17 @@ for `bind` to report unbound words with a location.
 - Iteration: `foreach` `forall` `while` `until` (plus `loop`/`repeat`).
 - Binding: `bind` `use` `in` `value?` `get` `set`.
 - Functions: `func` `does` `make` `function?` `return` (local).
-- Optional/deferred: `compose`, objects, closures,
-  paths beyond simple `select`-on-block. (`parse` is in scope — see "Dialects".)
+- Implemented in v0.2 (M13–M20): refinements (`/part`, `/case`, … as a
+  general dispatch mechanism), real paths (`obj/field`, `block/2`,
+  `set-path`), `Object`/`make object!`, `File`/`Url` literals + `read`/
+  `write`/`load`/`save`/`exists?`/`size?`/`modified?`/dir ops, type
+  conversions (`to-*`/`form`/`make`/`to`), string natives (`rejoin`/
+  `split`/`trim`/`replace`/`uppercase`/`lowercase`), control-flow
+  expansion (`switch`/`case`/`all`/`any`/`try`/`attempt`/`catch`/`throw`/
+  `function`/`comment`), math + bitwise (`//`/`abs`/`min`/`max`/`round`/
+  `random`/`power`/`and`/`or`/`xor`/`shift-*`), `call`/`shell` (gated).
+- Optional/deferred: `compose`, closures, `char!`/`map!`/`date!` (v0.3).
+  (`parse` is in scope — see "Dialects".)
 
 ## Dialects
 
