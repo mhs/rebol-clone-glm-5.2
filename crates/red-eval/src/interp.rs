@@ -965,6 +965,18 @@ fn resolve_word(
                 })
             }
         }
+        // Lexical bindings are set by the v0.3 compiler (M23) and resolved
+        // by the VM (M25); the tree-walker never sees them. If one reaches
+        // here it indicates a `bind`/`use`/`do`-on-data block that should
+        // have been routed to the walker — surface as a clear runtime error
+        // rather than silently misresolving.
+        Binding::Lexical(_, _) => Err(EvalError::Native {
+            message: format!(
+                "lexical binding for {:?} not yet supported in the tree-walker",
+                sym.as_str()
+            ),
+            span,
+        }),
     }
 }
 
@@ -998,6 +1010,15 @@ fn write_setword(
         }
         Binding::Unbound => Err(EvalError::UnboundWord {
             sym: sym.clone(),
+            span,
+        }),
+        // See `resolve_word`: lexical bindings are VM-only; the walker never
+        // writes through one. Surface as an error if reached.
+        Binding::Lexical(_, _) => Err(EvalError::Native {
+            message: format!(
+                "lexical binding for {:?} not yet supported in the tree-walker",
+                sym.as_str()
+            ),
             span,
         }),
     }

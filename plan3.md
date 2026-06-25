@@ -180,25 +180,54 @@ baseline to point at.
 
 ## Milestone 22 - IR + value-model prep
 
-- [ ] Create `crates/red-eval/src/vm/mod.rs` with submodules
+- [x] Create `crates/red-eval/src/vm/mod.rs` with submodules
       `ir.rs`, `compiler.rs`, `vm.rs`, `frame.rs`, `pool.rs`
-- [ ] Define `Instr` enum (all variants above, plus `Halt`)
-- [ ] Define `CompiledBlock { instrs: Rc<[Instr]>, pool: Rc<[Value]>,
+      (Ground truth: the IR *types* live in `crates/red-core/src/vm_ir.rs`
+      rather than `crates/red-eval/src/vm/ir.rs` so `FuncDef.compiled` (in
+      red-core) can name `CompiledBlock` without a crate dependency cycle —
+      same pattern as `Env`/`EvalError` living in `red-core/src/env.rs` with
+      `red-eval/src/context.rs` as a 9-line re-export shim. `crates/red-eval/
+      src/vm/ir.rs` is a 4-line `pub use red_core::vm_ir::{CompiledBlock,
+      Frame, Instr, disasm};`. The VM *machinery* (compiler/runtime/frame
+      manager/pool helpers) stays in `red-eval/src/vm/` as planned; only the
+      type definitions moved across the crate boundary.)
+- [x] Define `Instr` enum (all variants above, plus `Halt`)
+      (Ground truth: 22 variants in `crates/red-core/src/vm_ir.rs`. Indices
+      use `u32` rather than `usize` to keep the enum compact; `MakeFunc`
+      carries its freevar list inline as `Vec<Symbol>`.)
+- [x] Define `CompiledBlock { instrs: Rc<[Instr]>, pool: Rc<[Value]>,
       n_locals: usize, freevars: Vec<Symbol>, source_span: Span,
       needs_rebind: bool, arity: usize }`
-- [ ] Define `Frame { func: Option<Rc<FuncDef>>, locals: Vec<Value>,
+- [x] Define `Frame { func: Option<Rc<FuncDef>>, locals: Vec<Value>,
       depth: usize, block: CompiledBlock, pc: usize }`
-- [ ] Add `FuncDef::compiled: Option<Rc<CompiledBlock>>` lazily-filled cache
+- [x] Add `FuncDef::compiled: Option<Rc<CompiledBlock>>` lazily-filled cache
       (avoid a new public `Value` variant; keep compilation off the data model)
-- [ ] Add `FuncDef::freevars: Vec<Symbol>` field (lexical capture list)
-- [ ] Extend `Binding` with `Lexical(usize, usize)` = `(depth, slot)` for
+      (Ground truth: the outer `Rc` wrapper is retained per the plan text so
+      M27's cache-invalidation logic can use `Rc::ptr_eq` identity checks even
+      though `CompiledBlock` is already internally `Rc`-backed.)
+- [x] Add `FuncDef::freevars: Vec<Symbol>` field (lexical capture list)
+- [x] Extend `Binding` with `Lexical(usize, usize)` = `(depth, slot)` for
       statically-resolved words (keeps `Local`/`Func` for dynamic path)
-- [ ] Add `Binding::is_lexical()` / `as_lexical()` helpers
-- [ ] Inline `#[test]`: `Instr` round-trips through `Debug` + a tiny
+- [x] Add `Binding::is_lexical()` / `as_lexical()` helpers
+- [x] Inline `#[test]`: `Instr` round-trips through `Debug` + a tiny
       `disasm(block)` helper used by later tests
-- [ ] Inline `#[test]`: `CompiledBlock` clones cheaply (Rc-backed)
-- [ ] `cargo test --workspace` passes (no behavior change yet; new code
-      unused)
+      (Ground truth: `instr_debug_roundtrip` + `disasm_basic` tests in
+      `crates/red-core/src/vm_ir.rs`. `disasm` inlines pool values for
+      `Const` and emits one line per instr; later milestones' disassembler
+      tests and the `--disasm` CLI flag (M31) build on it.)
+- [x] Inline `#[test]`: `CompiledBlock` clones cheaply (Rc-backed)
+      (Ground truth: `compiled_block_clones_cheaply` asserts `Rc::ptr_eq` on
+      both `instrs` and `pool` after `clone()` so M27 can rely on the
+      pointer-identity property for cache invalidation.)
+- [x] `cargo test --workspace` passes (no behavior change yet; new code
+      unused). Also verified `cargo test --workspace --features red-eval/stats`
+      passes and `cargo build --workspace` emits no warnings. Every exhaustive
+      `match binding` site in `interp.rs` (`resolve_word`/`write_setword`),
+      `natives.rs` (`get`/`set_one`), and `object.rs` (`try_resolve_object`)
+      gained a `Binding::Lexical(_, _)` arm that surfaces as
+      `EvalError::Native` ("lexical binding not yet supported in the
+      tree-walker") — the walker never produces `Lexical` (M23 will, when
+      the VM is wired in M25), so reaching that arm indicates a routing bug.
 
 ## Milestone 23 - Lexical analyzer + free-variable pass
 

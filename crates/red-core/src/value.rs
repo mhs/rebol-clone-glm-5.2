@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 use crate::context::Context;
 use crate::env::NativeFn;
+use crate::vm_ir::CompiledBlock;
 
 /// Byte-offset span into the original source. Carried through lex → parse →
 /// eval so errors can point at the offending bytes.
@@ -84,12 +85,35 @@ impl Default for Series {
 ///   `env.call_stack.last().ctx` — the current call frame's per-call context
 ///   clone. Attached by `bind_function_body` (M9) for params and body-local
 ///   set-words. The index refers to a slot in the active call frame's `ctx`.
+/// - `Lexical(usize, usize)`: statically-resolved `(depth, slot)` pair for the
+///   v0.3 bytecode VM (M22+). `depth` is the lexical distance from the current
+///   frame to the defining frame; `slot` is the slot index in that frame's
+///   `locals`. Attached by the compile-time scope analyzer (M23); the
+///   tree-walker never produces or reads this variant.
 #[derive(Clone, Debug, Default)]
 pub enum Binding {
     #[default]
     Unbound,
     Local(Rc<Context>, usize),
     Func(usize),
+    Lexical(usize, usize),
+}
+
+impl Binding {
+    /// True iff this is a `Lexical(_, _)` binding (set by the v0.3 compiler).
+    pub fn is_lexical(&self) -> bool {
+        matches!(self, Binding::Lexical(_, _))
+    }
+
+    /// If this is a `Lexical(depth, slot)`, return `Some((depth, slot))`;
+    /// otherwise `None`.
+    pub fn as_lexical(&self) -> Option<(usize, usize)> {
+        if let Binding::Lexical(d, s) = self {
+            Some((*d, *s))
+        } else {
+            None
+        }
+    }
 }
 
 /// Function definition shared by `Value::Func`. Fields stubbed for Milestone 2:
@@ -120,6 +144,18 @@ pub struct FuncDef {
     /// refinements but before body-local SetWords, so they're usable even if
     /// the body never assigns them (they default to `none`).
     pub locals: Vec<Symbol>,
+    /// Lexical free-variable capture list (v0.3, M23). Words referenced inside
+    /// this function's body that resolve to an ancestor scope are listed here
+    /// so the VM can capture them at `MakeFunc` time (shallow capture; full
+    /// closures remain deferred). Populated by the compile-time scope analyzer;
+    /// empty for natives and for funcs created before M23 runs.
+    pub freevars: Vec<Symbol>,
+    /// Lazily-filled compiled-form cache (v0.3, M22+). `None` until the
+    /// bytecode compiler runs (M24), then `Some(Rc<CompiledBlock>)`. Retained
+    /// as `Rc` so pointer identity (`Rc::ptr_eq`) can drive cache invalidation
+    /// in M27 when `bind` mutates the body. Absent from the data model — a
+    /// `Block` passed as data is never compiled.
+    pub compiled: Option<Rc<CompiledBlock>>,
     pub body: Series,
     pub ctx: Context,
     pub native: Option<NativeFn>,

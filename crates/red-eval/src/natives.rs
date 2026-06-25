@@ -1138,6 +1138,18 @@ fn get_one(v: &Value, env: &mut Env, span: Span) -> Result<Value, EvalError> {
                 sym: sym.clone(),
                 span,
             }),
+            // Lexical bindings are VM-only; `get` is a runtime native that the
+            // walker executes, so reaching this arm means a block reached the
+            // walker with a lexical binding it shouldn't have. Treat like
+            // unbound for resolution purposes (best-effort) but surface the
+            // mismatch in the error path.
+            Binding::Lexical(_, _) => Err(EvalError::Native {
+                message: format!(
+                    "lexical binding for {:?} not yet supported in the tree-walker",
+                    sym.as_str()
+                ),
+                span,
+            }),
         },
         other => Err(EvalError::TypeError {
             expected: "word!",
@@ -1213,6 +1225,16 @@ fn set_one(v: &Value, val: Value, env: &mut Env) -> Result<(), EvalError> {
                     })
                 }
             }
+            // Lexical bindings are VM-only; `set` is a runtime native run by
+            // the walker, so this arm should not be reached. Surface as an
+            // error to catch any routing bug.
+            Binding::Lexical(_, _) => Err(EvalError::Native {
+                message: format!(
+                    "lexical binding for {:?} not yet supported in the tree-walker",
+                    sym.as_str()
+                ),
+                span: v.span_or_default(),
+            }),
         },
         other => Err(EvalError::TypeError {
             expected: "word!",

@@ -17,6 +17,7 @@ pub mod parse;
 pub mod path;
 pub mod series;
 pub mod strings;
+pub mod vm;
 
 pub use binding::{bind_pass, bind_pass_into};
 pub use context::{Binding, CallFrame, Context, Env, EvalError, FuncDef, NativeFn, RefineArgs};

@@ -133,6 +133,10 @@ fn try_resolve_object(v: &Value, env: &Env) -> Option<Rc<RefCell<ObjectDef>>> {
     let val = match binding {
         Binding::Local(ctx, idx) => ctx.slot_value(*idx),
         Binding::Func(idx) => env.call_stack.last()?.ctx.slot_value(*idx),
+        // Lexical bindings are VM-only; object construction runs on the
+        // walker, so a bound word here resolves via `Local`/`Func`/`Unbound`.
+        // Treat `Lexical` as unresolvable (no object there).
+        Binding::Lexical(_, _) => return None,
         Binding::Unbound => return None,
     };
     match val {
