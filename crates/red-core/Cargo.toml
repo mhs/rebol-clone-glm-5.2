@@ -3,5 +3,12 @@ name = "red-core"
 version = "0.2.0"
 edition = "2021"
 
+[features]
+# Optional interpreter instrumentation: `Env::max_frame_depth` (call-stack
+# high-water mark) and `Env::instr_count` (eval-loop iteration counter).
+# Zero-cost in release builds when off; the v0.3 VM milestones use these to
+# prove tail-call stack bounds and correlate VM-vs-walker instr counts.
+stats = []
+
 [dev-dependencies]
 proptest = "1"

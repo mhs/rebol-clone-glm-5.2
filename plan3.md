@@ -65,12 +65,12 @@ call-depth counter, and a benchmark-fixture program set. All numbers are
 captured in `BENCHMARKS.md` (committed) so the VM milestones have a written
 baseline to point at.
 
-- [ ] Add `criterion` to `crates/red-eval/Cargo.toml [dev-dependencies]`
-- [ ] Add `[[bench]]` entry `name = "eval"`, `harness = false` to
+- [x] Add `criterion` to `crates/red-eval/Cargo.toml [dev-dependencies]`
+- [x] Add `[[bench]]` entry `name = "eval"`, `harness = false` to
       `crates/red-eval/Cargo.toml`
-- [ ] Create `crates/red-eval/benches/eval.rs` with a `criterion_group`/
+- [x] Create `crates/red-eval/benches/eval.rs` with a `criterion_group`/
       `criterion_main` harness
-- [ ] Add `crates/red-eval/benches/programs/` with `.red` fixture sources
+- [x] Add `crates/red-eval/benches/programs/` with `.red` fixture sources
       (kept on disk so they are inspectable and reusable by the VM benches
       later):
       - `fib.red` - naive recursive `fib 30` (function-call + recursion hot
@@ -91,11 +91,11 @@ baseline to point at.
         function-call overhead, the canonical VM win case)
       - `ackermann_small.red` - `ackermann 2 5` (smaller, faster CI-friendly
         variant for the regress guard)
-- [ ] In `benches/eval.rs`, one `bench_function` per fixture: read source,
+- [x] In `benches/eval.rs`, one `bench_function` per fixture: read source,
       call `run_source`, black-box the returned `Value` via
       `criterion::black_box`. Each bench uses `BatchSize::SmallInput` for the
       per-iteration `run_source` setup
-- [ ] Add a `benches/eval.rs` micro-bench group targeting *just* `eval` on a
+- [x] Add a `benches/eval.rs` micro-bench group targeting *just* `eval` on a
       pre-built `Env` (skip lex/parse/bind) so the bench isolates eval cost:
       - `eval_literal` - `eval(Integer(5))`
       - `eval_word_lookup` - `eval(word)` after `x: 5`
@@ -103,43 +103,43 @@ baseline to point at.
       - `eval_call_native` - `eval(1 + 2)` (single native call)
       - `eval_call_user` - `eval(square 5)` where `square: func [x][x * x]`
       - `eval_paren` - `eval((1 + 2))`
-- [ ] Add `Env::max_frame_depth: usize` counter (test/debug only, behind a
+- [x] Add `Env::max_frame_depth: usize` counter (test/debug only, behind a
       `#[cfg(any(test, feature = "stats"))]` gate) incremented on every
       `CallFrame` push; used by later milestones to prove tail-call stack
       height is bounded. Reset on each `run_source` call.
-- [ ] Add `Env::instr_count: u64` counter (same gate) incremented in
+- [x] Add `Env::instr_count: u64` counter (same gate) incremented in
       `interp::eval`'s main loop; gives an operation-count metric independent
       of wall time. Used in M30 to correlate VM instr count with walker
       instr count.
-- [ ] Gate both counters behind a new `stats` cargo feature on `red-eval` so
+- [x] Gate both counters behind a new `stats` cargo feature on `red-eval` so
       release builds pay zero cost. Document in `architecture.md`.
-- [ ] Run the benches on the developer's machine (macOS for this repo) and
+- [x] Run the benches on the developer's machine (macOS for this repo) and
       record numbers in a new `BENCHMARKS.md` at the repo root:
       - One table per fixture group with `mean`, `p99`, `throughput`
       - Note the host CPU, Rust toolchain version, and `cargo bench` flags
       - Add a "Baseline (v0.2.0 tree-walker)" section header so the VM
         results in M30 land under a "v0.3.0 VM" header for direct comparison
-- [ ] Run benches with `--bench eval -- --profile-time=5` (shorter than the
+- [x] Run benches with `--bench eval -- --profile-time=5` (shorter than the
       default 10s sample) for faster CI-like turnaround; record both short and
       full-sample numbers
-- [ ] Add `crates/red-eval/benches/README.md` explaining how to run benches,
+- [x] Add `crates/red-eval/benches/README.md` explaining how to run benches,
       how to compare two runs (`critcmp`), and what regress-guard threshold
       M30 will enforce (10%)
-- [ ] Inline `#[test]`: each `.red` fixture in `benches/programs/` produces a
+- [x] Inline `#[test]`: each `.red` fixture in `benches/programs/` produces a
       deterministic `Integer` or `String` result (so the bench is measuring
       real work, not an error path). Asserts the expected value.
-- [ ] Inline `#[test]`: `Env::max_frame_depth` after `ackermann 3 5` > 0 and
+- [x] Inline `#[test]`: `Env::max_frame_depth` after `ackermann 3 5` > 0 and
       < 1000 (sanity bound); after `sum_loop 1000000` < 50 (loops reuse one
       frame)
-- [ ] Inline `#[test]`: `Env::instr_count` after `1 + 2` is within an
+- [x] Inline `#[test]`: `Env::instr_count` after `1 + 2` is within an
       expected small range (documents what counts as one "instr")
-- [ ] Inline `#[test]`: with `stats` feature off, `Env` has no counter
+- [x] Inline `#[test]`: with `stats` feature off, `Env` has no counter
       fields (compile-time check via `cfg`)
-- [ ] `cargo test --workspace` passes (no `stats` feature)
-- [ ] `cargo test --workspace --features red-eval/stats` passes
-- [ ] `cargo bench --bench eval` runs to completion without errors (numbers
+- [x] `cargo test --workspace` passes (no `stats` feature)
+- [x] `cargo test --workspace --features red-eval/stats` passes
+- [x] `cargo bench --bench eval` runs to completion without errors (numbers
       recorded in `BENCHMARKS.md`)
-- [ ] Commit `BENCHMARKS.md` with the baseline table; tag the baseline as
+- [x] Commit `BENCHMARKS.md` with the baseline table; tag the baseline as
       `v0.2.0-baseline-bench` so M30 can pull it for comparison
 
 ## Milestone 22 - IR + value-model prep

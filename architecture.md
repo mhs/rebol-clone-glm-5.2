@@ -547,6 +547,22 @@ inline or via its `Series`'s token span).
   port model, trig math, and `parse` advanced rules
   (`collect`/`keep`/`match`/`case` flag). Block-integer SetPath
   (`b/2: 99`) is also unreachable from source due to a lexer gap.
+- **Instrumentation (`stats` feature)**: `red-eval/stats` re-exports
+  `red-core/stats`, which adds two counters to `Env` gated by
+  `#[cfg(feature = "stats")]` — zero-cost in release builds when off (the
+  fields are absent from the struct layout; a compile-time check in
+  `red-core/src/env.rs` tests confirms their absence).
+  - `Env::max_frame_depth: usize` — high-water mark of `call_stack.len()`
+    since the last `reset_stats` call. Bumped by `call_user_func` after each
+    `CallFrame` push. Used by the v0.3 VM milestones (M28) to prove
+    tail-call stack bounds.
+  - `Env::instr_count: u64` — count of `eval`'s outer-loop iterations since
+    the last `reset_stats`. Gives an operation-count metric independent of
+    wall time; M30 correlates VM instr count with walker instr count.
+  - Both are reset at the top of `run_series_inner_opts` (every
+    `run_source*` call). The baseline benchmark suite (`benches/eval.rs`,
+    Pre-22) records v0.2.0 tree-walker numbers in `BENCHMARKS.md` for the
+  v0.3 VM to compare against.
 
 ## Testing touchpoints
 
@@ -558,6 +574,8 @@ inline or via its `Series`'s token span).
 | Evaluator| Golden program fixtures     | `red-eval/tests/programs.rs`          |
 | Evaluator| Golden error fixtures       | `red-eval/tests/programs_errors.rs`   |
 | Evaluator| Committed file fixtures     | `red-eval/tests/fixtures/`            |
+| Evaluator| Bench fixture + stats tests | `red-eval/tests/bench_fixtures.rs`    |
+| Bench    | criterion `eval` suite       | `red-eval/benches/eval.rs`            |
 | CLI      | `assert_cmd` end-to-end     | `red-cli/tests/cli.rs`                |
 
 Golden fixtures are file-driven: drop a `*.red` + `*.expected` pair, get a

@@ -44,6 +44,10 @@ pub fn eval(block: &Value, env: &mut Env) -> Result<Value, EvalError> {
     let data = series.data.borrow();
     let mut i = series.index;
     while i < data.len() {
+        #[cfg(feature = "stats")]
+        {
+            env.instr_count += 1;
+        }
         last = eval_expression(&data, &mut i, env)?;
     }
     Ok(last)
@@ -894,6 +898,10 @@ fn call_user_func(
         ctx: call_ctx,
         func: Some(Rc::clone(fd)),
     });
+    #[cfg(feature = "stats")]
+    {
+        env.record_frame_push();
+    }
     let body_block = Value::Block {
         series: fd.body.clone(),
         span: Span::new(0, 0),
@@ -1105,6 +1113,10 @@ fn run_series_inner_opts(
     let mut env = Env::new_with_output(ctx_rc, out);
     crate::natives::register_natives(&mut env);
     env.allow_shell = opts.allow_shell;
+    #[cfg(feature = "stats")]
+    {
+        env.reset_stats();
+    }
     // Populate system/options/args from CLI args.
     if !opts.args.is_empty() {
         let args_block = Series::new(opts.args.iter().map(|a| Value::string(a.clone())).collect());
