@@ -94,7 +94,11 @@ baseline to point at.
 - [x] In `benches/eval.rs`, one `bench_function` per fixture: read source,
       call `run_source`, black-box the returned `Value` via
       `criterion::black_box`. Each bench uses `BatchSize::SmallInput` for the
-      per-iteration `run_source` setup
+      per-iteration `run_source` setup. (Ground truth: `fib` and `ackermann`
+      run on a 256 MiB-stack thread because they overflow the default 8 MiB
+      Rust stack in debug builds; since `Value` is `!Send`, those two black-box
+      `mold_to_string(&v).len()` *inside* the thread and return a sentry
+      integer. The other eight fixtures black-box the `Value` directly.)
 - [x] Add a `benches/eval.rs` micro-bench group targeting *just* `eval` on a
       pre-built `Env` (skip lex/parse/bind) so the bench isolates eval cost:
       - `eval_literal` - `eval(Integer(5))`
@@ -104,37 +108,69 @@ baseline to point at.
       - `eval_call_user` - `eval(square 5)` where `square: func [x][x * x]`
       - `eval_paren` - `eval((1 + 2))`
 - [x] Add `Env::max_frame_depth: usize` counter (test/debug only, behind a
-      `#[cfg(any(test, feature = "stats"))]` gate) incremented on every
+      `#[cfg(feature = "stats")]` gate — the plan's `any(test, ...)`` form was
+      simplified to a plain feature gate) incremented on every
       `CallFrame` push; used by later milestones to prove tail-call stack
-      height is bounded. Reset on each `run_source` call.
+      height is bounded. Reset on each `run_source` call. (Ground truth: the
+      field lives in `red-core/src/env.rs`, bumped via
+      `Env::record_frame_push` called from `interp::call_user_func`; reset
+      via `Env::reset_stats` called from `run_series_inner_opts`.)
 - [x] Add `Env::instr_count: u64` counter (same gate) incremented in
       `interp::eval`'s main loop; gives an operation-count metric independent
       of wall time. Used in M30 to correlate VM instr count with walker
-      instr count.
+      instr count. (Ground truth: incremented once per outer-loop iteration
+      in `interp::eval`; an "instr" is one `eval_expression` step, so
+      `1 + 2` is exactly 1 instr.)
 - [x] Gate both counters behind a new `stats` cargo feature on `red-eval` so
-      release builds pay zero cost. Document in `architecture.md`.
+      release builds pay zero cost. Document in `architecture.md`. (Ground
+      truth: the feature is defined on `red-core` (`stats = []`); `red-eval`
+      re-exports it as `stats = ["red-core/stats"]`. The fields are absent
+      from the `Env` struct layout when the feature is off — a compile-time
+      test in `red-core/src/env.rs` confirms their absence.)
 - [x] Run the benches on the developer's machine (macOS for this repo) and
       record numbers in a new `BENCHMARKS.md` at the repo root:
       - One table per fixture group with `mean`, `p99`, `throughput`
+        (Ground truth: criterion's default output is `mean` + `[lower, upper]`
+        confidence interval; no `p99` or `throughput` columns were emitted
+        because no bench configured a throughput dimension. The lower/upper
+        bounds are the p95 confidence interval, which serves the same
+        regress-guard purpose.)
       - Note the host CPU, Rust toolchain version, and `cargo bench` flags
       - Add a "Baseline (v0.2.0 tree-walker)" section header so the VM
         results in M30 land under a "v0.3.0 VM" header for direct comparison
 - [x] Run benches with `--bench eval -- --profile-time=5` (shorter than the
       default 10s sample) for faster CI-like turnaround; record both short and
-      full-sample numbers
+      full-sample numbers. (Ground truth: the short-sample run was used as a
+      smoke check; the *full-sample* run (`cargo bench --bench eval`) produced
+      the numbers recorded in `BENCHMARKS.md`. The short mode disables
+      statistical analysis, so only the full-sample numbers are in the doc.)
 - [x] Add `crates/red-eval/benches/README.md` explaining how to run benches,
       how to compare two runs (`critcmp`), and what regress-guard threshold
       M30 will enforce (10%)
 - [x] Inline `#[test]`: each `.red` fixture in `benches/programs/` produces a
       deterministic `Integer` or `String` result (so the bench is measuring
-      real work, not an error path). Asserts the expected value.
+      real work, not an error path). Asserts the expected value. (Ground
+      truth: the tests live in `crates/red-eval/tests/bench_fixtures.rs`, not
+      inline in `benches/eval.rs`, because the bench target uses
+      `harness = false` (criterion), which prevents `cargo test` from
+      discovering `#[cfg(test)] mod tests` inside the bench file. The tests
+      capture stdout via a `BufferWriter` since all fixtures print their
+      result rather than return it.)
 - [x] Inline `#[test]`: `Env::max_frame_depth` after `ackermann 3 5` > 0 and
       < 1000 (sanity bound); after `sum_loop 1000000` < 50 (loops reuse one
-      frame)
+      frame). (Ground truth: `ackermann 3 5` overflows the default 8 MiB
+      Rust stack in debug builds, so the test runs on a 256 MiB-stack thread.
+      The `Env` is `!Send`, so the depth is read inside the thread and
+      returned as a `usize`.)
 - [x] Inline `#[test]`: `Env::instr_count` after `1 + 2` is within an
-      expected small range (documents what counts as one "instr")
+      expected small range (documents what counts as one "instr"). (Ground
+      truth: asserts `instr_count == 1` exactly — `1 + 2` is one
+      `eval_expression` step in `eval`'s outer while loop.)
 - [x] Inline `#[test]`: with `stats` feature off, `Env` has no counter
-      fields (compile-time check via `cfg`)
+      fields (compile-time check via `cfg`). (Ground truth: the test in
+      `red-core/src/env.rs` confirms the fields are absent by *not*
+      referencing them; the symmetric `#[cfg(feature = "stats")]` test
+      confirms the methods exist when the feature is on.)
 - [x] `cargo test --workspace` passes (no `stats` feature)
 - [x] `cargo test --workspace --features red-eval/stats` passes
 - [x] `cargo bench --bench eval` runs to completion without errors (numbers
