@@ -581,6 +581,44 @@ fn rebind_inner(
 }
 
 // ---------------------------------------------------------------------------
+// VM dispatch helpers (M26)
+// ---------------------------------------------------------------------------
+
+/// True if any `Word`/`SetWord`/`GetWord` in `series` (recursing into nested
+/// `Block`/`Paren`) carries a `Binding::Local(ctx, _)` whose `ctx` is not
+/// `user_ctx` — i.e. a foreign binding installed by `bind`/`use` against a
+/// child/object context. Such blocks must fall back to the tree-walker when
+/// `Env::mode == Vm`, because the VM's lexical addressing can't resolve
+/// `Binding::Local` to an arbitrary context (only to `user_ctx` globals or
+/// function-local frames). `Binding::Lexical`/`Unbound`/`Func` are VM-safe.
+///
+/// Used by `interp::dispatch_block` to pick walker vs. VM for plain `Block`
+/// values passed to `do`/`reduce`/loop natives (which carry no cached
+/// `CompiledBlock` — M27 adds the Env-level cache).
+pub(crate) fn has_foreign_bindings(series: &Series, user_ctx: &Rc<Context>) -> bool {
+    let data = series.data.borrow();
+    data.iter().any(|v| has_foreign_binding_value(v, user_ctx))
+}
+
+fn has_foreign_binding_value(v: &Value, user_ctx: &Rc<Context>) -> bool {
+    match v {
+        Value::Word { binding, .. }
+        | Value::SetWord { binding, .. }
+        | Value::GetWord { binding, .. } => {
+            if let Binding::Local(ctx, _) = binding {
+                !Rc::ptr_eq(ctx, user_ctx)
+            } else {
+                false
+            }
+        }
+        Value::Block { series, .. } | Value::Paren { series, .. } => {
+            has_foreign_bindings(series, user_ctx)
+        }
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -824,5 +862,61 @@ mod tests {
         // `if n > 0 [n]` returns `n` when truthy; the trailing `0` is the
         // body's last value, so the call evaluates to 0.
         assert_eq!(mold_to_string(&val("f: func [n][if n > 0 [n] 0] f 5")), "0");
+    }
+
+    // -----------------------------------------------------------------------
+    // M26: `has_foreign_bindings` — drives `dispatch_block`'s walker fallback
+    // -----------------------------------------------------------------------
+
+    /// A block whose words are `Unbound` has no foreign bindings — the VM
+    /// (lexical addressing) can attempt it; `LoadDynamic` resolves unbound
+    /// words at runtime.
+    #[test]
+    fn foreign_bindings_unbound_is_not_foreign() {
+        let body = load_source("[x y z]").expect("parse");
+        let user_ctx = Rc::new(Context::new());
+        assert!(!has_foreign_bindings(&body, &user_ctx));
+    }
+
+    /// A block whose words are bound to `user_ctx` (via `bind_pass`) is NOT
+    /// foreign — the VM addresses them as globals (`LoadGlobal`/`SetGlobal`).
+    #[test]
+    fn foreign_bindings_user_ctx_is_not_foreign() {
+        let body = load_source("[x]").expect("parse");
+        let ctx = Context::new();
+        install_constants(&ctx);
+        let ctx_rc = bind_pass(&body, ctx);
+        // `x` was allocated a slot in `ctx_rc` and bound as
+        // `Binding::Local(ctx_rc, 0)` — same context, so not foreign.
+        assert!(!has_foreign_bindings(&body, &ctx_rc));
+    }
+
+    /// A block rebound by `bind` to a DIFFERENT context (simulating `use`'s
+    /// child context) IS foreign — `dispatch_block` must route it to the
+    /// walker because the VM's lexical addressing can't resolve
+    /// `Binding::Local(child_ctx, _)`.
+    #[test]
+    fn foreign_bindings_other_ctx_is_foreign() {
+        let body = load_source("[x]").expect("parse");
+        let user_ctx = Rc::new(Context::new());
+        // Bind `x` to a *different* context (simulating `use`'s child).
+        let child_ctx = Rc::new(Context::new());
+        child_ctx.slot_index(Symbol::new("x"));
+        rebind_to_context(&body, &child_ctx, &[Symbol::new("x")]);
+        assert!(has_foreign_bindings(&body, &user_ctx));
+        // And symmetrically: checking against the child ctx says not foreign.
+        assert!(!has_foreign_bindings(&body, &child_ctx));
+    }
+
+    /// Foreign bindings recurse into nested blocks: `[x [y]]` where `y` is
+    /// foreign (but `x` is on `user_ctx`) still reports foreign.
+    #[test]
+    fn foreign_bindings_recurse_into_nested_blocks() {
+        let body = load_source("[x [y]]").expect("parse");
+        let user_ctx = Rc::new(Context::new());
+        let child_ctx = Rc::new(Context::new());
+        child_ctx.slot_index(Symbol::new("y"));
+        rebind_to_context(&body, &child_ctx, &[Symbol::new("y")]);
+        assert!(has_foreign_bindings(&body, &user_ctx));
     }
 }

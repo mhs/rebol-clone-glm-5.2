@@ -71,6 +71,32 @@ pub fn run(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
     vm.run_loop()
 }
 
+/// Run a compiled block in "reduce mode": every expression's result stays on
+/// the stack (the block was compiled with `compile_block_reduce`, which emits
+/// no `Pop` between expressions). After the block's `Return`, collect the
+/// remaining stack into a `Value::Block` — matching the walker's `reduce`
+/// semantics (one entry per expression). Used by the `reduce` native in VM
+/// mode (M26).
+pub fn run_reduce(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
+    let natives_by_idx = build_natives_by_idx(env);
+    let mut vm = Vm {
+        env,
+        frames: Vec::new(),
+        stack: Vec::new(),
+        natives_by_idx,
+        ref_marks: Vec::new(),
+        pending_refs: Vec::new(),
+    };
+    vm.frames.push(Frame {
+        func: None,
+        locals: Vec::new(),
+        depth: 0,
+        block,
+        pc: 0,
+    });
+    vm.run_loop_reduce()
+}
+
 /// Build a `Vec<Rc<FuncDef>>` indexed by the same `u32` indices the
 /// compiler's `NativeRegistry::from_env` assigned. Iterates `env.natives` in
 /// HashMap order — stable within a single process run, matching the
@@ -345,6 +371,255 @@ impl<'env> Vm<'env> {
         }
     }
 
+    /// Reduce-mode dispatch loop. Identical to `run_loop` except the
+    /// top-level `Return` collects the *entire* remaining stack into a
+    /// `Value::Block` (rather than popping one value). Used by `run_reduce`
+    /// for the `reduce` native in VM mode — the block was compiled with
+    /// `compile_block_reduce` (no `Pop` between expressions), so the stack
+    /// holds one value per expression. Nested `Return`s (from user-func calls
+    /// inside the reduce block) behave as in `run_loop`.
+    fn run_loop_reduce(&mut self) -> Result<Value, EvalError> {
+        loop {
+            let frame_idx = self.frames.len() - 1;
+            let pc = self.frames[frame_idx].pc;
+            let block = self.frames[frame_idx].block.clone();
+            let instrs = block.instrs.clone();
+            if pc >= instrs.len() {
+                return Ok(self.collect_reduce_stack());
+            }
+            let instr = instrs[pc].clone();
+            self.frames[frame_idx].pc = pc + 1;
+            drop(block);
+            match instr {
+                Instr::Return => {
+                    self.frames.pop();
+                    if self.frames.is_empty() {
+                        // Top-level Return in reduce mode: collect the whole
+                        // stack into a Block. (Each expression left its result;
+                        // the final expression's result is also on the stack,
+                        // so we don't pop-and-discard like `run_loop` does.)
+                        return Ok(self.collect_reduce_stack());
+                    }
+                    // Nested Return (from a user-func called inside the
+                    // reduce block): push the return value onto the caller's
+                    // stack, matching `run_loop`.
+                    let result = self.stack.pop().unwrap_or(Value::None);
+                    self.stack.push(result);
+                }
+                Instr::Halt => {
+                    return Err(EvalError::Native {
+                        message: "VM reached Halt (block needs_rebind — use walker)"
+                            .into(),
+                        span: Span::new(0, 0),
+                    });
+                }
+                _ => {
+                    // Delegate all other instrs to `run_loop`'s dispatch by
+                    // re-emitting the instr. We do this by falling back to a
+                    // shared `dispatch_instr` helper — but to avoid a large
+                    // refactor, we instead reconstruct a single-step: push the
+                    // instr back via a synthetic one-instr frame would be
+                    // wrong. The cleanest approach is to share the match.
+                    self.dispatch_instr(instr, frame_idx)?;
+                }
+            }
+        }
+    }
+
+    /// Collect the current stack into a `Value::Block`, leaving the stack
+    /// empty. Used by `run_loop_reduce` at top-level `Return`.
+    fn collect_reduce_stack(&mut self) -> Value {
+        let results: Vec<Value> = self.stack.drain(..).collect();
+        Value::block(red_core::value::Series::new(results))
+    }
+
+    /// Dispatch a single instr (shared core between `run_loop` and
+    /// `run_loop_reduce`). Extracted so reduce mode can reuse every arm
+    /// except `Return`/`Halt`.
+    fn dispatch_instr(&mut self, instr: Instr, frame_idx: usize) -> Result<(), EvalError> {
+        match instr {
+            Instr::Const(i) => {
+                let v = block_pool(&self.frames[frame_idx].block, i as usize);
+                self.stack.push(v);
+            }
+            Instr::LoadLocal(d, slot) => {
+                let len = self.frames.len();
+                let src = &self.frames[len - 1 - d as usize].locals;
+                let v = src.get(slot as usize).cloned().unwrap_or(Value::None);
+                self.stack.push(v);
+            }
+            Instr::LoadGlobal(slot) => {
+                let v = self.env.user_ctx.slot_value(slot as usize);
+                self.stack.push(v);
+            }
+            Instr::LoadDynamic(sym) => {
+                let v = if let Some(val) = self.env.user_ctx.get(&sym) {
+                    val
+                } else if let Some(fd) = self.env.natives.get(&sym) {
+                    Value::Func(Rc::clone(fd))
+                } else {
+                    return Err(EvalError::UnboundWord {
+                        sym,
+                        span: Span::new(0, 0),
+                    });
+                };
+                self.stack.push(v);
+            }
+            Instr::SetLocal(d, slot) => {
+                let val = self.stack.pop().unwrap_or(Value::None);
+                let len = self.frames.len();
+                let locals = &mut self.frames[len - 1 - d as usize].locals;
+                if (slot as usize) >= locals.len() {
+                    locals.resize(slot as usize + 1, Value::None);
+                }
+                locals[slot as usize] = val.clone();
+                self.stack.push(val);
+            }
+            Instr::SetGlobal(slot) => {
+                let val = self.stack.pop().unwrap_or(Value::None);
+                self.env.user_ctx.set_slot(slot as usize, val.clone());
+                self.stack.push(val);
+            }
+            Instr::SetDynamic(sym) => {
+                let val = self.stack.pop().unwrap_or(Value::None);
+                self.env.user_ctx.set(sym, val.clone());
+                self.stack.push(val);
+            }
+            Instr::Call(native_idx, argc) => {
+                let fd = self
+                    .natives_by_idx
+                    .get(native_idx as usize)
+                    .cloned()
+                    .ok_or_else(|| EvalError::Native {
+                        message: format!("VM: bad native index {native_idx}"),
+                        span: Span::new(0, 0),
+                    })?;
+                let f = fd.native.ok_or_else(|| EvalError::Native {
+                    message: format!("VM: native {native_idx} has no handler"),
+                    span: Span::new(0, 0),
+                })?;
+                let len = self.stack.len();
+                if argc as usize > len {
+                    return Err(EvalError::Arity {
+                        native: Symbol::new("<native>"),
+                        expected: argc as usize,
+                        got: len,
+                        span: Span::new(0, 0),
+                    });
+                }
+                let args: Vec<Value> = self.stack[len - argc as usize..].to_vec();
+                let refs = RefineArgs::from_pairs(std::mem::take(&mut self.pending_refs));
+                let result = f(&args, &refs, self.env);
+                self.stack.truncate(len - argc as usize);
+                match result {
+                    Ok(v) => self.stack.push(v),
+                    Err(EvalError::Return(v)) => {
+                        while let Some(frame) = self.frames.last() {
+                            let is_func = frame.func.is_some();
+                            self.frames.pop();
+                            if is_func {
+                                break;
+                            }
+                        }
+                        if self.frames.is_empty() {
+                            return Err(EvalError::Return(v));
+                        }
+                        self.stack.push(v);
+                    }
+                    Err(EvalError::Quit(code)) => {
+                        while self.frames.pop().is_some() {}
+                        return Err(EvalError::Quit(code));
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            Instr::CallUser(slot, argc) => {
+                self.call_user(slot as usize, argc as usize)?;
+            }
+            Instr::TailCall(slot, argc) => {
+                self.call_user(slot as usize, argc as usize)?;
+            }
+            Instr::TailReenter(slot, argc) => {
+                self.call_user(slot as usize, argc as usize)?;
+            }
+            Instr::Jump(target) => {
+                self.frames[frame_idx].pc = target as usize;
+            }
+            Instr::JumpIfFalse(target) => {
+                let cond = self.stack.pop().unwrap_or(Value::None);
+                if !is_truthy(&cond) {
+                    self.frames[frame_idx].pc = target as usize;
+                }
+            }
+            Instr::Pop => {
+                self.stack.pop();
+            }
+            Instr::MakeFunc(spec_idx, body_idx, freevars) => {
+                let spec_val = block_pool(&self.frames[frame_idx].block, spec_idx as usize);
+                let body_val = block_pool(&self.frames[frame_idx].block, body_idx as usize);
+                let fd = self.build_func_def(spec_val, body_val, freevars)?;
+                self.stack.push(Value::Func(Rc::new(fd)));
+            }
+            Instr::EnterBlock => {}
+            Instr::DropTo(n) => {
+                self.stack.truncate(n as usize);
+            }
+            Instr::GetPath => {
+                let path = self.stack.pop().unwrap_or(Value::None);
+                let (parts, span) = match &path {
+                    Value::Path { parts, span } => (parts.clone(), *span),
+                    Value::GetPath { parts, span } => (parts.clone(), *span),
+                    other => {
+                        return Err(EvalError::TypeError {
+                            expected: "path! or get-path!",
+                            found: crate::natives::type_name(other),
+                            span: other.span_or_default(),
+                        });
+                    }
+                };
+                let v = eval_get_path(&parts, span, self.env)?;
+                self.stack.push(v);
+            }
+            Instr::SetPath => {
+                let rhs = self.stack.pop().unwrap_or(Value::None);
+                let path = self.stack.pop().unwrap_or(Value::None);
+                let (parts, span) = match &path {
+                    Value::SetPath { parts, span } => (parts.clone(), *span),
+                    Value::Path { parts, span } => (parts.clone(), *span),
+                    other => {
+                        return Err(EvalError::TypeError {
+                            expected: "set-path! or path!",
+                            found: crate::natives::type_name(other),
+                            span: other.span_or_default(),
+                        });
+                    }
+                };
+                set_path_value(&parts, rhs.clone(), self.env, span)?;
+                self.stack.push(rhs);
+            }
+            Instr::MarkRefine(sym) => {
+                self.ref_marks.push((sym, self.stack.len()));
+            }
+            Instr::EndRefine => {
+                let (sym, height) = self
+                    .ref_marks
+                    .pop()
+                    .ok_or_else(|| EvalError::Native {
+                        message: "EndRefine without MarkRefine".into(),
+                        span: Span::new(0, 0),
+                    })?;
+                let args: Vec<Value> = self.stack[height..].to_vec();
+                self.stack.truncate(height);
+                self.pending_refs.push((sym, args));
+            }
+            Instr::Return | Instr::Halt => {
+                // Should not reach here via `dispatch_instr` — `run_loop` and
+                // `run_loop_reduce` handle these in their own match arms.
+            }
+        }
+        Ok(())
+    }
+
     /// Invoke a user function stored in a slot. Reads `Value::Func(fd)` from
     /// the slot (global or local depending on the current frame's depth),
     /// pops `argc` args, lazily compiles the body if needed, pushes a new
@@ -564,10 +839,40 @@ mod tests {
     use red_core::parser::load_source;
     use red_core::printer::mold_to_string;
     use red_core::value::Value;
-    use red_core::{Context, Env};
+    use red_core::{Context, Env, EvalMode};
+    use std::cell::RefCell;
+    use std::io::Write;
+
+    /// Owning `Write` sink backed by `Rc<RefCell<Vec<u8>>>` so the test can
+    /// read captured stdout after the `Env` (which owns the boxed writer) is
+    /// dropped. Mirrors `tests/bench_fixtures.rs`'s `BufferWriter`.
+    #[derive(Clone)]
+    struct BufferWriter {
+        buf: Rc<RefCell<Vec<u8>>>,
+    }
+
+    impl BufferWriter {
+        fn new() -> Self {
+            Self {
+                buf: Rc::new(RefCell::new(Vec::new())),
+            }
+        }
+    }
+
+    impl Write for BufferWriter {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.buf.borrow_mut().extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     /// Parse + bind + register natives, then return the compiled block + env
     /// ready for `run`. Mirrors the walker's `run_series_inner_opts` setup.
+    /// `Env::mode` is set to `Vm` so `dispatch_block` (used by natives that
+    /// recurse into block evaluation) routes to the VM (M26).
     fn compile_for_vm(src: &str) -> (CompiledBlock, Env) {
         let body = load_source(src).expect("parse failed");
         let ctx = Context::new();
@@ -575,10 +880,28 @@ mod tests {
         let ctx_rc = bind_pass(&body, ctx);
         let mut env = Env::new(Rc::clone(&ctx_rc));
         register_natives(&mut env);
+        env.mode = EvalMode::Vm;
         let registry = NativeRegistry::from_env(&env);
         let mut scope = Scope::root(&ctx_rc);
         let block = compile_block(&body, &mut scope, &registry).expect("compile failed");
         (block, env)
+    }
+
+    /// Like `compile_for_vm` but with a capturing `BufferWriter` for stdout.
+    fn compile_for_vm_captured(src: &str) -> (CompiledBlock, Env, Rc<RefCell<Vec<u8>>>) {
+        let body = load_source(src).expect("parse failed");
+        let ctx = Context::new();
+        install_constants(&ctx);
+        let ctx_rc = bind_pass(&body, ctx);
+        let writer = BufferWriter::new();
+        let buf = writer.buf.clone();
+        let mut env = Env::new_with_output(Rc::clone(&ctx_rc), Box::new(writer));
+        register_natives(&mut env);
+        env.mode = EvalMode::Vm;
+        let registry = NativeRegistry::from_env(&env);
+        let mut scope = Scope::root(&ctx_rc);
+        let block = compile_block(&body, &mut scope, &registry).expect("compile failed");
+        (block, env, buf)
     }
 
     /// Run `src` through the VM and return the result.
@@ -630,5 +953,84 @@ mod tests {
     fn vm_runs_fact() {
         let v = run_vm("fact: func [n][either n <= 1 [1][n * fact n - 1]] fact 5");
         assert!(matches!(v, Value::Integer { n: 120, .. }), "got {}", mold_to_string(&v));
+    }
+
+    // -----------------------------------------------------------------------
+    // M26: native bridge + refinement dispatch on the VM
+    // -----------------------------------------------------------------------
+
+    /// `copy/part [1 2 3] 2` runs through the VM with refinement dispatch:
+    /// the compiler emits `MarkRefine("part")` + the arg + `EndRefine`, and
+    /// the VM assembles `RefineArgs` from the stack marks before invoking the
+    /// `copy` native. (plan3.md:547)
+    #[test]
+    fn vm_copy_part() {
+        let v = run_vm("copy/part [1 2 3] 2");
+        assert_eq!(mold_to_string(&v), "[1 2]");
+    }
+
+    /// `find/case [a A b] 'A` runs through the VM with a zero-arity
+    /// refinement (`/case`). The `MarkRefine("case")` + `EndRefine` region
+    /// carries no args; `find` sees `refs.has("case")`. (plan3.md:548)
+    #[test]
+    fn vm_find_case() {
+        let v = run_vm("find/case [a A b] 'A");
+        assert_eq!(mold_to_string(&v), "[A b]");
+    }
+
+    /// `foreach x [1 2 3][print x]` -> "1\n2\n3\n" via VM. The `foreach`
+    /// native recurses into its body block through `dispatch_block`, which
+    /// (with `Env::mode == Vm`) compiles the body and runs it on the VM each
+    /// iteration. (plan3.md:549)
+    #[test]
+    fn vm_foreach_print() {
+        let (block, mut env, buf) = compile_for_vm_captured("foreach x [1 2 3][print x]");
+        let v = run(block, &mut env).expect("VM run failed");
+        assert!(matches!(v, Value::None), "got {}", mold_to_string(&v));
+        assert_eq!(buf.borrow().as_slice(), b"1\n2\n3\n");
+    }
+
+    /// `switch 2 [1 ["a"] 2 ["b"]]` -> `"b"` via VM. The `switch` native
+    /// evaluates the matched body block through `dispatch_block` (VM path).
+    /// (plan3.md:550)
+    #[test]
+    fn vm_switch() {
+        let v = run_vm("switch 2 [1 [\"a\"] 2 [\"b\"]]");
+        match v {
+            Value::String { s, .. } => assert_eq!(&*s, "b"),
+            other => panic!("expected string!, got {}", mold_to_string(&other)),
+        }
+    }
+
+    /// `do bind [x: 5] 'x` runs through the VM. `bind` in the POC rebinds words
+    /// to `user_ctx` (not a foreign context), so `has_foreign_bindings` returns
+    /// false and `dispatch_block` routes the `do`'d block to the VM. The VM
+    /// compiles `[x: 5]` (SetGlobal + Const) and runs it, setting `x` to 5;
+    /// the trailing `x` loads it back. (plan3.md:551)
+    ///
+    /// Note: the plan3 "falls back to walker" qualifier assumed `bind` targets
+    /// a foreign context. In the POC, `bind` always targets `user_ctx`, so the
+    /// VM handles it directly. The walker-fallback path (for blocks with
+    /// foreign `Binding::Local` from a non-`user_ctx` context, e.g. `use`'s
+    /// child context) is unit-tested via `has_foreign_bindings` in `binding.rs`
+    /// — it can't be exercised end-to-end from VM-compilable Red source
+    /// because `use`/`make object!` forms are flagged `needs_rebind` at the
+    /// block level by the M23 analyzer, producing `[Halt]` stubs the VM
+    /// refuses to run.
+    #[test]
+    fn vm_do_bind() {
+        let v = run_vm("x: 0 do bind [x: 5] 'x x");
+        assert!(matches!(v, Value::Integer { n: 5, .. }), "got {}", mold_to_string(&v));
+    }
+
+    /// `reduce [1 + 1 2 + 2]` -> `[2 4]` via VM. The `reduce` native calls
+    /// `dispatch_block_reduce`, which compiles the block with
+    /// `compile_block_reduce` (no `Pop` between expressions) and runs
+    /// `run_reduce`, collecting the stack into a `Value::Block`.
+    /// (plan3.md:565 — "`reduce` native: same logic")
+    #[test]
+    fn vm_reduce() {
+        let v = run_vm("reduce [1 + 1 2 + 2]");
+        assert_eq!(mold_to_string(&v), "[2 4]");
     }
 }

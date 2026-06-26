@@ -195,6 +195,49 @@ pub(crate) fn compile_block_for_func_body(
     compile_block_inner(block, scope, natives, Some(self_func))
 }
 
+/// Like `compile_block` but emits **no `Pop` between expressions** — every
+/// expression's result stays on the stack. Used by the `reduce` native in VM
+/// mode: the VM runs the block, then `run_reduce` collects the stack into a
+/// `Value::Block`. Matches the walker's `reduce` semantics (one result per
+/// expression). `needs_rebind` short-circuits just like `compile_block`.
+pub(crate) fn compile_block_reduce(
+    block: &Series,
+    scope: &mut Scope,
+    natives: &NativeRegistry,
+) -> Result<CompiledBlock, CompileError> {
+    let analysis = analyze_block(block, scope);
+    if analysis.needs_rebind {
+        return Ok(stub_block(block, analysis));
+    }
+    let func_arities = FuncArityTable::default();
+    let mut compiler = Compiler {
+        instrs: Vec::new(),
+        pool: ConstantPool::new(),
+        natives,
+        func_arities,
+    };
+    let data = block.data.borrow();
+    let n = data.len();
+    let mut i = block.index;
+    while i < n {
+        compile_expr(&mut compiler, &data, &mut i, scope, /*tail*/ false)?;
+        // No Pop: every expression's result stays on the stack. The final
+        // `Return` pops the frame; `run_reduce` collects what remains.
+    }
+    drop(data);
+    compiler.emit(Instr::Return);
+    let span = block_source_span(block);
+    Ok(CompiledBlock {
+        instrs: Rc::from(compiler.instrs.as_slice()),
+        pool: compiler.pool.into_rc(),
+        n_locals: scope_locals_count(scope),
+        freevars: analysis.freevars,
+        source_span: span,
+        needs_rebind: false,
+        arity: 0,
+    })
+}
+
 fn compile_block_inner(
     block: &Series,
     scope: &mut Scope,
@@ -416,11 +459,23 @@ fn compile_prefix(
             c.emit(Instr::Const(idx));
         }
 
-        // Path (data-headed): `GetPath` runtime resolution (M19). A
-        // function-headed path (`copy/part`) is also `GetPath` here — M25
-        // dispatches it via the path resolver, which falls back to a refined
-        // native call. The compiler does no path-step resolution itself.
-        Value::Path { .. } | Value::GetPath { .. } => {
+        // Path: either a data-headed path (`obj/field`, `block/2`) resolved at
+        // runtime via `GetPath`, or a function-headed path (`copy/part x`)
+        // compiled as a refined native call. The head determines which:
+        // an unbound `Word` naming a registered native → refined `Call`;
+        // anything else → `GetPath` (M19 runtime resolution).
+        Value::Path { parts, .. } | Value::GetPath { parts, .. } => {
+            if let Some((native_idx, fd, head_sym, leading_refs)) =
+                function_path_info(c, parts)
+            {
+                // `*i` was already advanced past the path token by the
+                // caller; `collect_args` reads args starting at `*i`.
+                let (argc, _refs) = collect_args(
+                    c, data, i, scope, &head_sym, &fd, &leading_refs, span,
+                )?;
+                c.emit(Instr::Call(native_idx, argc as u32));
+                return Ok(());
+            }
             let idx = c.push_const(cur.clone());
             c.emit(Instr::Const(idx));
             c.emit(Instr::GetPath);
@@ -778,6 +833,38 @@ fn compile_native_call(
     let (argc, _refs_emitted) = collect_args(c, data, i, scope, sym, fd, &[], span)?;
     c.emit(Instr::Call(native_idx, argc as u32));
     Ok(())
+}
+
+/// If `parts` is a function-headed path (`copy/part`, `find/case`, ...) — i.e.
+/// its head is an unbound `Word` naming a registered native — return
+/// `(native_idx, fd, head_sym, leading_refs)` so the caller can emit a refined
+/// `Call` instead of a `GetPath`. `leading_refs` is the list of tail `Word`
+/// parts (refinement flags); non-Word tail parts (integer/paren) are dropped
+/// (mirrors `interp::eval_path_call`'s refinement extraction). Returns `None`
+/// for data-headed paths (`obj/field`, `block/2`) — those stay `GetPath`.
+fn function_path_info(
+    c: &Compiler,
+    parts: &[Value],
+) -> Option<(u32, Rc<FuncDef>, Symbol, Vec<Symbol>)> {
+    let head = parts.first()?;
+    let (head_sym, head_binding) = match head {
+        Value::Word { sym, binding, .. } => (sym.clone(), binding.clone()),
+        Value::GetWord { sym, binding, .. } => (sym.clone(), binding.clone()),
+        Value::LitWord { sym, .. } => (sym.clone(), Binding::Unbound),
+        _ => return None,
+    };
+    if !matches!(head_binding, Binding::Unbound) {
+        return None;
+    }
+    let (native_idx, fd) = c.natives.get(&head_sym)?;
+    let leading_refs: Vec<Symbol> = parts[1..]
+        .iter()
+        .filter_map(|p| match p {
+            Value::Word { sym, .. } => Some(sym.clone()),
+            _ => None,
+        })
+        .collect();
+    Some((native_idx, Rc::clone(fd), head_sym, leading_refs))
 }
 
 /// Compile a user-func call: collect `fd.params.len()` args, emit

@@ -26,7 +26,7 @@ use red_core::value::{Series, Span, Symbol, Value};
 use red_core::{Env, EvalError, RefineArgs};
 use std::rc::Rc;
 
-use crate::interp::eval;
+use crate::interp::dispatch_block;
 use crate::natives::{type_name, values_equal};
 
 // ---------------------------------------------------------------------------
@@ -627,7 +627,7 @@ fn foreach(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, E
             data[i].clone()
         };
         env.user_ctx.set_slot(idx, v);
-        match eval(&body, env) {
+        match dispatch_block(&body, env) {
             Ok(v) => last = v,
             Err(EvalError::Break(bv)) => return Ok(bv.unwrap_or(Value::None)),
             Err(EvalError::Continue) => {}
@@ -660,7 +660,7 @@ fn forall(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
         // Refresh the word so the body sees the current cursor.
         env.user_ctx
             .set_slot(idx, mk_series(series.clone(), span, is_paren));
-        match eval(&body, env) {
+        match dispatch_block(&body, env) {
             Ok(v) => last = v,
             Err(EvalError::Break(bv)) => return Ok(bv.unwrap_or(Value::None)),
             Err(EvalError::Continue) => {}
@@ -794,6 +794,7 @@ pub fn register_series_natives(env: &mut Env) {
 mod tests {
     use super::*;
     use crate::binding::bind_pass;
+    use crate::interp::eval;
     use crate::natives::{install_constants, register_natives};
     use red_core::context::Context;
     use red_core::parser::load_source;

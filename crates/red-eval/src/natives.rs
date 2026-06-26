@@ -26,7 +26,7 @@ use red_core::printer::mold_to_string;
 use red_core::value::{Binding, FuncDef, Series, Span, Symbol, Value};
 use red_core::{Env, EvalError, NativeFn, RefineArgs};
 
-use crate::interp::{eval, eval_expression};
+use crate::interp::{dispatch_block, dispatch_block_reduce, eval_expression};
 
 // ---------------------------------------------------------------------------
 // I/O natives (M6)
@@ -384,7 +384,7 @@ fn if_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
     }
     if truthy(&args[0]) {
         let body = expect_block(args, 1, "if")?;
-        eval(&body, env)
+        dispatch_block(&body, env)
     } else {
         Ok(Value::None)
     }
@@ -398,9 +398,9 @@ fn either(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
     let t = expect_block(args, 1, "either")?;
     let f = expect_block(args, 2, "either")?;
     if truthy(&args[0]) {
-        eval(&t, env)
+        dispatch_block(&t, env)
     } else {
-        eval(&f, env)
+        dispatch_block(&f, env)
     }
 }
 
@@ -413,7 +413,7 @@ fn either(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
 fn loop_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     let body = expect_block(args, 0, "loop")?;
     loop {
-        match eval(&body, env) {
+        match dispatch_block(&body, env) {
             Ok(_) => {}
             Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
             Err(EvalError::Continue) => continue,
@@ -459,7 +459,7 @@ fn repeat(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
         })?;
     for n in 1..=count {
         env.user_ctx.set_slot(idx, Value::integer(n));
-        match eval(&body, env) {
+        match dispatch_block(&body, env) {
             Ok(_) => {}
             Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
             Err(EvalError::Continue) => continue,
@@ -474,7 +474,7 @@ fn repeat(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
 fn until(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     let body = expect_block(args, 0, "until")?;
     loop {
-        match eval(&body, env) {
+        match dispatch_block(&body, env) {
             Ok(v) => {
                 if truthy(&v) {
                     return Ok(Value::Logic(true));
@@ -496,11 +496,11 @@ fn while_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Val
     let cond = expect_block(args, 0, "while")?;
     let body = expect_block(args, 1, "while")?;
     loop {
-        let c = eval(&cond, env)?;
+        let c = dispatch_block(&cond, env)?;
         if !truthy(&c) {
             return Ok(Value::None);
         }
-        match eval(&body, env) {
+        match dispatch_block(&body, env) {
             Ok(_) => {}
             Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
             Err(EvalError::Continue) => continue,
@@ -564,7 +564,7 @@ fn switch_native(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<Val
             return match &body {
                 Value::Block { .. } | Value::Paren { .. } => {
                     drop(data);
-                    eval(&body, env)
+                    dispatch_block(&body, env)
                 }
                 _ => Ok(body),
             };
@@ -574,7 +574,7 @@ fn switch_native(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<Val
     if let Some(default_args) = refs.get(&Symbol::new("default")) {
         if let Some(body) = default_args.first() {
             if let Value::Block { .. } | Value::Paren { .. } = body {
-                return eval(body, env);
+                return dispatch_block(body, env);
             }
             return Ok(body.clone());
         }
@@ -611,7 +611,7 @@ fn case_native(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<Value
         if truthy(&cond_val) {
             matched = true;
             last = match &body {
-                Value::Block { .. } | Value::Paren { .. } => eval(&body, env)?,
+                Value::Block { .. } | Value::Paren { .. } => dispatch_block(&body, env)?,
                 _ => body.clone(),
             };
             if !all {
@@ -625,7 +625,7 @@ fn case_native(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<Value
     } else if let Some(default_args) = refs.get(&Symbol::new("default")) {
         if let Some(body) = default_args.first() {
             if let Value::Block { .. } | Value::Paren { .. } = body {
-                return eval(body, env);
+                return dispatch_block(body, env);
             }
             return Ok(body.clone());
         }
@@ -723,7 +723,7 @@ fn any_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value
 /// flow unwinds (`Return`/`Break`/`Continue`/`Throw`/`Quit`) propagate.
 fn try_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     let body = expect_block(args, 0, "try")?;
-    match eval(&body, env) {
+    match dispatch_block(&body, env) {
         Ok(v) => Ok(v),
         Err(
             e @ (EvalError::Return(_)
@@ -740,7 +740,7 @@ fn try_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value
 /// error value.
 fn attempt_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     let body = expect_block(args, 0, "attempt")?;
-    match eval(&body, env) {
+    match dispatch_block(&body, env) {
         Ok(v) => Ok(v),
         Err(
             e @ (EvalError::Return(_)
@@ -757,7 +757,7 @@ fn attempt_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<V
 /// value. Other errors propagate.
 fn catch_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     let body = expect_block(args, 0, "catch")?;
-    match eval(&body, env) {
+    match dispatch_block(&body, env) {
         Ok(v) => Ok(v),
         Err(EvalError::Throw(v)) => Ok(v),
         Err(e) => Err(e),
@@ -865,7 +865,7 @@ fn do_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
         return Err(arity_err(args, "do", 1, 0));
     }
     match &args[0] {
-        Value::Block { .. } | Value::Paren { .. } => eval(&args[0], env),
+        Value::Block { .. } | Value::Paren { .. } => dispatch_block(&args[0], env),
         Value::String { s, span } => {
             let body = load_source(s).map_err(|e| EvalError::Native {
                 message: e.to_string(),
@@ -873,7 +873,7 @@ fn do_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
             })?;
             crate::binding::bind_pass_into(&body, &env.user_ctx);
             let block = Value::block(body);
-            eval(&block, env)
+            dispatch_block(&block, env)
         }
         other => Err(EvalError::TypeError {
             expected: "block! or string!",
@@ -912,18 +912,7 @@ fn load_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Val
 /// block of the results.
 fn reduce(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     let body = expect_block(args, 0, "reduce")?;
-    let series = match &body {
-        Value::Block { series, .. } | Value::Paren { series, .. } => series.clone(),
-        _ => return Ok(Value::None),
-    };
-    let data = series.data.borrow();
-    let mut results = Vec::new();
-    let mut i = series.index;
-    while i < data.len() {
-        results.push(eval_expression(&data, &mut i, env)?);
-    }
-    drop(data);
-    Ok(Value::block(Series::new(results)))
+    dispatch_block_reduce(&body, env)
 }
 
 // ---------------------------------------------------------------------------
@@ -1318,7 +1307,13 @@ fn use_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value
         series: rebound,
         span: Span::new(0, 0),
     };
-    let result = eval(&block, env);
+    // `use`'s rebound block carries `Binding::Local(child_rc, _)` for the
+    // declared locals — foreign w.r.t. `env.user_ctx`. `dispatch_block`
+    // detects that via `has_foreign_bindings` and routes to the walker,
+    // so this is correct in both `Walk` and `Vm` modes. (The walker reads
+    // `env.user_ctx`, which we just swapped for `child_rc`, so the child
+    // bindings resolve correctly.)
+    let result = dispatch_block(&block, env);
     env.user_ctx = saved;
     result
 }
@@ -1699,6 +1694,7 @@ fn install_system(ctx: &Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interp::eval;
     use red_core::parser::load_source;
     use std::cell::RefCell;
     use std::rc::Rc;

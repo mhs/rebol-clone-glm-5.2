@@ -25,9 +25,9 @@ use std::rc::Rc;
 use red_core::lexer;
 use red_core::parser::parse_program;
 use red_core::value::{Binding, FuncDef, Series, Span, Symbol, Value};
-use red_core::{Context, Env, Error, EvalError, RefineArgs};
+use red_core::{Context, Env, Error, EvalError, EvalMode, RefineArgs};
 
-use crate::binding::bind_pass;
+use crate::binding::{bind_pass, has_foreign_bindings};
 
 /// Evaluate a block/paren value: walk its contents in order, returning the
 /// last value. Non-block/paren values passed in are returned as-is (cloned).
@@ -51,6 +51,83 @@ pub fn eval(block: &Value, env: &mut Env) -> Result<Value, EvalError> {
         last = eval_expression(&data, &mut i, env)?;
     }
     Ok(last)
+}
+
+/// Dispatch a block/paren evaluation to the active evaluator (`Walk` or `Vm`),
+/// used by natives that recurse into a block argument (`do`/`if`/`either`/
+/// `loop`/`while`/`repeat`/`until`/`foreach`/`forall`/`switch`/`case`/`try`/
+/// `attempt`/`catch`/`use`).
+///
+/// - `Walk` → `interp::eval` (the tree-walker).
+/// - `Vm`   → compile-on-demand + `vm::run`. If the block's compiled form is
+///   `needs_rebind` (set by M23 for `use`/`make object!`/`object`/`context`
+///   forms, or by `bind` rebinding words to a non-`user_ctx` context), the
+///   block falls back to the walker. Compilation failure also falls back
+///   (defensive — the walker handles anything the compiler can't yet).
+///
+/// Non-block/paren values are returned as-is (cloned), mirroring `eval`.
+///
+/// M29 flips `Env::mode` to `Vm` by default; until then, the shim exists so
+/// VM-mode tests can exercise native recursion through the VM (M26).
+pub(crate) fn dispatch_block(block: &Value, env: &mut Env) -> Result<Value, EvalError> {
+    if env.mode == EvalMode::Walk {
+        return eval(block, env);
+    }
+    let series = match block {
+        Value::Block { series, .. } | Value::Paren { series, .. } => series.clone(),
+        _ => return Ok(block.clone()),
+    };
+    // `bind`/`use` may rebind words to a child context the VM can't lexically
+    // address. Detect that and route to the walker.
+    if has_foreign_bindings(&series, &env.user_ctx) {
+        return eval(block, env);
+    }
+    // Compile-on-demand. The M23 analyzer marks `use`/object forms
+    // `needs_rebind`; such blocks return a stub `[Halt]` from `compile_block`,
+    // so we check the flag and fall back to the walker.
+    let registry = crate::vm::compiler::NativeRegistry::from_env(env);
+    let mut scope = crate::vm::lex::Scope::root(&env.user_ctx);
+    match crate::vm::compiler::compile_block(&series, &mut scope, &registry) {
+        Ok(compiled) if !compiled.needs_rebind => crate::vm::run(compiled, env),
+        _ => eval(block, env),
+    }
+}
+
+/// Like `dispatch_block` but for the `reduce` native: in VM mode, compiles the
+/// block with `compile_block_reduce` (no `Pop` between expressions) and runs
+/// `vm::run_reduce`, which collects every expression's result into a
+/// `Value::Block`. In `Walk` mode, uses the walker's per-expression
+/// `eval_expression` loop (mirroring `reduce`'s existing behavior). Falls
+/// back to the walker for `needs_rebind`/foreign-bound blocks. (M26)
+pub(crate) fn dispatch_block_reduce(block: &Value, env: &mut Env) -> Result<Value, EvalError> {
+    let series = match block {
+        Value::Block { series, .. } | Value::Paren { series, .. } => series.clone(),
+        _ => return Ok(block.clone()),
+    };
+    if env.mode == EvalMode::Walk
+        || has_foreign_bindings(&series, &env.user_ctx)
+    {
+        return reduce_walker(&series, env);
+    }
+    let registry = crate::vm::compiler::NativeRegistry::from_env(env);
+    let mut scope = crate::vm::lex::Scope::root(&env.user_ctx);
+    match crate::vm::compiler::compile_block_reduce(&series, &mut scope, &registry) {
+        Ok(compiled) if !compiled.needs_rebind => crate::vm::run_reduce(compiled, env),
+        _ => reduce_walker(&series, env),
+    }
+}
+
+/// Walker-side `reduce`: eval each expression, collect results into a block.
+/// (Factored out of `reduce` for reuse by `dispatch_block_reduce`.)
+fn reduce_walker(series: &Series, env: &mut Env) -> Result<Value, EvalError> {
+    let data = series.data.borrow();
+    let mut results = Vec::new();
+    let mut i = series.index;
+    while i < data.len() {
+        results.push(eval_expression(&data, &mut i, env)?);
+    }
+    drop(data);
+    Ok(Value::block(Series::new(results)))
 }
 
 /// Evaluate a single expression starting at `data[*i]`: a prefix value

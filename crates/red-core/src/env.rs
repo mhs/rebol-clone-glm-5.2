@@ -65,6 +65,21 @@ impl RefineArgs {
 /// and their arguments (M13); `env` is the interpreter state.
 pub type NativeFn = fn(&[Value], &RefineArgs, &mut Env) -> Result<Value, EvalError>;
 
+/// Which evaluator backs `dispatch_block` for the current call. M26 leaves
+/// the default as `Walk` (the v0.2 tree-walker); M29 flips the default to
+/// `Vm`. Natives that recurse into block evaluation inspect `env.mode` via
+/// `interp::dispatch_block` to pick the right evaluator, so a native invoked
+/// from the VM that re-enters a block re-uses the VM rather than falling
+/// back to the walker (unless the block is `needs_rebind`-flagged).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvalMode {
+    /// Tree-walking interpreter (`interp::eval`). The v0.2 default.
+    Walk,
+    /// Bytecode stack VM (`vm::run`). M26 makes it available; M29 makes it
+    /// the default.
+    Vm,
+}
+
 /// Top-level interpreter state: the shared user context, the function call
 /// stack (empty until M9), the native registry (populated in M6), and the
 /// shared output sink that natives like `print`/`prin`/`probe` write to.
@@ -84,6 +99,12 @@ pub struct Env {
     /// `change-dir`; read by `what-dir`. Relative file paths in `read`/
     /// `write`/`exists?`/etc. resolve against this.
     pub cwd: PathBuf,
+    /// Which evaluator (`Walk` or `Vm`) `dispatch_block` should route a block
+    /// evaluation to. M26 leaves the default `Walk`; M29 flips it to `Vm`.
+    /// Natives that recurse into block evaluation read this via
+    /// `interp::dispatch_block`, so a native invoked from the VM re-enters
+    /// the VM for its block args (unless the block is `needs_rebind`).
+    pub mode: EvalMode,
     /// High-water mark of `call_stack.len()` since the last
     /// [`Self::reset_stats`] call. Used by the v0.3 VM milestones to prove
     /// tail-call stack bounds. Only present under the `stats` cargo feature;
@@ -115,6 +136,7 @@ impl Env {
             out,
             allow_shell: false,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            mode: EvalMode::Walk,
             #[cfg(feature = "stats")]
             max_frame_depth: 0,
             #[cfg(feature = "stats")]
