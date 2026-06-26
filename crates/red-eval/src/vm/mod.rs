@@ -12,7 +12,9 @@
 pub mod compiler;
 pub mod frame;
 pub mod ir;
+pub mod lex;
 pub mod pool;
 pub mod vm;
 
 pub use ir::{CompiledBlock, Frame, Instr, disasm};
+pub use lex::{AnalysisResult, Scope, analyze_block};

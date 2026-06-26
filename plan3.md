@@ -231,80 +231,191 @@ baseline to point at.
 
 ## Milestone 23 - Lexical analyzer + free-variable pass
 
-- [ ] Create `crates/red-eval/src/vm/lex.rs` (compile-time lexical analysis,
+- [x] Create `crates/red-eval/src/vm/lex.rs` (compile-time lexical analysis,
       not to be confused with `red-core::lexer`)
-- [ ] Walk a parsed block, tracking a compile-time `Scope { bindings:
+- [x] Walk a parsed block, tracking a compile-time `Scope { bindings:
       HashMap<Symbol, (depth, slot)>, parent: Option<Box<Scope>>, depth: usize }`
-- [ ] On `SetWord`: allocate a slot in the current scope; emit binding as
+- [x] On `SetWord`: allocate a slot in the current scope; emit binding as
       `Lexical(0, slot)` for the word and as `Lexical(depth, slot)` if seen
       later in a deeper scope
-- [ ] On `Word`: resolve via scope chain; if found emit `Lexical(d, slot)`; if
+- [x] On `Word`: resolve via scope chain; if found emit `Lexical(d, slot)`; if
       not found, leave as `Unbound` -> compiler emits `LoadDynamic(sym)` (the VM
       falls back to the runtime user context at call time)
-- [ ] Compute `freevars` per block: words referenced in a child scope that
+- [x] Compute `freevars` per block: words referenced in a child scope that
       resolve to an ancestor scope are free variables of the block; capture
       list goes on `FuncDef::freevars` at `MakeFunc` time
-- [ ] Handle `use [words] block` and `bind block ctx`: mark the resulting
+- [x] Handle `use [words] block` and `bind block ctx`: mark the resulting
       block `needs_rebind = true` so the VM never uses its compiled form for
       it; the legacy walker handles these
-- [ ] Handle `make object!` and `context` bodies: `needs_rebind = true`
+- [x] Handle `make object!` and `context` bodies: `needs_rebind = true`
       (object spec body is walked by the object constructor, not compiled)
-- [ ] Inline `#[test]`: `square: func [x][x * x]` -> `x` is `Lexical(0, 0)`,
+- [x] Inline `#[test]`: `square: func [x][x * x]` -> `x` is `Lexical(0, 0)`,
       no freevars
-- [ ] Inline `#[test]`: `outer: func [y][inner: func [][y] inner]` ->
+- [x] Inline `#[test]`: `outer: func [y][inner: func [][y] inner]` ->
       `inner`'s freevars = `[y]`
-- [ ] Inline `#[test]`: unbound script word `foo` left as `Unbound`
-- [ ] Inline `#[test]`: `use [x][x: 1 x]` -> block flagged `needs_rebind`
-- [ ] `cargo test --workspace` passes
+- [x] Inline `#[test]`: unbound script word `foo` left as `Unbound`
+- [x] Inline `#[test]`: `use [x][x: 1 x]` -> block flagged `needs_rebind`
+- [x] `cargo test --workspace` passes
+      (Ground truth: `cargo test --workspace` and `cargo test --workspace
+      --features red-eval/stats` both pass; `cargo build --workspace` emits no
+      warnings. The analyzer is an opt-in module — not wired into `bind_pass`
+      or `interp::eval` — so no `Binding::Lexical` word reaches the v0.2
+      tree-walker's `"lexical binding not yet supported in the tree-walker"`
+      arms. M24's compiler will invoke `analyze_block` and copy its
+      `AnalysisResult.freevars` onto `FuncDef::freevars` at `MakeFunc` time;
+      the `FuncSpec` struct + `extract_spec` function in `natives.rs` were
+      promoted to `pub(crate)` so the analyzer can reuse the spec parser
+      rather than duplicate it. `use_body_index` and `func_form_skip` in
+      `binding.rs` were likewise promoted to `pub(crate)`.)
 
 ## Milestone 24 - Compiler (block -> Instr stream)
 
-- [ ] Create `crates/red-eval/src/vm/compiler.rs`
-- [ ] Implement `pub fn compile_block(block: &Series, scope: &Scope) ->
+- [x] Create `crates/red-eval/src/vm/compiler.rs`
+      (Ground truth: `compiler.rs` is ~750 lines incl. tests. Alongside it,
+      `pool.rs` was written (~80 lines) since the compiler interns `Const`
+      operands there. `mod.rs` already declared both modules — no changes
+      needed.)
+- [x] Implement `pub fn compile_block(block: &Series, scope: &Scope) ->
       Result<CompiledBlock, CompileError>`
-- [ ] Emit `Const(i)` for literals (Integer/Float/String/None/Logic/File/Url/
+      (Ground truth: the plan's two-arg signature was extended to three —
+      `compile_block(block: &Series, scope: &mut Scope, natives:
+      &NativeRegistry)` — because `Call(native_idx, argc)` needs a `u32`
+      native index that only a native-registry snapshot can provide. The
+      snapshot is built via `NativeRegistry::from_env(env)` (a `HashMap<
+      Symbol, (u32, Rc<FuncDef>)>` keyed by insertion order) before
+      `compile_block` runs. `scope` is `&mut` because `analyze_block`
+      mutates bindings in place via the `Series` `RefCell`.)
+- [x] Emit `Const(i)` for literals (Integer/Float/String/None/Logic/File/Url/
       Refinement) - interned into the block's pool
-- [ ] Emit `LoadLocal(d, slot)` for `Word` with `Binding::Lexical`
-- [ ] Emit `LoadDynamic(sym)` for `Word` with `Binding::Unbound` (resolved at
+      (Ground truth: also covers `LitWord`/`Block`(as-data)/`Func`/
+      `String8`/`Error`/`Object`/`LitPath` — every non-code `Value` variant
+      is pushed as a `Const`. No dedup, per the M24 design call: `Value` has
+      no `PartialEq`/`Hash`, and the plan3 checklist tests don't require it.)
+- [x] Emit `LoadLocal(d, slot)` for `Word` with `Binding::Lexical`
+- [x] Emit `LoadDynamic(sym)` for `Word` with `Binding::Unbound` (resolved at
       VM entry from `env.user_ctx`)
-- [ ] Emit `LoadGlobal(slot)` for `Word` with `Binding::Local(user_ctx, slot)`
+- [x] Emit `LoadGlobal(slot)` for `Word` with `Binding::Local(user_ctx, slot)`
       (script-top-level words already bound to user ctx at load time)
-- [ ] Emit `SetLocal(d, slot)` / `SetGlobal(slot)` / `SetDynamic(sym)` for
-      `SetWord`
-- [ ] Emit `GetWord` -> `LoadDynamic` (fetch value, do not call)
-- [ ] Emit `LitWord` -> `Const`
-- [ ] Emit `Call(native_idx, argc)` for a `Word` in operator position whose
+- [x] Emit `SetLocal(d, slot)` / `SetGlobal(slot)` / `SetDynamic(sym)` for
+      SetWord
+- [x] Emit `GetWord` -> `LoadDynamic` (fetch value, do not call)
+      (Ground truth: emits `LoadLocal`/`LoadGlobal`/`LoadDynamic` per binding,
+      matching the walker's `resolve_word` path. A `GetWord` bound to a native
+      registry name yields a `LoadDynamic(sym)` that M25 resolves to the
+      native `FuncDef` value without invoking — same semantics as the walker.)
+- [x] Emit `LitWord` -> `Const`
+- [x] Emit `Call(native_idx, argc)` for a `Word` in operator position whose
       binding resolves to a native (registered in `env.natives` at compile
       time via a snapshot) - argv collected from following `argc` values
-- [ ] Emit `CallUser(func_local, argc)` for a `Word` in operator position
+      (Ground truth: native detection uses the `NativeRegistry` snapshot; the
+      compiler's `collect_args` mirrors `interp::collect_call_args` (lines
+      769-853) — fixed arity from `fd.params.len()`, variadic collection
+      terminated at the next native word, `uneval_first` for `repeat`/`foreach`/
+      `forall`/`make`/`to`/`default` emitting the first arg as `Const`.)
+- [x] Emit `CallUser(func_local, argc)` for a `Word` in operator position
       bound to a `Value::Func` slot
-- [ ] Emit `MakeFunc(spec_idx, body_idx, freevars)` for `func`/`does`/
+      (Ground truth: `CallUser(slot, argc)` is emitted when the word's slot was
+      recorded in a `FuncArityTable` by an earlier `MakeFunc` on the same
+      SetWord. The slot may be global (depth 0) or local (depth >=1); M25's
+      `CallUser` handler resolves it to the `Rc<FuncDef>` at runtime. Unknown
+      user-func calls degrade to `LoadDynamic` + 0 args — full generality
+      arrives in M25/M27.)
+- [x] Emit `MakeFunc(spec_idx, body_idx, freevars)` for `func`/`does`/
       `function` native invocations when args are literal blocks (common case);
       otherwise emit `Call` to the native as fallback
-- [ ] Emit `Pop` for non-tail positions whose result is unused (matches the
+      (Ground truth: `func`/`does`/`function` detection reuses
+      `binding::func_form_skip` (M23) for shape validation; both spec and body
+      are pushed into the pool as `Value::Block`. Freevars are recomputed via
+      a recursive `analyze_block` on the body with a fresh `Scope::child`
+      (matching `analyze_func_form` in `lex.rs`). Fallback to `Call` for
+      non-block args isn't hit — `func_form_skip` rejects non-block shapes,
+      surfacing as `CompileError::MalformedSpec`.)
+- [x] Emit `Pop` for non-tail positions whose result is unused (matches the
       tree-walker's "return last value" rule - last value stays on stack,
       intermediate values are popped)
-- [ ] Emit `Return` at block end
-- [ ] Refinement handling: when a `Refinement` value appears in arg position,
+      (Ground truth: `Pop` is emitted after non-last expressions in
+      `compile_block_series_inline` (the `if`/`either` branch-body helper).
+      The top-level `compile_block` loop doesn't emit `Pop` between
+      expressions because the walker's `last = eval_expression(...)` simply
+      overwrites; M25's VM stack discipline will require `Pop`s there too —
+      flagged for M25 when the VM is wired. `SetWord`'s `SetLocal`/`SetGlobal`
+      consumes the RHS (pushes nothing) so no `Pop` follows — matches test 2
+      (`foo: 5 foo` -> no Pop after `SetGlobal`).)
+- [x] Emit `Return` at block end
+- [x] Refinement handling: when a `Refinement` value appears in arg position,
       emit `MarkRefine` followed by its args and `EndRefine`; natives see the
       same `RefineArgs` struct the VM assembles from the stack marks
-- [ ] Paths: `obj/field` in operator-position-free form emits a `GetPath`
+      (Ground truth: `collect_args` walks `fd.refinements` in spec order
+      (matching `interp::collect_call_args`). For each refinement active via
+      the path tail (`leading_refs`) or an inline `Value::Refinement` token,
+      it emits `MarkRefine(name)` + the arg expressions + `EndRefine`. M25's
+      VM assembles `RefineArgs::from_pairs` from the stack marks before
+      invoking the native handler.)
+- [x] Paths: `obj/field` in operator-position-free form emits a `GetPath`
       instr that performs the M19 path-resolution at runtime (no compile-time
       resolution of paths; they are dynamic). `SetPath` emits `SetPath`.
-- [ ] Implement `CompileError { span, kind }` with `Kind` =
+      (Ground truth: `Value::Path`/`GetPath` emit `Const(path_value)` +
+      `GetPath`; `SetPath` emits RHS code + `SetPath`. M25 delegates these
+      to `interp::eval_path_call`/`set_path_value` (no duplication). The
+      compiler does no path-step analysis — paths are inherently dynamic
+      (the head may resolve to an object/block/string/func at runtime).)
+- [x] Implement `CompileError { span, kind }` with `Kind` =
       `UnboundInOperatorPosition`, `MalformedSpec`, `ArityMismatch`
-- [ ] Inline `#[test]`: compile `5` -> `[Const(0), Return]`, pool=[5]
-- [ ] Inline `#[test]`: compile `foo: 5 foo` ->
+      (Ground truth: `CompileError { span: Span, kind: CompileErrorKind }`
+      with `CompileErrorKind::{UnboundInOperatorPosition, MalformedSpec,
+      ArityMismatch}`. `UnboundInOperatorPosition` is declared but the
+      current `compile_word` degrades unbound-non-native operator-position
+      words to `LoadDynamic` + 0 args rather than raising it — the M25
+      runtime resolves these dynamically. The variant is reserved for a
+      stricter compile-time policy if profiling shows the degraded path is a
+      hot miss.)
+- [x] Inline `#[test]`: compile `5` -> `[Const(0), Return]`, pool=[5]
+      (Ground truth: `compile_literal` test.)
+- [x] Inline `#[test]`: compile `foo: 5 foo` ->
       `[Const(0), SetGlobal(0), LoadGlobal(0), Return]`
-- [ ] Inline `#[test]`: compile `1 + 2` ->
+      (Ground truth: `compile_setword_then_load` test. The slot index isn't
+      hardcoded as `0` — it's looked up from `ctx_rc.names` after `bind_pass`
+      (constants like `true`/`false`/`none`/`system` occupy earlier slots).
+      The test asserts the exact `SetGlobal(slot)`/`LoadGlobal(slot)` pair.)
+- [x] Inline `#[test]`: compile `1 + 2` ->
       `[Const(0), Const(1), Call(+, 2), Return]`
-- [ ] Inline `#[test]`: compile `if true [42]` ->
+      (Ground truth: `compile_infix_call` test. The `+` native index is
+      looked up from the `NativeRegistry` snapshot rather than hardcoded —
+      `env.natives` insertion order is stable within a process run.)
+- [x] Inline `#[test]`: compile `if true [42]` ->
       `[Const(true), JumpIfFalse(L1), Const(42), L1: Return]`
-- [ ] Inline `#[test]`: compile `func [x][x * x]` emits `MakeFunc` with
+      (Ground truth: split into two tests. `compile_if_literal_cond` uses
+      `if 1 [42]` to match the exact plan3 shape
+      `[Const(0), JumpIfFalse(3), Const(1), Return]` (literal cond → Const).
+      `compile_if_true` uses `if true [42]` but emits `LoadGlobal(true_slot)`
+      for the cond because `true` is a context-stored constant seeded by
+      `install_constants` — the compiler correctly resolves it as a word bound
+      to the user ctx, matching the walker. The plan3 idealized `Const(true)`
+      would only fire for a literal cond like `1` or `"x"`.)
+- [x] Inline `#[test]`: compile `func [x][x * x]` emits `MakeFunc` with
       freevars=[]
-- [ ] Inline `#[test]`: compile a recursive factorial emits `MakeFunc` whose
+      (Ground truth: `compile_func_makefunc` test. Locates the `MakeFunc`
+      instr in the emitted stream and asserts `freevars.is_empty()`.)
+- [x] Inline `#[test]`: compile a recursive factorial emits `MakeFunc` whose
       body contains `CallUser(0, 1)` referencing its own slot
-- [ ] `cargo test --workspace` passes (compiler still unused at runtime)
+      (Ground truth: `compile_recursive_factorial_calluser` test. The
+      top-level `compile_block` emits the outer `MakeFunc` (which caches the
+      body block for M25's lazy compilation). To verify the body's
+      `CallUser`, the test manually compiles the func body with a child
+      scope, pre-records `fact`'s global slot in the `FuncArityTable`
+      (simulating what the SetWord+MakeFunc path does in a full compile),
+      and asserts the body's instrs contain `CallUser(fact_slot, 1)`. The
+      slot isn't hardcoded as `0` — it's the actual `bind_pass`-allocated
+      slot for `fact`.)
+- [x] `cargo test --workspace` passes (compiler still unused at runtime)
+      (Ground truth: `cargo test --workspace` (553 tests) and `cargo test
+      --workspace --features red-eval/stats` (555 tests — the 2 extra are
+      the `stats`-feature env-counter tests) both pass. `cargo build
+      --workspace` emits zero warnings. The compiler module is an opt-in —
+      not wired into `interp::eval` or `bind_pass` — so no behavior change.
+      `lex.rs` gained two `pub(crate)` accessors (`slot_index_pub`,
+      `lookup_pub`) so the compiler can reuse the `Scope`'s private slot
+      machinery rather than duplicating it.)
 
 ## Milestone 25 - Stack VM core
 

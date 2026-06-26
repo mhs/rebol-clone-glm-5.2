@@ -992,10 +992,10 @@ fn does_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
 /// parameter names, declared refinements (each a name + its argument-word
 /// names), and explicit `<local>` words (recognized by `function` — `func`
 /// ignores them).
-struct FuncSpec {
-    params: Vec<Symbol>,
-    refinements: Vec<(Symbol, Vec<Symbol>)>,
-    locals: Vec<Symbol>,
+pub(crate) struct FuncSpec {
+    pub params: Vec<Symbol>,
+    pub refinements: Vec<(Symbol, Vec<Symbol>)>,
+    pub locals: Vec<Symbol>,
 }
 
 /// Extract parameter symbols and refinements from a func spec block.
@@ -1016,7 +1016,7 @@ struct FuncSpec {
 ///
 /// Words become positional params (in order) unless inside a refinement or
 /// `<local>` section. Type annotations are skipped.
-fn extract_spec(spec_block: &Value) -> Result<FuncSpec, EvalError> {
+pub(crate) fn extract_spec(spec_block: &Value) -> Result<FuncSpec, EvalError> {
     let series = match spec_block {
         Value::Block { series, .. } => series.clone(),
         _ => {

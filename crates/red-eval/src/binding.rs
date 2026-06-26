@@ -68,7 +68,7 @@ pub fn bind_pass_into(body: &Series, user_ctx: &Rc<Context>) {
 /// it does, so callers can skip allocating/rebinding the body's words into
 /// the outer context (use locals are scoped to the child context built at
 /// runtime by `use_native`).
-fn use_body_index(data: &[Value], i: usize) -> Option<usize> {
+pub(crate) fn use_body_index(data: &[Value], i: usize) -> Option<usize> {
     let Value::Word {
         sym,
         binding: Binding::Unbound,
@@ -97,7 +97,7 @@ fn use_body_index(data: &[Value], i: usize) -> Option<usize> {
 /// `make function! [...]` is handled at eval time (not a bare word form) and
 /// is not skipped here — its body SetWords are collected, but since the
 /// body is deep-cloned and bound at `make` time this is harmless.
-fn func_form_skip(data: &[Value], i: usize) -> Option<usize> {
+pub(crate) fn func_form_skip(data: &[Value], i: usize) -> Option<usize> {
     let Value::Word {
         sym,
         binding: Binding::Unbound,
