@@ -85,6 +85,11 @@ pub(crate) fn read_compile_counter() -> u32 {
 pub struct NativeRegistry {
     /// `Symbol -> (idx, FuncDef)` — `idx` matches the VM's `Call` operand.
     map: HashMap<Symbol, (u32, Rc<FuncDef>)>,
+    /// M29: Snapshot of `user_ctx` for `FuncArityTable::populate_from_user_ctx`.
+    /// Stored so the compiler can discover user-func arities for slots defined
+    /// outside the current compile unit (e.g. a `does` func defined at the top
+    /// level, referenced inside a `repeat` body compiled separately).
+    user_ctx: Option<Rc<Context>>,
 }
 
 impl NativeRegistry {
@@ -99,7 +104,20 @@ impl NativeRegistry {
             map.insert(sym.clone(), (idx, Rc::clone(fd)));
             idx += 1;
         }
-        Self { map }
+        Self {
+            map,
+            user_ctx: Some(Rc::clone(&env.user_ctx)),
+        }
+    }
+
+    /// Construct an empty registry (used by tests that don't need native
+    /// dispatch). M29: `user_ctx` is `None` — `populate_from_user_ctx` is a
+    /// no-op.
+    pub fn empty() -> Self {
+        Self {
+            map: HashMap::new(),
+            user_ctx: None,
+        }
     }
 
     /// Look up a native by name. Returns `(native_idx, &FuncDef)`.
@@ -164,6 +182,24 @@ impl FuncArityTable {
 
     fn get(&self, depth: usize, slot: usize) -> Option<usize> {
         self.arities.get(&(depth, slot)).copied()
+    }
+
+    /// M29: Pre-populate from `user_ctx` slots that hold `Value::Func`. This
+    /// lets the compiler emit `CallUser` for user-func calls even when the
+    /// func was defined outside the current compile unit (e.g. `f: does [1]`
+    /// at the top level, then `acc: f` inside a `repeat` body compiled
+    /// separately via `dispatch_block`). Without this, the `repeat` body's
+    /// `FuncArityTable` is empty, so `f` degrades to `LoadGlobal` (value
+    /// load) instead of `CallUser` (function call) — returning `#[function]`
+    /// instead of the call result.
+    fn populate_from_user_ctx(&mut self, user_ctx: &Rc<Context>) {
+        let names = user_ctx.names.borrow();
+        for (_, idx) in names.iter() {
+            let val = user_ctx.slot_value(*idx);
+            if let Value::Func(fd) = val {
+                self.arities.insert((0, *idx), fd.params.len());
+            }
+        }
     }
 }
 
@@ -277,6 +313,14 @@ fn compile_block_inner(
     }
 
     let mut func_arities = FuncArityTable::default();
+    // M29: pre-populate from `user_ctx` so user-func calls inside blocks
+    // compiled separately (e.g. `repeat`/`if`/`foreach` bodies) emit
+    // `CallUser` instead of degrading to `LoadGlobal`. Without this, `f: does [1]`
+    // at the top level followed by `acc: f` inside a `repeat` body would
+    // load the func value (`#[function]`) instead of calling it.
+    if let Some(ref user_ctx) = natives.user_ctx {
+        func_arities.populate_from_user_ctx(user_ctx);
+    }
     if let Some((slot, arity)) = self_func {
         // Self-recursion: the func's own slot is at depth 0 (global) when the
         // SetWord defining it is top-level; M25's lazy-compile path passes the
@@ -490,6 +534,10 @@ fn compile_prefix(
         // runtime via `GetPath`, or a function-headed path (`copy/part x`)
         // compiled as a refined native call. The head determines which:
         // an unbound `Word` naming a registered native → refined `Call`;
+        // a bound `Word` that might be a user func with refinements →
+        //   `CompileError` (fall back to walker, which handles user-func
+        //   refinement paths correctly — M29 pragmatic choice; full VM
+        //   support for user-func refinements deferred to a later milestone);
         // anything else → `GetPath` (M19 runtime resolution).
         Value::Path { parts, .. } | Value::GetPath { parts, .. } => {
             if let Some((native_idx, fd, head_sym, leading_refs)) =
@@ -502,6 +550,23 @@ fn compile_prefix(
                 )?;
                 c.emit(Instr::Call(native_idx, argc as u32));
                 return Ok(());
+            }
+            // M29: if the path head is a bound word (not Unbound), it might
+            // be a user func called with refinements (`f/with 5 7`). The VM
+            // doesn't support user-func refinement dispatch (the `CallUser`
+            // handler has no refinement-arg collection path). Fall back to
+            // the walker by returning a `MalformedSpec` compile error —
+            // `dispatch_block` catches it and runs the walker, which handles
+            // `eval_path_call` → `dispatch_call_with_refs` correctly. This is
+            // a pragmatic M29 choice; a future milestone can add VM-side
+            // user-func refinement dispatch.
+            if let Some(Value::Word { binding: Binding::Local(_, _), .. } | Value::Word { binding: Binding::Lexical(_, _), .. }) = parts.first() {
+                if parts.len() > 1 {
+                    return Err(CompileError {
+                        span,
+                        kind: CompileErrorKind::MalformedSpec,
+                    });
+                }
             }
             let idx = c.push_const(cur.clone());
             c.emit(Instr::Const(idx));
@@ -653,13 +718,20 @@ fn compile_word(
         }
         Binding::Unbound => unreachable!(),
     };
-    // Is there at least one following value, AND is the resolved slot a known
-    // user-func? If yes and we can determine arity, emit CallUser. Otherwise
-    // just load (the walker returns the value as-is when not a Func).
+    // Is the resolved slot a known user-func? If so, emit `CallUser` — the
+    // walker always calls a Func when a word resolves to one (even with 0
+    // args), so the VM must match. For 0-arity funcs (`does [...]`), the word
+    // IS the call (no args to collect); for non-zero arity, `collect_args`
+    // collects the right number. If there aren't enough args, `collect_args`
+    // returns `ArityMismatch`, which causes `dispatch_block` to fall back to
+    // the walker (which produces the correct runtime `EvalError::Arity`).
+    //
+    // The old `if *i < data.len()` check was wrong for 0-arity funcs: it
+    // prevented `CallUser` from being emitted when the word was the last
+    // value, causing the VM to load the func value instead of calling it
+    // (returning `#[function]` instead of the call result). (M29 fix.)
     if let Some(arity) = c.func_arities.get(depth, slot) {
-        if *i < data.len() {
-            return compile_user_call(c, data, i, scope, slot, arity, span);
-        }
+        return compile_user_call(c, data, i, scope, slot, arity, span);
     }
     // Value position — just load.
     emit_load(c, binding, span, sym)?;
@@ -756,15 +828,34 @@ fn compile_if(
     };
     *i += 1; // consume the then-block
 
-    // JumpIfFalse placeholder. We'll patch the target after emitting the then-block.
+    // Structure:
+    //   <cond>                ; pushes cond
+    //   JumpIfFalse(L_none)  ; pops cond; if false jump to L_none
+    //   <then-block>          ; pushes value
+    //   Jump(L_end)           ; skip the `none` push
+    // L_none:
+    //   Const(none)           ; false branch: push `none` (walker parity)
+    // L_end:
+    //
+    // Without the `none` push, `if false [...]` would leave the stack empty,
+    // and `print if false [42]` would get 0 args instead of 1. (M29 fix.)
     let jump_idx = c.instrs.len();
     c.emit(Instr::JumpIfFalse(0)); // placeholder
     // Then-block: compile its series inline with the *same scope* (M23 already
     // analyzed its words; literal blocks are descended by `analyze_inner`).
     compile_block_series_inline(c, &then_series, scope, tail)?;
-    // Patch the JumpIfFalse to land here.
-    let end_target = c.instrs.len() as u32;
-    c.instrs[jump_idx] = Instr::JumpIfFalse(end_target);
+    // Jump past the `none` push (false branch falls through to `none`).
+    let skip_none_idx = c.instrs.len();
+    c.emit(Instr::Jump(0)); // placeholder — patched below
+    // False branch: `if` with a false condition returns `none`.
+    let none_target = c.instrs.len() as u32;
+    let none_idx = c.push_const(Value::None);
+    c.emit(Instr::Const(none_idx));
+    // Patch JumpIfFalse to land at the `none` push.
+    c.instrs[jump_idx] = Instr::JumpIfFalse(none_target);
+    // Patch the Jump to land after the `none` push.
+    let end_target = (c.instrs.len()) as u32;
+    c.instrs[skip_none_idx] = Instr::Jump(end_target);
     Ok(())
 }
 
@@ -970,6 +1061,20 @@ fn compile_user_call(
     });
     // (`compile_prefix` already consumed the calling word.)
     let (argc, _refs) = collect_args(c, data, i, scope, &Symbol::new("__user"), &fd, &[], span)?;
+    // M29: if the next value after positional args is a `Value::Refinement`
+    // token, this is a user-func called with inline refinements (`f 5 /with
+    // 7`). The VM's `CallUser` handler doesn't support refinement dispatch
+    // (the synthetic FuncDef above has empty refinements, so `collect_args`
+    // skipped them). Fall back to the walker by returning a `CompileError` —
+    // `dispatch_block` catches it and runs the walker, which handles user-
+    // func refinements correctly. A future milestone can add VM-side
+    // user-func refinement dispatch.
+    if let Some(Value::Refinement { .. }) = data.get(*i) {
+        return Err(CompileError {
+            span,
+            kind: CompileErrorKind::MalformedSpec,
+        });
+    }
     c.emit(Instr::CallUser(slot as u32, argc as u32));
     Ok(())
 }
@@ -1234,16 +1339,34 @@ fn emit_store(
 /// Returns `None` for non-func forms or malformed specs (the runtime native
 /// reports the error later).
 fn peek_func_arity(data: &[Value], i: usize) -> Option<usize> {
-    let _skip = func_form_skip(data, i)?;
-    let is_does = matches!(
-        &data[i],
-        Value::Word { sym, .. } if sym.as_str() == "does"
-    );
-    if is_does {
-        return Some(0);
+    // `func`/`does`/`function` forms.
+    if let Some(_skip) = func_form_skip(data, i) {
+        let is_does = matches!(
+            &data[i],
+            Value::Word { sym, .. } if sym.as_str() == "does"
+        );
+        if is_does {
+            return Some(0);
+        }
+        let spec_val = &data[i + 1];
+        return extract_spec(spec_val).ok().map(|s| s.params.len());
     }
-    let spec_val = &data[i + 1];
-    extract_spec(spec_val).ok().map(|s| s.params.len())
+    // `make function! [[params][body]]` — the `make` native creates a FuncDef
+    // at runtime, but we need the arity at compile time so subsequent calls
+    // emit `CallUser` instead of falling back to `LoadGlobal`. (M29)
+    if is_make_function_form(data, i) {
+        let packed = &data[i + 2];
+        if let Value::Block { series, .. } = packed {
+            let inner = series.data.borrow();
+            // The packed block is `[spec body]` — two blocks.
+            if inner.len() >= 1 {
+                if let Value::Block { .. } = &inner[series.index] {
+                    return extract_spec(&inner[series.index]).ok().map(|s| s.params.len());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Extract `(depth, slot)` from a `Binding` for `FuncArityTable` keying.
@@ -1261,6 +1384,10 @@ fn slot_coords(binding: &Binding) -> (usize, usize) {
 /// Estimate the source span of a `Series` (used for `CompiledBlock.source_span`).
 /// M24 doesn't need an exact span — just a fallback; M31 (disassembler) will
 /// thread precise spans through.
+pub(crate) fn block_source_span_pub(block: &Series) -> Span {
+    block_source_span(block)
+}
+
 fn block_source_span(block: &Series) -> Span {
     let data = block.data.borrow();
     let first = data.first().map(|v| v.span_or_default()).unwrap_or_default();
@@ -1311,6 +1438,31 @@ fn is_make_object_form(data: &[Value], i: usize) -> bool {
         &data[i + 1],
         Value::Word { sym, .. } | Value::LitWord { sym, .. }
             if sym.as_str() == "object!" || sym.as_str() == "object"
+    ) && matches!(&data[i + 2], Value::Block { .. })
+}
+
+/// Detect `make function! [[params][body]]` — used by `peek_func_arity` so
+/// `f: make function! [...] f 5` emits `CallUser` instead of `LoadGlobal`.
+/// (M29)
+fn is_make_function_form(data: &[Value], i: usize) -> bool {
+    if i + 2 >= data.len() {
+        return false;
+    }
+    let Value::Word {
+        sym: make_sym,
+        binding: Binding::Unbound,
+        ..
+    } = &data[i]
+    else {
+        return false;
+    };
+    if make_sym.as_str() != "make" {
+        return false;
+    }
+    matches!(
+        &data[i + 1],
+        Value::Word { sym, .. } | Value::LitWord { sym, .. }
+            if sym.as_str() == "function!"
     ) && matches!(&data[i + 2], Value::Block { .. })
 }
 
@@ -1501,44 +1653,59 @@ mod tests {
             .get(&Symbol::new("true"))
             .copied()
             .expect("`true` should be bound");
-        // Expected instr layout:
+        // M29 instr layout (with `none` push for the false branch):
         //   0: LoadGlobal(true_slot)  ; load `true` constant
-        //   1: JumpIfFalse(3)         ; L1 = index 3
-        //   2: Const(0)               ; 42
-        //   3: Return                 ; L1 lands here
+        //   1: JumpIfFalse(4)         ; L_none = index 4
+        //   2: Const(0)               ; 42 (then-block)
+        //   3: Jump(5)                ; skip the `none` push → L_end
+        //   4: Const(1)               ; none (false branch) — L_none
+        //   5: Return                 ; L_end
         assert_instrs(
             block.instrs.as_ref(),
             &[
                 Instr::LoadGlobal(true_slot as u32),
-                Instr::JumpIfFalse(3),
+                Instr::JumpIfFalse(4),
                 Instr::Const(0),
+                Instr::Jump(5),
+                Instr::Const(1),
                 Instr::Return,
             ],
             "compile `if true [42]`",
         );
         assert!(matches!(block.pool[0], Value::Integer { n: 42, .. }));
+        assert!(matches!(block.pool[1], Value::None));
     }
 
     /// `if 1 [42]` exercises the pure-Const(cond) path (literal cond, not a
     /// context-stored constant like `true`). Verifies the plan3.md:312
-    /// instr shape `[Const(0), JumpIfFalse(L1), Const(1), L1: Return]`.
+    /// instr shape with the M29 `none` push for the false branch.
     #[test]
     fn compile_if_literal_cond() {
         let (body, ctx_rc, registry) = parse_bind_and_registry("if 1 [42]");
         let mut scope = Scope::root(&ctx_rc);
         let block = compile_block(&body, &mut scope, &registry).expect("compile");
+        // M29 layout:
+        //   0: Const(0)    ; 1 (cond)
+        //   1: JumpIfFalse(4)  ; L_none = index 4
+        //   2: Const(1)    ; 42 (then-block)
+        //   3: Jump(5)     ; skip `none` → L_end
+        //   4: Const(2)    ; none (false branch)
+        //   5: Return      ; L_end
         assert_instrs(
             block.instrs.as_ref(),
             &[
                 Instr::Const(0),
-                Instr::JumpIfFalse(3),
+                Instr::JumpIfFalse(4),
                 Instr::Const(1),
+                Instr::Jump(5),
+                Instr::Const(2),
                 Instr::Return,
             ],
             "compile `if 1 [42]`",
         );
         assert!(matches!(block.pool[0], Value::Integer { n: 1, .. }));
         assert!(matches!(block.pool[1], Value::Integer { n: 42, .. }));
+        assert!(matches!(block.pool[2], Value::None));
     }
 
     /// `func [x][x * x]` emits `MakeFunc` with freevars=[]. (plan3.md:314)

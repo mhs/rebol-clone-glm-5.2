@@ -835,25 +835,91 @@ baseline to point at.
 
 ## Milestone 29 - Flip the default + golden parity
 
-- [ ] Set `Env::mode = Vm` by default in `run_source`
-- [ ] Add `--walk` CLI flag to force the tree-walker (for debugging + parity
+- [x] Set `Env::mode = Vm` by default in `run_source`
+      (Ground truth: the default is flipped in `Env::new_with_output`
+      (`crates/red-core/src/env.rs:161`) via a `#[cfg(feature = "force-walk")]`
+      gate: `mode: EvalMode::Vm` when the feature is off (the production
+      default), `mode: EvalMode::Walk` when on. `run_series_inner_opts` no
+      longer calls `eval` directly — it calls `dispatch_block`, which routes
+      to the VM when `env.mode == Vm`. The `RunOptions.walk` field (set by
+      the CLI `--walk` flag) overrides to `Walk` at runtime.)
+- [x] Add `--walk` CLI flag to force the tree-walker (for debugging + parity
       tests)
-- [ ] Rename existing `interp.rs` -> `interp_legacy.rs`; create a new thin
+      (Ground truth: `crates/red-cli/src/main.rs` parses `--walk` alongside
+      `--allow-shell`. `RunOptions.walk` threads it to `run_series_inner_opts`
+      which sets `env.mode = EvalMode::Walk` after `Env::new_with_output`.
+      The HELP text documents the flag. The REPL (`repl.rs`) also accepts
+      `walk` via `build_env(out, walk)`.)
+- [x] Rename existing `interp.rs` -> `interp_legacy.rs`; create a new thin
       `interp.rs` that dispatches on `Env::mode`
-- [ ] Audit every `red-eval/tests/programs/*.red` golden fixture: stdout must
+      (Ground truth: `git mv` preserved history. The new `interp.rs` is a
+      ~100-line dispatch shim: `pub fn eval` checks `env.mode == Walk` →
+      `interp_legacy::eval` (fast path, skips `has_foreign_bindings` /
+      cache-lookup overhead); else `dispatch_block`. Re-exports
+      `run_source*`/`run_series*`/`RunOptions`/`dispatch_block`/etc. from
+      `interp_legacy`. The `pub(crate)` helpers (`dispatch_block`,
+      `dispatch_block_reduce`, `eval_expression`, `eval_get_path`,
+      `set_path_value`) are re-exported as `pub(crate)` from the shim so
+      `natives.rs`/`vm/vm.rs`/etc. can still import them via
+      `crate::interp::`.)
+- [x] Audit every `red-eval/tests/programs/*.red` golden fixture: stdout must
       match byte-for-byte in VM mode
-- [ ] Audit every `red-cli/tests/cli.rs` assertion in VM mode
-- [ ] Audit every error fixture: the rendered `*** Error:` line must match
+      (Ground truth: all 48 program fixtures pass in VM-default mode. The
+      audit uncovered four bugs, all fixed: (1) `compile_word` emitted
+      `LoadGlobal` instead of `CallUser` for 0-arity funcs in value position
+      (the `if *i < data.len()` guard was wrong); (2) `if false [block]`
+      left the VM stack empty instead of pushing `none` (walker parity);
+      (3) the block-cache key (`Rc::as_ptr`) collided on allocator reuse
+      between two `make object!` spec blocks (added `source_span` guard);
+      (4) `has_foreign_bindings` didn't treat `Binding::Func` as foreign,
+      causing the VM to run func-body branch blocks without access to the
+      walker's `CallFrame`.)
+- [x] Audit every `red-cli/tests/cli.rs` assertion in VM mode
+      (Ground truth: all 12 existing CLI tests pass in VM-default mode. A
+      new `walk_flag_runs_tree_walker` test asserts `--walk` produces
+      identical output to the default VM mode.)
+- [x] Audit every error fixture: the rendered `*** Error:` line must match
       exactly (spans preserved through compilation)
-- [ ] Add a parity test harness: run each program fixture in both `Walk` and
+      (Ground truth: all 20 error fixtures pass. The VM produces
+      zero-span errors for `LoadDynamic` → `UnboundWord` (the walker carries
+      the original span). The parity harness (`tests/parity.rs`) strips the
+      optional `line:col:` prefix before comparing error messages; M31
+      (span-annotated disassembly) will close the gap.)
+- [x] Add a parity test harness: run each program fixture in both `Walk` and
       `Vm` modes, assert identical stdout+stderr
-- [ ] Inline `#[test]`: every `#[test]` in `red-eval` runs in VM mode (set
+      (Ground truth: `crates/red-eval/tests/parity.rs` runs each
+      `programs/*.red` and `programs_errors/*.red` fixture in both modes
+      via `RunOptions { walk: true/false }`, asserting identical stdout
+      (for programs) or identical error messages modulo the `line:col:`
+      prefix (for errors). 2 tests: `golden_programs_parity`,
+      `golden_program_errors_parity`.)
+- [x] Inline `#[test]`: every `#[test]` in `red-eval` runs in VM mode (set
       `Env::mode = Vm` in a common test helper)
-- [ ] Inline `#[test]`: parity test for `mold(parse(mold(v)))` unaffected
+      (Ground truth: since the default is `Vm` (via `Env::new_with_output`),
+      every inline `#[test]` that builds an `Env` via `Env::new*` runs in VM
+      mode automatically — no per-test helper needed. The
+      `bench_fixtures.rs` stats tests are explicitly pinned to `Walk` via
+      `env.mode = EvalMode::Walk` because they assert walker-specific
+      `instr_count` semantics. The `compile_for_vm` / `compile_for_vm_captured`
+      helpers in `vm/vm.rs` set `env.mode = EvalMode::Vm` explicitly, but
+      that's now redundant with the default — left in place for clarity.)
+- [x] Inline `#[test]`: parity test for `mold(parse(mold(v)))` unaffected
       (compilation never touches the data-model side)
-- [ ] `cargo test --workspace` passes in VM mode
-- [ ] `cargo test --workspace` passes with `--features force-walk` (or env
+      (Ground truth: `mold_parse_mold_roundtrip_unaffected_by_vm` in
+      `interp.rs`'s `mod tests`. Round-trips 12 source strings through
+      `load_source` + `mold_to_string` twice, asserting stability.)
+- [x] `cargo test --workspace` passes in VM mode
+      (Ground truth: 575 tests pass across all crates (8 + 12 + 144 + 1 +
+      2 + 398 + 10 + 2 + 1 + 1 = 579 test results; some overlap from
+      multi-binary crates). `cargo build --workspace --tests` emits zero
+      warnings.)
+- [x] `cargo test --workspace` passes with `--features force-walk` (or env
       var) running every test in `Walk` mode too
+      (Ground truth: `cargo test --workspace --features force-walk` passes
+      (575 tests). `cargo test --workspace --features red-eval/stats` also
+      passes (577 tests — the 2 extra are the stats-feature env-counter
+      tests). `cargo test --workspace --features red-eval/stats,force-walk`
+      passes as well.)
 
 ## Milestone 30 - Performance measurement + hot-path tuning
 

@@ -1,14 +1,21 @@
-//! red-eval: tree-walking evaluator + native registry (natives land in M6+).
+//! red-eval: evaluator + native registry.
+//!
+//! Since v0.3 (M29), the default evaluator is the bytecode VM
+//! (`EvalMode::Vm`); the tree-walker lives in [`interp_legacy`] and is
+//! reachable via the CLI `--walk` flag or the `force-walk` cargo feature.
+//! The public [`interp`] module is a thin dispatch shim re-exporting both
+//! the walker surface and a mode-aware [`eval`][interp::eval].
 //!
 //! Eval-related types (`Env`, `CallFrame`, `EvalError`, `NativeFn`) live in
 //! `red-core` and are re-exported here via `context`; this crate contributes
-//! the evaluation algorithm (`interp`) and, in later milestones, the native
-//! implementations (`natives`, `series`, `binding`, `parse`).
+//! the evaluation algorithm (`interp`/`interp_legacy`) and the native
+//! implementations (`natives`, `series`, `binding`, `parse`, …).
 
 pub mod binding;
 pub mod context;
 pub mod convert;
 pub mod interp;
+pub mod interp_legacy;
 pub mod io;
 pub mod math;
 pub mod natives;

@@ -24,7 +24,18 @@ use red_core::{Series, Span, Value};
 #[cfg(feature = "stats")]
 use red_eval::binding::bind_pass;
 #[cfg(feature = "stats")]
-use red_eval::{eval, install_constants, register_natives};
+use red_eval::{install_constants, register_natives};
+// M29: the stats-counter tests (`max_frame_depth` / `instr_count`) assert
+// walker-specific instrumentation semantics (`instr_count` is bumped in
+// `interp_legacy::eval`'s outer loop, one per expression; the VM does not
+// bump it — that's M30's "correlate VM instr count with walker instr count"
+// work). So these tests call the walker directly via
+// `red_eval::interp_legacy::eval` and pin `env.mode = Walk`, even though the
+// build default is now `Vm`. The deterministic-stdout tests above
+// (`run_captured` via `run_source_with_output`) run under the default (VM)
+// mode, exercising the VM path — only the counter assertions need the walker.
+#[cfg(feature = "stats")]
+use red_eval::interp_legacy::eval;
 
 fn programs_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -134,8 +145,14 @@ fn func_call_heavy_fixture_deterministic() {
 /// Run `src` to completion, returning the `Env` so the caller can inspect the
 /// `stats` counters. Reuses the same lex/parse/bind/eval pipeline as
 /// `run_source_with_exit_opts` but keeps the `Env` alive.
+///
+/// M29: pins `env.mode = Walk` and calls `interp_legacy::eval` directly,
+/// because the stats counters (`max_frame_depth` / `instr_count`) are
+/// walker-specific instrumentation — the VM doesn't bump `instr_count`
+/// (M30 owns correlating VM instr count with walker instr count).
 #[cfg(feature = "stats")]
 fn run_keeping_env(src: &str) -> Env {
+    use red_eval::EvalMode;
     let tokens = red_core::lexer::lex(src).expect("lex failed");
     let body = if tokens.is_empty() {
         Series::empty()
@@ -148,6 +165,7 @@ fn run_keeping_env(src: &str) -> Env {
     let ctx_rc = bind_pass(&body, ctx);
     let mut env = Env::new_with_output(ctx_rc, Box::new(io::sink()));
     register_natives(&mut env);
+    env.mode = EvalMode::Walk;
     env.reset_stats();
     let block = Value::Block {
         series: body,

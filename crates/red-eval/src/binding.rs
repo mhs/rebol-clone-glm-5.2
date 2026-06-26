@@ -592,12 +592,17 @@ fn rebind_inner(
 // ---------------------------------------------------------------------------
 
 /// True if any `Word`/`SetWord`/`GetWord` in `series` (recursing into nested
-/// `Block`/`Paren`) carries a `Binding::Local(ctx, _)` whose `ctx` is not
-/// `user_ctx` — i.e. a foreign binding installed by `bind`/`use` against a
-/// child/object context. Such blocks must fall back to the tree-walker when
-/// `Env::mode == Vm`, because the VM's lexical addressing can't resolve
-/// `Binding::Local` to an arbitrary context (only to `user_ctx` globals or
-/// function-local frames). `Binding::Lexical`/`Unbound`/`Func` are VM-safe.
+/// `Block`/`Paren`) carries a binding the VM can't lexically address:
+/// - `Binding::Local(ctx, _)` whose `ctx` is not `user_ctx` — a foreign
+///   context installed by `bind`/`use` against a child/object context.
+/// - `Binding::Func(_)` — function-local slots set by `bind_function_body`,
+///   resolved via `env.call_stack` (the walker's frame stack). The VM uses
+///   its own `vm.frames`, so it can't see the walker's call frames. When a
+///   walker native (`if`/`either`/`loop`/`foreach`/`do`/etc.) calls
+///   `dispatch_block` on a block containing `Func` bindings (e.g. a func
+///   body's branch block), the VM must fall back to the walker. (M29 fix —
+///   was the root cause of the user-func refinement test failures.)
+/// `Binding::Lexical`/`Unbound` are VM-safe.
 ///
 /// Used by `interp::dispatch_block` to pick walker vs. VM for plain `Block`
 /// values passed to `do`/`reduce`/loop natives (which carry no cached
@@ -611,13 +616,11 @@ fn has_foreign_binding_value(v: &Value, user_ctx: &Rc<Context>) -> bool {
     match v {
         Value::Word { binding, .. }
         | Value::SetWord { binding, .. }
-        | Value::GetWord { binding, .. } => {
-            if let Binding::Local(ctx, _) = binding {
-                !Rc::ptr_eq(ctx, user_ctx)
-            } else {
-                false
-            }
-        }
+        | Value::GetWord { binding, .. } => match binding {
+            Binding::Local(ctx, _) => !Rc::ptr_eq(ctx, user_ctx),
+            Binding::Func(_) => true, // M29: VM can't resolve via env.call_stack
+            _ => false,
+        },
         Value::Block { series, .. } | Value::Paren { series, .. } => {
             has_foreign_bindings(series, user_ctx)
         }

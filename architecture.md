@@ -314,7 +314,21 @@ object's context).
 Every error carries the span of the offending token so the CLI can render
 `file.red:line:col: error: ...`.
 
-## Evaluator (`red-eval/src/interp.rs`)
+## Evaluator (`red-eval/src/interp.rs` + `interp_legacy.rs`)
+
+Since M29 (v0.3), the evaluator is split into a thin dispatch shim
+(`interp.rs`) and the original tree-walker (`interp_legacy.rs`). The
+default mode is the bytecode VM (`EvalMode::Vm`); `--walk` on the CLI or
+the `force-walk` cargo feature forces the tree-walker. The shim's
+`eval(block, env)` checks `env.mode`: `Walk` → `interp_legacy::eval`
+directly; `Vm` → `dispatch_block` (compile-on-demand + `vm::run`, falling
+back to the walker for `needs_rebind`/foreign-bound/compile-error blocks).
+`run_series_inner_opts` calls `dispatch_block` (not `eval` directly) so the
+top-level script body honors `env.mode`. `call_user_func` (the walker's
+function-call shim) calls `interp_legacy::eval` directly — function bodies
+invoked from the walker always stay on the walker (the VM uses its own
+`vm.frames`, not `env.call_stack`). In pure VM mode, the VM's `CallUser`
+handler is the function-invocation path.
 
 ### Types
 

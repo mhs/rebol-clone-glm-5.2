@@ -141,6 +141,43 @@ fn allow_shell_enables_call() {
         .stdout("0\n");
 }
 
+#[test]
+fn walk_flag_runs_tree_walker() {
+    // `--walk` forces the tree-walker. The output should be identical to the
+    // default (VM) mode. This test runs a simple program both ways and
+    // asserts they match. (M29)
+    let dir = tempfile_dir();
+    let path = dir.join("walk.red");
+    fs::write(&path, "Red [] print 1 + 2").unwrap();
+
+    // Default (VM) mode.
+    let vm_output = Command::cargo_bin("red-cli")
+        .unwrap()
+        .arg(&path)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    // --walk mode.
+    let walk_output = Command::cargo_bin("red-cli")
+        .unwrap()
+        .arg("--walk")
+        .arg(&path)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(
+        vm_output, walk_output,
+        "VM and Walk modes should produce identical stdout"
+    );
+    assert_eq!(String::from_utf8(vm_output).unwrap(), "3\n");
+}
+
 /// A scratch directory for test fixtures. Reuses `std::env::temp_dir()`; each
 /// test picks a unique name to avoid collisions.
 fn tempfile_dir() -> PathBuf {

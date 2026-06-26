@@ -158,7 +158,16 @@ impl Env {
             out,
             allow_shell: false,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            // M29: the bytecode VM is the default evaluator. The
+            // `force-walk` cargo feature (re-exported by `red-eval/force-walk`)
+            // flips this back to `Walk` so the entire test suite can be run
+            // against the tree-walker for golden parity
+            // (`cargo test --workspace --features force-walk`). The CLI's
+            // `--walk` flag overrides this at runtime via `RunOptions.walk`.
+            #[cfg(feature = "force-walk")]
             mode: EvalMode::Walk,
+            #[cfg(not(feature = "force-walk"))]
+            mode: EvalMode::Vm,
             func_cache: HashMap::new(),
             block_cache: HashMap::new(),
             #[cfg(feature = "stats")]
@@ -390,5 +399,26 @@ mod tests {
         // (Push without an actual frame is fine: record_frame_push just
         // reads call_stack.len() == 0, so max_frame_depth stays 0.)
         assert_eq!(env.max_frame_depth, 0);
+    }
+
+    /// M29: with `force-walk` on, `Env::new*` defaults to `EvalMode::Walk`
+    /// (the v0.2 tree-walker). This is the parity-baseline configuration:
+    /// `cargo test --workspace --features force-walk` runs the entire suite
+    /// against the walker for byte-for-byte comparison with the VM-default run.
+    #[cfg(feature = "force-walk")]
+    #[test]
+    fn force_walk_defaults_to_walker() {
+        let env = Env::new(Rc::new(Context::new()));
+        assert_eq!(env.mode, EvalMode::Walk);
+    }
+
+    /// M29: with `force-walk` off (the default build), `Env::new*` defaults
+    /// to `EvalMode::Vm` (the v0.3 bytecode VM). This is the production
+    /// configuration; `--walk` on the CLI overrides at runtime.
+    #[cfg(not(feature = "force-walk"))]
+    #[test]
+    fn vm_is_default_evaluator() {
+        let env = Env::new(Rc::new(Context::new()));
+        assert_eq!(env.mode, EvalMode::Vm);
     }
 }

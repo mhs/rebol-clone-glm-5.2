@@ -20,17 +20,22 @@ use std::cell::RefCell;
 
 use red_eval::{
     bind_pass_into, eval, install_constants, load_source, mold_to_string, register_natives,
-    render_error, Context, Env, Error, EvalError, ParseError, Value,
+    render_error, Context, Env, Error, EvalError, EvalMode, ParseError, Value,
 };
 
 /// Build a fresh REPL environment: empty user context with constants
-/// installed, all natives registered, output sent to `out`.
-fn build_env(out: Box<dyn Write>) -> Env {
+/// installed, all natives registered, output sent to `out`. If `walk` is
+/// true, force the tree-walker (`EvalMode::Walk`) regardless of the build
+/// default (M29: the default is `Vm`; `--walk` overrides for debugging).
+fn build_env(out: Box<dyn Write>, walk: bool) -> Env {
     let ctx = Context::new();
     install_constants(&ctx);
     let ctx_rc = Rc::new(ctx);
     let mut env = Env::new_with_output(ctx_rc, out);
     register_natives(&mut env);
+    if walk {
+        env.mode = EvalMode::Walk;
+    }
     env
 }
 
@@ -114,9 +119,10 @@ fn handle_line(line: &str, buffer: &mut String, env: &mut Env) -> bool {
     }
 }
 
-/// Entry point for `red` invoked with no file argument.
-pub fn run_repl() -> ExitCode {
-    let mut env = build_env(Box::new(io::stdout()));
+/// Entry point for `red` invoked with no file argument. `walk` mirrors the
+/// CLI `--walk` flag (forces the tree-walker instead of the default VM).
+pub fn run_repl(walk: bool) -> ExitCode {
+    let mut env = build_env(Box::new(io::stdout()), walk);
     let mut buffer = String::new();
 
     if io::stdin().is_terminal() {
@@ -204,7 +210,9 @@ impl Write for BufferSink {
 #[cfg(test)]
 fn repl_session(input: &str) -> String {
     let sink = Rc::new(RefCell::new(Vec::<u8>::new()));
-    let mut env = build_env(Box::new(BufferSink(Rc::clone(&sink))));
+    // REPL tests exercise the default evaluator (VM since M29); pass
+    // `walk = false` to `build_env`.
+    let mut env = build_env(Box::new(BufferSink(Rc::clone(&sink))), false);
     let mut buffer = String::new();
 
     for raw in input.split('\n') {

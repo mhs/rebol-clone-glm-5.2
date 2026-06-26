@@ -9,6 +9,11 @@ edition = "2021"
 # Zero-cost in release builds when off; the v0.3 VM milestones use these to
 # prove tail-call stack bounds and correlate VM-vs-walker instr counts.
 stats = []
+# Force the tree-walker (`EvalMode::Walk`) as the default evaluator instead of
+# the bytecode VM. Used for the M29 golden-parity baseline run
+# (`cargo test --workspace --features force-walk`) and for debugging VM
+# divergences. Off in normal builds (the VM is the default since M29).
+force-walk = []
 
 [dev-dependencies]
 proptest = "1"

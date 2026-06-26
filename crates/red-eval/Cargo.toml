@@ -8,6 +8,11 @@ edition = "2021"
 # `Env::instr_count` instrumentation used by the v0.3 VM benchmarks and
 # parity tests. Off by default so release builds pay zero cost.
 stats = ["red-core/stats"]
+# Force the tree-walker as the default evaluator (re-export of
+# `red-core/force-walk`). Used by the M29 parity harness to run the entire
+# test suite in `Walk` mode for byte-for-byte comparison with the VM-default
+# run: `cargo test --workspace --features force-walk`.
+force-walk = ["red-core/force-walk"]
 
 [dependencies]
 red-core = { path = "../red-core" }

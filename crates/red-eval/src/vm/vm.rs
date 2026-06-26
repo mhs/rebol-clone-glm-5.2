@@ -235,6 +235,13 @@ impl<'env> Vm<'env> {
                             // frame (the current top frame if it has
                             // `func: Some(...)`, else search down). Push the
                             // return value onto the caller's stack.
+                            //
+                            // M29: if there's no function frame at all (top-
+                            // level `return`), propagate the `Return` error
+                            // — matching the walker, which lets
+                            // `EvalError::Return` bubble up as an error at the
+                            // top level (the `return_outside_function_errors`
+                            // test asserts this).
                             while let Some(frame) = self.frames.last() {
                                 let is_func = frame.func.is_some();
                                 self.frames.pop();
@@ -243,7 +250,9 @@ impl<'env> Vm<'env> {
                                 }
                             }
                             if self.frames.is_empty() {
-                                return Ok(v);
+                                // No function frame found: `return` outside a
+                                // function. Propagate as an error (walker parity).
+                                return Err(EvalError::Return(v));
                             }
                             self.stack.push(v);
                         }
