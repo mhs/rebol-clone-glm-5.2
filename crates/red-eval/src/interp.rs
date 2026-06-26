@@ -491,7 +491,7 @@ fn pick_path_index(current: &Value, n: i64, path_span: Span) -> Result<Value, Ev
 /// value *without* invoking any function encountered. Same as `walk_data_path`
 /// except the head is resolved as a `GetWord` (reads the slot / fetches the
 /// native Func without dispatching).
-fn eval_get_path(parts: &[Value], path_span: Span, env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn eval_get_path(parts: &[Value], path_span: Span, env: &mut Env) -> Result<Value, EvalError> {
     if parts.is_empty() {
         return Err(EvalError::Native {
             message: "empty get-path".into(),
@@ -525,7 +525,7 @@ fn eval_get_path(parts: &[Value], path_span: Span, env: &mut Env) -> Result<Valu
 /// path is bound to a real container), then each intermediate step is
 /// walked via `step_path`, and finally the last part selects the target
 /// container and slot to write into.
-fn set_path_value(
+pub(crate) fn set_path_value(
     parts: &[Value],
     rhs: Value,
     env: &mut Env,

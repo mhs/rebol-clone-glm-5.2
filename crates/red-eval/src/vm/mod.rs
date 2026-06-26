@@ -18,3 +18,4 @@ pub mod vm;
 
 pub use ir::{CompiledBlock, Frame, Instr, disasm};
 pub use lex::{AnalysisResult, Scope, analyze_block};
+pub use vm::run;

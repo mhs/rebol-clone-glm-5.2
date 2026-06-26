@@ -138,7 +138,6 @@ struct FuncArityTable {
 }
 
 impl FuncArityTable {
-    #[cfg(test)]
     fn record(&mut self, depth: usize, slot: usize, arity: usize) {
         self.arities.insert((depth, slot), arity);
     }
@@ -180,6 +179,28 @@ pub fn compile_block(
     scope: &mut Scope,
     natives: &NativeRegistry,
 ) -> Result<CompiledBlock, CompileError> {
+    compile_block_inner(block, scope, natives, None)
+}
+
+/// Like `compile_block` but pre-seeds the `FuncArityTable` with the enclosing
+/// function's own slot (`self_func` = `(slot, arity)`), so recursive self-calls
+/// inside the body emit `CallUser(slot, arity)` instead of degrading to
+/// `LoadDynamic`. Used by the M25 VM's lazy func-body compilation path.
+pub(crate) fn compile_block_for_func_body(
+    block: &Series,
+    scope: &mut Scope,
+    natives: &NativeRegistry,
+    self_func: (u32, usize),
+) -> Result<CompiledBlock, CompileError> {
+    compile_block_inner(block, scope, natives, Some(self_func))
+}
+
+fn compile_block_inner(
+    block: &Series,
+    scope: &mut Scope,
+    natives: &NativeRegistry,
+    self_func: Option<(u32, usize)>,
+) -> Result<CompiledBlock, CompileError> {
     // Phase 1: lexical analysis (M23). Attaches `Binding::Lexical` to
     // function-local words and computes `freevars` + `needs_rebind`.
     let analysis = analyze_block(block, scope);
@@ -190,19 +211,35 @@ pub fn compile_block(
         return Ok(stub_block(block, analysis));
     }
 
+    let mut func_arities = FuncArityTable::default();
+    if let Some((slot, arity)) = self_func {
+        // Self-recursion: the func's own slot is at depth 0 (global) when the
+        // SetWord defining it is top-level; M25's lazy-compile path passes the
+        // actual slot. The depth is 0 relative to the body's *parent* scope,
+        // which is what the body's `Scope::child` parent represents.
+        func_arities.record(0, slot as usize, arity);
+    }
     let mut compiler = Compiler {
         instrs: Vec::new(),
         pool: ConstantPool::new(),
         natives,
-        func_arities: FuncArityTable::default(),
+        func_arities,
     };
 
     let data = block.data.borrow();
     let n = data.len();
     let mut i = block.index;
     while i < n {
-        let is_last = i + 1 == n;
-        compile_expr(&mut compiler, &data, &mut i, scope, /*tail*/ is_last)?;
+        compile_expr(&mut compiler, &data, &mut i, scope, /*tail*/ false)?;
+        // If `compile_expr` consumed the last values, this was the final
+        // expression — its result stays on the stack as the block's return
+        // value. Otherwise, pop the intermediate result. (We can't compute
+        // `is_last` before compiling because `if`/`either`/native calls
+        // consume a variable number of values. M28 will rework the `tail`
+        // flag when it adds tail-call optimization.)
+        if i < n {
+            compiler.emit(Instr::Pop);
+        }
     }
     drop(data);
 
@@ -453,14 +490,21 @@ fn compile_prefix(
                     kind: CompileErrorKind::ArityMismatch,
                 });
             }
+            // If the RHS is a `func`/`does`/`function` form, peek its arity
+            // now so subsequent `CallUser`s to this slot know how many args
+            // to collect. This makes `square: func [x][x * x] square 5` emit
+            // `CallUser(slot, 1)` rather than degrading to `LoadDynamic`.
+            if let Some(arity) = peek_func_arity(data, *i) {
+                let (depth, slot) = slot_coords(binding);
+                c.func_arities.record(depth, slot, arity);
+            }
             // RHS is a full expression (so `x: 1 + 2` works).
             compile_expr(c, data, i, scope, /*tail*/ false)?;
             emit_store(c, binding, *w_span, sym)?;
-            // SetXxx consumes the RHS (pushes nothing). The walker returns
-            // the written value; the VM's `Return` reads top-of-stack, so to
-            // match we re-push the value via... actually the walker returns
-            // `Ok(rhs)` explicitly. The VM's `SetGlobal` (M25) will push the
-            // stored value back. For M24 (compile-only) we leave it to M25.
+            // `SetGlobal`/`SetLocal` (M25) pop the RHS and push the written
+            // value back, so the walker's "SetWord returns the written value"
+            // semantics hold. Non-last SetWords get a `Pop` from the enclosing
+            // `compile_block_inner` loop.
         }
 
         // GetWord: load without calling (matches walker semantics).
@@ -684,16 +728,13 @@ fn compile_block_series_inline(
     let n = data.len();
     let mut j = series.index;
     while j < n {
-        let is_last = j + 1 == n;
-        // Tail-ness propagates only into the branch's LAST expression.
-        compile_expr(c, &data, &mut j, scope, tail && is_last)?;
-        // Non-last expressions get Pop'd (their result is unused). The last
-        // expression's value stays on the stack as the branch's result.
-        if !is_last {
-            // `compile_expr` may have emitted a SetWord (which pushes nothing).
-            // We can't easily tell here without instr inspection; the M25 VM
-            // handles empty-stack Pop gracefully. For M24 (compile-only) emit
-            // Pop conservatively — M25's Pop on an empty stack is a no-op.
+        compile_expr(c, &data, &mut j, scope, tail)?;
+        // If `compile_expr` consumed the last values, this was the final
+        // expression — its result stays on the stack as the branch's result.
+        // Otherwise, pop the intermediate result. (Can't compute `is_last`
+        // before compiling because expressions span a variable number of
+        // values — e.g. `n * fact n - 1` is 6 values but 1 expression.)
+        if j < n {
             c.emit(Instr::Pop);
         }
     }
@@ -1027,6 +1068,36 @@ fn emit_store(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// If `data[i]` begins a `func`/`does`/`function` form, return the param
+/// count (arity) by peeking at the spec block. Used by the SetWord arm so a
+/// subsequent `CallUser` to the same slot knows how many args to collect.
+/// Returns `None` for non-func forms or malformed specs (the runtime native
+/// reports the error later).
+fn peek_func_arity(data: &[Value], i: usize) -> Option<usize> {
+    let _skip = func_form_skip(data, i)?;
+    let is_does = matches!(
+        &data[i],
+        Value::Word { sym, .. } if sym.as_str() == "does"
+    );
+    if is_does {
+        return Some(0);
+    }
+    let spec_val = &data[i + 1];
+    extract_spec(spec_val).ok().map(|s| s.params.len())
+}
+
+/// Extract `(depth, slot)` from a `Binding` for `FuncArityTable` keying.
+/// `Lexical(d, s)` and `Local(_, s)` map to `(d, s)`; `Func(s)` maps to
+/// `(0, s)` (function-local slot, resolved via the active call frame).
+fn slot_coords(binding: &Binding) -> (usize, usize) {
+    match binding {
+        Binding::Lexical(d, s) => (*d, *s),
+        Binding::Local(_, s) => (0, *s),
+        Binding::Func(s) => (0, *s),
+        Binding::Unbound => (0, 0),
+    }
+}
+
 /// Estimate the source span of a `Series` (used for `CompiledBlock.source_span`).
 /// M24 doesn't need an exact span — just a fallback; M31 (disassembler) will
 /// thread precise spans through.
@@ -1048,12 +1119,16 @@ fn block_source_span(block: &Series) -> Span {
 /// doesn't expose this directly; we approximate via the root scope's child
 /// slot count when possible. For the top-level block this is 0 (no
 /// function-local slots); for a func body it's `params + refinements + locals`.
-fn scope_locals_count(_scope: &Scope) -> usize {
-    // M23's `Scope` doesn't expose a slot count. For M24 we set 0; M25
-    // (VM) allocates the frame's `locals` Vec based on the FuncDef's spec
-    // at `CallUser` time, not from this field. The field exists for
-    // debugging/introspection and can be refined in M31.
-    0
+fn scope_locals_count(scope: &Scope) -> usize {
+    // For a func body (depth >= 1), the scope's slot count is params +
+    // refinements + locals + body-local SetWords — the frame's `locals` Vec
+    // size at `CallUser` time. For the top-level script body (depth 0) there
+    // are no function-local slots; all words live in the user context.
+    if scope.depth() == 0 {
+        0
+    } else {
+        scope.slot_count()
+    }
 }
 
 /// Detect `make object! [spec]` — mirrors `lex.rs`'s `is_make_object_form`.
@@ -1196,7 +1271,11 @@ mod tests {
         assert!(matches!(block.pool[0], Value::Integer { n: 5, .. }));
     }
 
-    /// `foo: 5 foo` -> `[Const(0), SetGlobal(0), LoadGlobal(0), Return]`. (plan3.md:308)
+    /// `foo: 5 foo` -> `[Const(0), SetGlobal(slot), Pop, LoadGlobal(slot), Return]`.
+    /// (plan3.md:308 — originally expected no `Pop`, but M25 adds `Pop` after
+    /// non-last expressions to keep the VM stack disciplined. The SetWord is
+    /// not the last expression, so its pushed-back value is popped before the
+    /// `foo` load. The walker's `last = ...` overwrite is the equivalent.)
     #[test]
     fn compile_setword_then_load() {
         let (body, ctx_rc, registry) = parse_bind_and_registry("foo: 5 foo");
@@ -1215,6 +1294,7 @@ mod tests {
             &[
                 Instr::Const(0),
                 Instr::SetGlobal(foo_slot as u32),
+                Instr::Pop,
                 Instr::LoadGlobal(foo_slot as u32),
                 Instr::Return,
             ],
@@ -1333,7 +1413,7 @@ mod tests {
         let (body, ctx_rc, registry) =
             parse_bind_and_registry("fact: func [n][either n <= 1 [1][n * fact n - 1]]");
         let mut scope = Scope::root(&ctx_rc);
-        let block = compile_block(&body, &mut scope, &registry).expect("compile");
+        let _block = compile_block(&body, &mut scope, &registry).expect("compile");
         // The outer block compiles to: MakeFunc(...) + Return. The func body
         // is *not* compiled here — MakeFunc caches the body block; M25
         // lazily compiles it on first invocation. To verify CallUser emission,

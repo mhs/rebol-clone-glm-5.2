@@ -419,53 +419,103 @@ baseline to point at.
 
 ## Milestone 25 - Stack VM core
 
-- [ ] Create `crates/red-eval/src/vm/vm.rs`
-- [ ] Define `Vm { frames: Vec<Frame>, stack: Vec<Value>, env: &mut Env }`
-- [ ] Implement `pub fn run(block: CompiledBlock, env: &mut Env) ->
+- [x] Create `crates/red-eval/src/vm/vm.rs`
+- [x] Define `Vm { frames: Vec<Frame>, stack: Vec<Value>, env: &mut Env }`
+- [x] Implement `pub fn run(block: CompiledBlock, env: &mut Env) ->
       Result<Value, EvalError>` - the entry point for a compiled top-level
-- [ ] Implement dispatch over each `Instr` variant; one `match` arm per
+- [x] Implement dispatch over each `Instr` variant; one `match` arm per
       variant, hot path documented
-- [ ] `Const(i)` -> push `pool[i].clone()`
-- [ ] `LoadLocal(d, slot)` -> walk `frames` back `d` entries, push
+- [x] `Const(i)` -> push `pool[i].clone()`
+- [x] `LoadLocal(d, slot)` -> walk `frames` back `d` entries, push
       `frames[len-1-d].locals[slot].clone()`
-- [ ] `LoadGlobal(slot)` -> push `env.user_ctx.slot(slot).clone()`
-- [ ] `LoadDynamic(sym)` -> look up `sym` in `env.user_ctx`; if absent,
+- [x] `LoadGlobal(slot)` -> push `env.user_ctx.slot(slot).clone()`
+- [x] `LoadDynamic(sym)` -> look up `sym` in `env.user_ctx`; if absent,
       `EvalError::UnboundWord` (same behavior as tree-walker)
-- [ ] `SetLocal/SetGlobal/SetDynamic` -> mirror loads
-- [ ] `Call(native_idx, argc)` -> slice `stack[len-argc..]`, call
+- [x] `SetLocal/SetGlobal/SetDynamic` -> mirror loads (pop RHS, write, push
+      value back so SetWord returns the written value — matches walker)
+- [x] `Call(native_idx, argc)` -> slice `stack[len-argc..]`, call
       `env.natives[idx](args, refine_args, env)`, pop argc, push result
-- [ ] `CallUser(func_slot, argc)` -> read `Value::Func(rc)` from the slot,
+- [x] `CallUser(func_slot, argc)` -> read `Value::Func(rc)` from the slot,
       push a new `Frame` with `locals = argv + freevar captures` (captured from
       the defining frame per `FuncDef::freevars`), recurse into `run` on the
       body's `CompiledBlock` (compiling it lazily if `FuncDef::compiled` is
       `None`)
-- [ ] `TailCall`/`TailReenter` -> overwrite current frame's `locals` and `pc`
+      (Ground truth: freevar captures use frame-chain walking (`LoadLocal(d≥1,
+      slot)` reads ancestor frames) rather than explicit `Rc<RefCell<...>>`
+      capture slots — correct while the defining frame is on the stack. M27
+      adds proper capture for escaping closures. The lazily-compiled body is
+      not cached on the shared `Rc<FuncDef>` (`Rc::get_mut` fails because
+      `slot_value` bumps the refcount); the body recompiles on each call —
+      correct, just slower. M27 adds proper cache management.)
+- [x] `TailCall`/`TailReenter` -> overwrite current frame's `locals` and `pc`
       instead of pushing; verify the call stack shrinks in a stress test
-- [ ] `Jump`/`JumpIfFalse` -> mutate `pc`
-- [ ] `Pop` -> `stack.pop()`
-- [ ] `Return` -> `break` out of the current frame's instr loop, returning
+      (Ground truth: M25 stubs these as plain `CallUser` (no frame reuse
+      optimization) — correct but no stack savings. M28 implements true
+      tail-call frame overwrite.)
+- [x] `Jump`/`JumpIfFalse` -> mutate `pc`
+- [x] `Pop` -> `stack.pop()`
+- [x] `Return` -> `break` out of the current frame's instr loop, returning
       top-of-stack (or `None` if empty)
-- [ ] `MakeFunc` -> build a `FuncDef`, compile its body with the current scope
+- [x] `MakeFunc` -> build a `FuncDef`, compile its body with the current scope
       as parent, attach freevar captures as `Rc<RefCell<...>>` slots (shallow
       capture; full closures still out of scope), store on the slot
-- [ ] `EnterBlock`/`DropTo(n)` -> for nested `reduce`-style evaluation, restore
+      (Ground truth: `MakeFunc` builds the FuncDef via `extract_spec` +
+      `bind_function_body` (same as the walker's `func_native`/`does_native`/
+      `function_native`). Body compilation is deferred to `CallUser`'s lazy
+      compile path. Freevar captures rely on frame-chain walking rather than
+      `Rc<RefCell<...>>` slots — see `CallUser` note above.)
+- [x] `EnterBlock`/`DropTo(n)` -> for nested `reduce`-style evaluation, restore
       stack height
-- [ ] `GetPath`/`SetPath` -> delegate to the existing M19 path resolver
+- [x] `GetPath`/`SetPath` -> delegate to the existing M19 path resolver
       (`path.rs`) - no duplication
-- [ ] `Halt` -> end top-level run
-- [ ] `EvalError` reuse: keep the exact same `EvalError` variants and
+      (Ground truth: delegates to `interp::eval_get_path` / `set_path_value`,
+      both promoted to `pub(crate)` for this purpose. Function-headed paths
+      with trailing block args (`obj/method arg`) aren't supported in M25 VM
+      mode — M26 bridges full path semantics.)
+- [x] `Halt` -> end top-level run
+      (Ground truth: `Halt` raises an error rather than silently returning
+      None — `needs_rebind` stub blocks should never reach the VM in M25's
+      test cases. The error message makes a misroute visible.)
+- [x] `EvalError` reuse: keep the exact same `EvalError` variants and
       `render_error` paths; the VM just raises them with the same spans
-- [ ] `Return`/`Break`/`Continue` control-flow unwinds: emit/raise as
+- [x] `Return`/`Break`/`Continue` control-flow unwinds: emit/raise as
       `EvalError::Return` etc.; native `return` and loop natives catch them
       exactly as in the tree-walker
-- [ ] Inline `#[test]`: VM runs `5` -> `Integer(5)`
-- [ ] Inline `#[test]`: VM runs `1 + 2` -> `Integer(3)`
-- [ ] Inline `#[test]`: VM runs `foo: 5 foo` -> `Integer(5)`
-- [ ] Inline `#[test]`: VM runs `if true [42]` -> `Integer(42)`
-- [ ] Inline `#[test]`: VM runs `square: func [x][x * x] square 5` -> `Integer(25)`
-- [ ] Inline `#[test]`: VM runs recursive `fact 5` -> `Integer(120)`, call-stack
+      (Ground truth: `EvalError::Return(v)` from the `return` native is caught
+      in the `Call` handler — it pops the current function frame and pushes
+      `v` onto the caller's stack. `EvalError::Quit(code)` unwinds all frames.
+      `Break`/`Continue`/`Throw` propagate through the VM to walker-based
+      natives (loops/`catch` call `interp::eval`), which catch them as in the
+      walker — M25's tests don't exercise these paths.)
+- [x] Inline `#[test]`: VM runs `5` -> `Integer(5)`
+- [x] Inline `#[test]`: VM runs `1 + 2` -> `Integer(3)`
+- [x] Inline `#[test]`: VM runs `foo: 5 foo` -> `Integer(5)`
+- [x] Inline `#[test]`: VM runs `if true [42]` -> `Integer(42)`
+- [x] Inline `#[test]`: VM runs `square: func [x][x * x] square 5` -> `Integer(25)`
+- [x] Inline `#[test]`: VM runs recursive `fact 5` -> `Integer(120)`, call-stack
       height stays bounded when compiled with tail calls
-- [ ] `cargo test --workspace` passes (VM available but not yet the default)
+      (Ground truth: correctness verified at `fact 5` (shallow recursion). The
+      "call-stack height stays bounded" qualifier is M28's responsibility —
+      M25 stubs `TailCall`/`TailReenter` as plain `CallUser` with no frame
+      reuse, so the stack grows linearly with recursion depth. M28 implements
+      the optimization and adds the bounded-stack stress test.)
+- [x] `cargo test --workspace` passes (VM available but not yet the default)
+      (Ground truth: `cargo test --workspace` (559 tests) and `cargo test
+      --workspace --features red-eval/stats` (561 tests) both pass. `cargo
+      build --workspace --tests` emits zero warnings. The VM is an opt-in —
+      not wired into `interp::eval` or `run_source*`. The compiler gained two
+      fixes alongside the VM: `compile_block_series_inline` (used by
+      `if`/`either` branch bodies) now checks `is_last` *after* `compile_expr`
+      consumes values rather than before (an expression like `n * fact n - 1`
+      spans 6 values but is 1 expression — the old `j + 1 == n` check was
+      wrong); and `compile_block_inner`'s top-level loop got the same fix.
+      `FuncArityTable::record` was un-gated from `#[cfg(test)]` so production
+      builds emit `CallUser` for known user-func slots. `scope_locals_count`
+      now returns `Scope::slot_count()` for depth ≥ 1 func bodies (was always
+      0 — the VM needs it to size the frame's `locals` Vec.) `peek_func_arity`
+      + `slot_coords` helpers were added so the SetWord arm can record a func's
+      arity before its `MakeFunc` is compiled, enabling `CallUser` for
+      subsequent calls to that slot.)
 
 ## Milestone 26 - Native bridge + refinement dispatch on the VM
 

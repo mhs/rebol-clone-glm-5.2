@@ -118,6 +118,13 @@ impl Scope {
     pub fn depth(&self) -> usize {
         self.depth
     }
+
+    /// Number of slots allocated in this scope (params + refinements + locals
+    /// + body-local SetWords). The M25 VM uses this to size a func frame's
+    /// `locals` Vec at `CallUser` time.
+    pub(crate) fn slot_count(&self) -> usize {
+        self.bindings.len()
+    }
 }
 
 impl Clone for Scope {
