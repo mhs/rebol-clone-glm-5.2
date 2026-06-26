@@ -46,6 +46,26 @@ use crate::natives::extract_spec;
 use crate::vm::lex::{AnalysisResult, Scope, analyze_block};
 use crate::vm::pool::ConstantPool;
 
+// Test-only per-thread counter of `compile_block_inner` invocations. M27
+// tests assert that a func body is compiled exactly once across multiple
+// calls (cache hit on the second call). Thread-local so parallel `cargo
+// test` threads don't interfere. Reset via `reset_compile_counter()` before
+// a test.
+#[cfg(test)]
+thread_local! {
+    static COMPILE_COUNT: std::cell::Cell<u32> = std::cell::Cell::new(0);
+}
+
+#[cfg(test)]
+pub(crate) fn reset_compile_counter() {
+    COMPILE_COUNT.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn read_compile_counter() -> u32 {
+    COMPILE_COUNT.with(|c| c.get())
+}
+
 // ---------------------------------------------------------------------------
 // Native registry snapshot
 // ---------------------------------------------------------------------------
@@ -244,6 +264,8 @@ fn compile_block_inner(
     natives: &NativeRegistry,
     self_func: Option<(u32, usize)>,
 ) -> Result<CompiledBlock, CompileError> {
+    #[cfg(test)]
+    COMPILE_COUNT.with(|c| c.set(c.get() + 1));
     // Phase 1: lexical analysis (M23). Attaches `Binding::Lexical` to
     // function-local words and computes `freevars` + `needs_rebind`.
     let analysis = analyze_block(block, scope);

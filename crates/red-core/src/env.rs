@@ -15,7 +15,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::context::Context;
-use crate::value::{FuncDef, Span, Symbol, Value};
+use crate::value::{FuncDef, Series, Span, Symbol, Value};
+use crate::vm_ir::CompiledBlock;
 
 /// Refinement arguments handed to a native at call time. Built by
 /// `dispatch_call` from the call site (path refinements and/or inline
@@ -105,6 +106,27 @@ pub struct Env {
     /// `interp::dispatch_block`, so a native invoked from the VM re-enters
     /// the VM for its block args (unless the block is `needs_rebind`).
     pub mode: EvalMode,
+    /// VM compiled-block cache for function bodies, keyed by
+    /// `Rc::as_ptr(fd) as usize` (stable across `Rc` clones of the same
+    /// underlying `FuncDef`). Populated lazily by the VM's `ensure_compiled`
+    /// on the first `CallUser` to a given func; invalidated by `bind` on a
+    /// `Value::Func` and defensively by `bind_function_body` (which only runs
+    /// at func-creation time, before any cache entry exists). M27.
+    ///
+    /// This is the *authoritative* VM cache for func bodies —
+    /// `FuncDef::compiled` is a construction-time hint that stays `None` for
+    /// funcs created in `Walk` mode (the slot for recursive `CallUser`
+    /// emission isn't known until the SetWord stores the func at runtime, so
+    /// eager compilation at `MakeFunc` time would emit a wrong slot index).
+    pub func_cache: HashMap<usize, Rc<CompiledBlock>>,
+    /// VM compiled-block cache for non-function blocks that are `do`-ed /
+    /// `reduce`-d / loop-body-ed repeatedly, keyed by
+    /// `(Rc::as_ptr(&series.data) as usize, series.index)`. Safe without
+    /// explicit invalidation because `bind`/`use` deep-clone the series (a new
+    /// `Rc` allocation → different identity → cache miss, recompile) and
+    /// `user_ctx` slots are append-only (cached `LoadGlobal(slot)` indices
+    /// remain valid). M27.
+    pub block_cache: HashMap<(usize, usize), Rc<CompiledBlock>>,
     /// High-water mark of `call_stack.len()` since the last
     /// [`Self::reset_stats`] call. Used by the v0.3 VM milestones to prove
     /// tail-call stack bounds. Only present under the `stats` cargo feature;
@@ -137,6 +159,8 @@ impl Env {
             allow_shell: false,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             mode: EvalMode::Walk,
+            func_cache: HashMap::new(),
+            block_cache: HashMap::new(),
             #[cfg(feature = "stats")]
             max_frame_depth: 0,
             #[cfg(feature = "stats")]
@@ -163,6 +187,30 @@ impl Env {
         if depth > self.max_frame_depth {
             self.max_frame_depth = depth;
         }
+    }
+
+    /// Remove `fd`'s entry from `func_cache` (the authoritative VM compiled-
+    /// block cache for function bodies). Called when `bind` mutates a func's
+    /// body so the next `CallUser` recompiles against the new bindings. M27.
+    pub fn invalidate_func_cache(&mut self, fd: &Rc<FuncDef>) {
+        self.func_cache.remove(&(Rc::as_ptr(fd) as usize));
+    }
+
+    /// Remove `series`'s entry from `block_cache` (the VM compiled-block cache
+    /// for `do`-ed / `reduce`-d / loop-body blocks). Called defensively by
+    /// any path that mutates a block's words in place (most paths deep-clone
+    /// instead, producing a new `Rc` identity → natural cache miss). M27.
+    pub fn invalidate_block_cache(&mut self, series: &Series) {
+        self.block_cache
+            .remove(&(Rc::as_ptr(&series.data) as usize, series.index));
+    }
+
+    /// Clear both VM caches. Defensive — used when `user_ctx` is swapped (e.g.
+    /// `use`), ensuring no cached block compiled against the prior ctx is
+    /// reused. M27.
+    pub fn clear_caches(&mut self) {
+        self.func_cache.clear();
+        self.block_cache.clear();
     }
 }
 

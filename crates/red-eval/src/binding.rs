@@ -399,6 +399,13 @@ pub fn bind_function_body(fd: &mut FuncDef, user_ctx: &Rc<Context>) {
     collect_loop_vars(&fd.body, &fd.ctx);
     // 5. Attach bindings: function-local first, then outer user-ctx refs.
     attach_func_bindings(&fd.body, &fd.ctx, user_ctx);
+    // 6. M27: defensively clear the construction-time compiled hint. The body
+    //    bindings just changed, so any previously-compiled form is stale. In
+    //    the common case this runs at func-creation time (before any VM cache
+    //    entry exists), so it's a no-op; it exists for correctness against
+    //    future re-bind paths. Callers with `&mut Env` should also call
+    //    `Env::invalidate_func_cache` to clear the authoritative cache entry.
+    fd.invalidate_compiled();
 }
 
 /// Bind a `use` body's words to the child context: words whose names are in

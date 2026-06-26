@@ -163,6 +163,21 @@ pub struct FuncDef {
     pub infix: bool,
 }
 
+impl FuncDef {
+    /// Clear the construction-time `compiled` hint. Defensive — called by
+    /// `bind_function_body` after it mutates the body's word bindings, and
+    /// by any rebind path that touches a `Value::Func`'s body. The
+    /// *authoritative* VM cache lives on `Env::func_cache` (M27); callers
+    /// with `&mut Env` should also call `Env::invalidate_func_cache` to clear
+    /// that entry. This field stays `None` for funcs created in `Walk` mode
+    /// (the slot for recursive `CallUser` emission isn't known until
+    /// runtime), so clearing it is a no-op in the common case — the method
+    /// exists for correctness against future eager-compile paths.
+    pub fn invalidate_compiled(&mut self) {
+        self.compiled = None;
+    }
+}
+
 /// The single runtime value type. Covers every variant from the brief, even
 /// ones not exercised until later milestones (`Path`, `String8`, `Func`).
 ///

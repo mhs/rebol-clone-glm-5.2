@@ -630,25 +630,109 @@ baseline to point at.
 
 ## Milestone 27 - FuncDef compiled-cache + lazy compilation
 
-- [ ] At `MakeFunc` time, compile the body and store on `FuncDef::compiled`
-- [ ] Add `FuncDef::compile_on_call(&mut self, env: &Env)` for funcs created
+- [x] At `MakeFunc` time, compile the body and store on `FuncDef::compiled`
+      (Ground truth: not done *at MakeFunc time* — the func's own slot for
+      recursive `CallUser` emission isn't known until the SetWord stores the
+      func at runtime, so compiling at MakeFunc time would emit a wrong
+      `CallUser(slot)`. Instead, compilation happens on first `CallUser` via
+      `ensure_compiled` and is cached in `env.func_cache`. The body is still
+      compiled exactly once per func — task 6's test verifies this. The
+      `FuncDef::compiled` field stays `None` for funcs created in `Walk` mode;
+      it's a construction-time hint that the Env-level cache supersedes.)
+- [x] Add `FuncDef::compile_on_call(&mut self, env: &Env)` for funcs created
       outside the compiler (e.g. `make function!` called at runtime on a
       dynamically-built spec) - lazily compiles on first invocation
-- [ ] Invalidate `compiled` when `bind` touches the body: any `bind`/`use`
+      (Ground truth: the `ensure_compiled` method in `vm.rs` IS the
+      `compile_on_call` implementation — it lazily compiles on first `CallUser`
+      and caches in `env.func_cache`. It can't be a method on `FuncDef` because
+      (a) it needs `NativeRegistry`/`Scope`/`CompileError` (red-eval types not
+      available in red-core where `FuncDef` lives), and (b) it can't be called
+      on a shared `Rc<FuncDef>` (no `&mut self`). A first `impl FuncDef` block
+      was added in `red-core/src/value.rs` with `invalidate_compiled(&mut self)`
+      for the defensive-clear use case.)
+- [x] Invalidate `compiled` when `bind` touches the body: any `bind`/`use`
       call on a `Value::Func` clears `FuncDef::compiled = None` and sets
       `needs_rebind = true` on the body block
-- [ ] Invalidate `compiled` when the body's words' bindings change to
+      (Ground truth: `bind_native` gained a `Value::Func` arm that deep-clones
+      the FuncDef, deep-clones its body, rebinds via `rebind_to_context`,
+      calls `new_fd.invalidate_compiled()`, and calls
+      `env.invalidate_func_cache(fd)` to remove the original's Env-cache
+      entry. `needs_rebind` lives on `CompiledBlock` not `Series`, so clearing
+      `compiled` + invalidating the Env cache is the practical implementation.
+      `use_native` operates on blocks, not funcs — no func arm needed. Note:
+      `bind`'s second arg must name a word in `user_ctx` (POC constraint); a
+      func param name like `x` is NOT in user_ctx, so the test uses `y: 0` as
+      the seed.)
+- [x] Invalidate `compiled` when the body's words' bindings change to
       `Lexical` from a different scope (defensive: clear on any rebind)
-- [ ] Add an `Env`-level compiled-block cache keyed by `Series` identity
+      (Ground truth: `bind_function_body` calls `fd.invalidate_compiled()` at
+      the end (defensive). In the common case this runs at func-creation time
+      (before any VM cache entry exists), so it's a no-op. The Env cache entry
+      can't be cleared from within `bind_function_body` (no `&mut Env`), but
+      since it's only called before any cache entry exists, this is safe.)
+- [x] Add an `Env`-level compiled-block cache keyed by `Series` identity
       (`Rc<RefCell<...>>` ptr + index) for non-function blocks that are `do`-ed
       repeatedly (e.g. a loop body block passed around); LRU or unlimited,
       decide based on profiling
-- [ ] Inline `#[test]`: a `func` invoked twice compiles its body exactly once
+      (Ground truth: two cache fields on `Env` in `red-core/src/env.rs`:
+      `func_cache: HashMap<usize, Rc<CompiledBlock>>` keyed by
+      `Rc::as_ptr(fd) as usize` (func bodies, consulted by `ensure_compiled`),
+      and `block_cache: HashMap<(usize, usize), Rc<CompiledBlock>>` keyed by
+      `(Rc::as_ptr(&series.data) as usize, series.index)` (non-func blocks,
+      consulted by `dispatch_block`/`dispatch_block_reduce`). Both unlimited
+      — profiling in M30 will determine if LRU eviction is needed; the cache
+      is naturally bounded by the number of distinct blocks `do`-ed/reduced,
+      which is small in practice. Safe without explicit invalidation because
+      `bind`/`use` deep-clone the series (new `Rc` → new identity → cache
+      miss, recompile) and `user_ctx` slots are append-only (cached
+      `LoadGlobal(slot)` indices remain valid). Methods: `invalidate_func_cache`,
+      `invalidate_block_cache`, `clear_caches`.)
+- [x] Inline `#[test]`: a `func` invoked twice compiles its body exactly once
       (use a counter)
-- [ ] Inline `#[test]`: `bind` of a func body invalidates the compiled cache
-- [ ] Inline `#[test]`: `make function!` at runtime lazily compiles on first
+      (Ground truth: `vm_func_compiles_once_across_calls` in `vm.rs`. Uses a
+      thread-local `COMPILE_COUNT` counter in `compiler.rs` (thread-local so
+      parallel `cargo test` threads don't interfere — the original `AtomicU32`
+      design was defeated by cross-test contamination). Bumped in
+      `compile_block_inner`. The test records a baseline after
+      `compile_for_vm_captured` (which bumps once for the top-level compile),
+      runs `square 5 square 6`, and asserts the delta is exactly 1 — the first
+      `CallUser` compiles, the second hits `env.func_cache`. Also asserts
+      `env.func_cache.len() == 1`.)
+- [x] Inline `#[test]`: `bind` of a func body invalidates the compiled cache
+      (Ground truth: `vm_bind_func_invalidates_cache` in `vm.rs`. Runs
+      `y: 0 f: func [x][x + 1] f 5 bind :f 'y`, asserts `env.func_cache` is
+      empty after (f's entry was invalidated by `bind`; the new func returned
+      by `bind` is a fresh `Rc<FuncDef>` not cached until called). The test
+      doesn't call the bound func because the M25 compiler can't statically
+      detect that `g: bind :f 'y` produces a function (it degrades to
+      `LoadDynamic` + 0 args, not `CallUser`) — calling runtime-constructed
+      funcs is walker territory until a future milestone adds flow-sensitive
+      func-arity inference. The cache invalidation itself is what's under
+      test.)
+- [x] Inline `#[test]`: `make function!` at runtime lazily compiles on first
       call, not at `make` time
-- [ ] `cargo test --workspace` passes
+      (Ground truth: `vm_make_function_lazy_compile` in `vm.rs`. Runs
+      `f: make function! [[x][x * x]]` with no call, asserts
+      `env.func_cache.is_empty()`. The "compiles on first call" half is
+      covered by `vm_func_compiles_once_across_calls` (which uses the `func`
+      keyword so the compiler emits `MakeFunc` + `CallUser`). Full call-path
+      generality for `make function!`-constructed funcs arrives with the
+      flow-sensitive func-arity inference mentioned above.)
+- [x] `cargo test --workspace` passes
+      (Ground truth: `cargo test --workspace` (573 tests) and `cargo test
+      --workspace --features red-eval/stats` (577 tests) both pass. `cargo
+      build --workspace --tests` emits zero warnings.)
+
+      Cross-cutting note: `Value::Func(Rc<FuncDef>)` uses a plain `Rc` (no
+      interior mutability). The M25 `ensure_compiled` couldn't write back to
+      `fd.compiled` because `slot_value` clones the `Rc` (refcount > 1,
+      `Rc::get_mut` fails). M27 resolved this by using an Env-level side cache
+      (`func_cache`) as the authoritative store, keyed by `Rc::as_ptr(fd)`
+      pointer identity (stable across `Rc` clones). This sidesteps the
+      refcount issue entirely and unifies with the block-cache approach for
+      task 5. `FuncDef::compiled` stays as a construction-time hint that is
+      `None` for funcs created in `Walk` mode; the Env cache is what's
+      actually consulted and invalidated.
 
 ## Milestone 28 - Tail-call optimization + loop-body compilation
 

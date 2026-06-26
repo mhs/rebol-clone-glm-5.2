@@ -1323,11 +1323,15 @@ fn use_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value
 /// word in the user context (the canonical Red form takes a context value;
 /// objects are out of scope, so we accept a word/lit-word and bind to the
 /// user context it lives in). Returns the rebound block (a deep copy).
+///
+/// M27: also accepts a `function!` as the first argument (`bind :func 'word`),
+/// returning a new function whose body words are rebound to the user
+/// context. The original function's VM compiled-block cache entry is
+/// invalidated so the next call recompiles against the new bindings.
 fn bind_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "bind", 2, args.len()));
     }
-    let block = expect_block(args, 0, "bind")?;
     // Verify the word operand is bound in the user context (POC: the only
     // context available). The operand itself is otherwise unused — `bind`
     // always rebinds to the user context in the POC.
@@ -1348,20 +1352,42 @@ fn bind_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
             span: args[1].span_or_default(),
         });
     }
-    // Deep-copy the block so we don't mutate shared data, then rebind every
-    // word whose name is in the user context to a `Binding::Local` pointing
-    // at it.
-    let series = match &block {
-        Value::Block { series, .. } => series.clone(),
-        _ => unreachable!(),
-    };
-    let rebound = crate::binding::deep_clone_series(&series);
     let all_names: Vec<Symbol> = env.user_ctx.names.borrow().keys().cloned().collect();
-    crate::binding::rebind_to_context(&rebound, &env.user_ctx, &all_names);
-    Ok(Value::Block {
-        series: rebound,
-        span: Span::new(0, 0),
-    })
+    match &args[0] {
+        // Block form: deep-copy the block so we don't mutate shared data,
+        // then rebind every word whose name is in the user context to a
+        // `Binding::Local` pointing at it.
+        Value::Block { series, .. } => {
+            let rebound = crate::binding::deep_clone_series(series);
+            crate::binding::rebind_to_context(&rebound, &env.user_ctx, &all_names);
+            Ok(Value::Block {
+                series: rebound,
+                span: Span::new(0, 0),
+            })
+        }
+        // Function form (M27): clone the FuncDef, deep-clone its body, rebind
+        // body words, invalidate the original's VM cache entry. Returns a new
+        // `Value::Func` (a deep copy — the original is untouched).
+        Value::Func(fd) => {
+            let mut new_fd: FuncDef = (**fd).clone();
+            new_fd.body = crate::binding::deep_clone_series(&fd.body);
+            crate::binding::rebind_to_context(&new_fd.body, &env.user_ctx, &all_names);
+            new_fd.invalidate_compiled();
+            // The original `fd`'s Env-level cache entry is now stale (its
+            // body's bindings don't match what was compiled, if it was ever
+            // called from the VM). Invalidate so a subsequent call on the
+            // original recompiles. (In practice `bind` returns a *new* func,
+            // so the original may still be called with its existing bindings —
+            // but if the caller intended to mutate in place, this is safe.)
+            env.invalidate_func_cache(fd);
+            Ok(Value::Func(Rc::new(new_fd)))
+        }
+        other => Err(EvalError::TypeError {
+            expected: "block! or function!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------------

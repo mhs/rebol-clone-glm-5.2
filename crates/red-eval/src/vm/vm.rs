@@ -716,8 +716,18 @@ impl<'env> Vm<'env> {
         slot: usize,
         argc: usize,
     ) -> Result<Rc<CompiledBlock>, EvalError> {
-        // Fast path: already compiled (cached by a prior call or by MakeFunc).
+        // Fast path 1: construction-time hint (set by a future MakeFunc
+        // eager-compile path; stays `None` for funcs created in `Walk` mode).
         if let Some(c) = fd.compiled.clone() {
+            return Ok(c);
+        }
+        // Fast path 2: Env-level cache (authoritative, M27). Keyed by
+        // `Rc::as_ptr(fd)` — stable across `Rc` clones of the same underlying
+        // `FuncDef`, so a func stored in a context slot and re-read on each
+        // call hits the cache. Invalidated by `bind` on a `Value::Func` and
+        // defensively by `bind_function_body`.
+        let key = Rc::as_ptr(fd) as usize;
+        if let Some(c) = self.env.func_cache.get(&key).cloned() {
             return Ok(c);
         }
         // Compile the body. We need a `NativeRegistry` snapshot and a child
@@ -748,12 +758,7 @@ impl<'env> Vm<'env> {
             span: e.span,
         })?;
         let compiled = Rc::new(compiled);
-        // M25 does not cache the compiled block on the (shared) `Rc<FuncDef>`
-        // — `slot_value` clones the `Rc`, bumping the refcount, so
-        // `Rc::get_mut` would fail. The body recompiles on each call (correct,
-        // just slower). M27 adds proper cache management with invalidation
-        // when `bind` mutates the body. For M25's test cases (shallow
-        // recursion like `fact 5`) the recompile cost is negligible.
+        self.env.func_cache.insert(key, compiled.clone());
         Ok(compiled)
     }
 
@@ -1032,5 +1037,91 @@ mod tests {
     fn vm_reduce() {
         let v = run_vm("reduce [1 + 1 2 + 2]");
         assert_eq!(mold_to_string(&v), "[2 4]");
+    }
+
+    // -----------------------------------------------------------------------
+    // M27: FuncDef compiled-cache + lazy compilation
+    // -----------------------------------------------------------------------
+
+    /// A `func` invoked twice compiles its body exactly once. The first
+    /// `CallUser` misses the `Env::func_cache` and compiles; the second hits
+    /// the cache (keyed by `Rc::as_ptr(fd)`, stable across `Rc` clones).
+    /// (plan3.md:646)
+    #[test]
+    fn vm_func_compiles_once_across_calls() {
+        crate::vm::compiler::reset_compile_counter();
+        let (block, mut env, _buf) =
+            compile_for_vm_captured("square: func [x][x * x] square 5 square 6");
+        // The top-level `compile_block` call in `compile_for_vm_captured`
+        // bumps the counter by 1. Record the baseline after that.
+        let baseline = crate::vm::compiler::read_compile_counter();
+        let v = run(block, &mut env).expect("VM run failed");
+        // First `square 5` -> `ensure_compiled` compiles the body (+1); second
+        // `square 6` -> cache hit (+0). Delta must be exactly 1.
+        let after = crate::vm::compiler::read_compile_counter();
+        assert_eq!(
+            after - baseline,
+            1,
+            "func body compiled exactly once; got delta {}",
+            after - baseline
+        );
+        assert!(matches!(v, Value::Integer { n: 36, .. }));
+        assert_eq!(env.func_cache.len(), 1, "exactly one func cached");
+    }
+
+    /// `bind :func 'word` invalidates the original func's VM cache entry.
+    /// After `f 5`, `func_cache` holds f's compiled body. After `bind :f 'y`,
+    /// f's entry is removed (the body bindings may be stale post-rebind). The
+    /// new func `g` is a fresh `Rc<FuncDef>` (different identity) — not cached
+    /// until called.
+    ///
+    /// Note: `g` is not invoked from the VM because the M25 compiler can't
+    /// statically detect that `g: bind :f 'y` produces a function (it degrades
+    /// to `LoadDynamic` + 0 args, not `CallUser`). Calling runtime-constructed
+    /// funcs is walker territory until a future milestone adds flow-sensitive
+    /// func-arity inference. The cache invalidation itself is what's under
+    /// test here, not the call path. (plan3.md:648)
+    #[test]
+    fn vm_bind_func_invalidates_cache() {
+        let (block, mut env, _buf) =
+            compile_for_vm_captured("y: 0 f: func [x][x + 1] f 5 bind :f 'y");
+        let v = run(block, &mut env).expect("VM run failed");
+        // `f 5` populates the cache; `bind :f 'y` invalidates f's entry.
+        // The bind returns a new func (not called, not cached). Net: empty.
+        assert_eq!(
+            env.func_cache.len(),
+            0,
+            "f's entry invalidated by bind; got cache {:?}",
+            env.func_cache.keys().collect::<Vec<_>>()
+        );
+        assert!(matches!(v, Value::Func(_)), "bind returns a function");
+    }
+
+    /// `make function!` at runtime lazily compiles on first call, not at
+    /// `make` time. The `make` native delegates to `func_native`, which
+    /// constructs a `FuncDef` with `compiled: None`. The VM's `ensure_compiled`
+    /// compiles the body on the first `CallUser` and caches it.
+    ///
+    /// Note: the M25 compiler can't statically detect that
+    /// `f: make function! [...]` produces a function (it's a native call, not
+    /// a `func`/`does`/`function` keyword the compiler inlines as `MakeFunc`).
+    /// So `f 7` degrades to `LoadDynamic(f)` + 0 args — the func is never
+    /// invoked through `CallUser`, and the cache stays empty. This test
+    /// verifies the "not at make time" half: after `make function!` with no
+    /// call, `func_cache` is empty (the body was not compiled). The "compiles
+    /// on first call" half is covered by `vm_func_compiles_once_across_calls`
+    /// (which uses the `func` keyword so the compiler emits `MakeFunc` +
+    /// `CallUser`). Full call-path generality arrives with flow-sensitive
+    /// func-arity inference in a future milestone. (plan3.md:649)
+    #[test]
+    fn vm_make_function_lazy_compile() {
+        // `make function!` with no call -> func_cache stays empty (no
+        // `CallUser` fires `ensure_compiled`).
+        let (block, mut env, _buf) = compile_for_vm_captured("f: make function! [[x][x * x]]");
+        let _ = run(block, &mut env).expect("VM run failed");
+        assert!(
+            env.func_cache.is_empty(),
+            "make function! does not compile at make time"
+        );
     }
 }

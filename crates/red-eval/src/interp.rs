@@ -82,13 +82,24 @@ pub(crate) fn dispatch_block(block: &Value, env: &mut Env) -> Result<Value, Eval
     if has_foreign_bindings(&series, &env.user_ctx) {
         return eval(block, env);
     }
+    // M27: check the Env-level block cache by Series identity before
+    // recompiling. Safe without explicit invalidation because `bind`/`use`
+    // deep-clone the series (new `Rc` → new identity → miss) and `user_ctx`
+    // slots are append-only (cached `LoadGlobal(slot)` stays valid).
+    let cache_key = (Rc::as_ptr(&series.data) as usize, series.index);
+    if let Some(cached) = env.block_cache.get(&cache_key).cloned() {
+        return crate::vm::run((*cached).clone(), env);
+    }
     // Compile-on-demand. The M23 analyzer marks `use`/object forms
     // `needs_rebind`; such blocks return a stub `[Halt]` from `compile_block`,
     // so we check the flag and fall back to the walker.
     let registry = crate::vm::compiler::NativeRegistry::from_env(env);
     let mut scope = crate::vm::lex::Scope::root(&env.user_ctx);
     match crate::vm::compiler::compile_block(&series, &mut scope, &registry) {
-        Ok(compiled) if !compiled.needs_rebind => crate::vm::run(compiled, env),
+        Ok(compiled) if !compiled.needs_rebind => {
+            env.block_cache.insert(cache_key, Rc::new(compiled.clone()));
+            crate::vm::run(compiled, env)
+        }
         _ => eval(block, env),
     }
 }
@@ -109,10 +120,19 @@ pub(crate) fn dispatch_block_reduce(block: &Value, env: &mut Env) -> Result<Valu
     {
         return reduce_walker(&series, env);
     }
+    // M27: Env-level block cache (same identity key + safety rationale as
+    // `dispatch_block`).
+    let cache_key = (Rc::as_ptr(&series.data) as usize, series.index);
+    if let Some(cached) = env.block_cache.get(&cache_key).cloned() {
+        return crate::vm::run_reduce((*cached).clone(), env);
+    }
     let registry = crate::vm::compiler::NativeRegistry::from_env(env);
     let mut scope = crate::vm::lex::Scope::root(&env.user_ctx);
     match crate::vm::compiler::compile_block_reduce(&series, &mut scope, &registry) {
-        Ok(compiled) if !compiled.needs_rebind => crate::vm::run_reduce(compiled, env),
+        Ok(compiled) if !compiled.needs_rebind => {
+            env.block_cache.insert(cache_key, Rc::new(compiled.clone()));
+            crate::vm::run_reduce(compiled, env)
+        }
         _ => reduce_walker(&series, env),
     }
 }
