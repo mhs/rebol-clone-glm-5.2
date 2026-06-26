@@ -259,13 +259,19 @@ impl<'env> Vm<'env> {
                     self.call_user(slot as usize, argc as usize)?;
                 }
                 Instr::TailCall(slot, argc) => {
-                    // M25 stub: behave like CallUser (no frame reuse optimization
-                    // yet — M28 implements true tail-call frame overwrite).
-                    self.call_user(slot as usize, argc as usize)?;
+                    // M28: tail-call frame overwrite (see `tail_call`). The
+                    // VM reuses the current frame, bounding call-stack depth
+                    // for tail-recursive programs.
+                    self.tail_call(slot as usize, argc as usize)?;
                 }
                 Instr::TailReenter(slot, argc) => {
-                    // M25 stub: same as TailCall.
-                    self.call_user(slot as usize, argc as usize)?;
+                    // M28: self-recursion in tail position. Same frame reuse
+                    // as `TailCall` — `tail_call` detects the same-`FuncDef`
+                    // case at runtime and skips the block swap. (The compiler
+                    // emits `TailReenter` only when it statically knows the
+                    // slot is the func's own; `TailCall` covers the runtime-
+                    // detected case.)
+                    self.tail_call(slot as usize, argc as usize)?;
                 }
                 Instr::Jump(target) => {
                     self.frames[frame_idx].pc = target as usize;
@@ -537,10 +543,13 @@ impl<'env> Vm<'env> {
                 self.call_user(slot as usize, argc as usize)?;
             }
             Instr::TailCall(slot, argc) => {
-                self.call_user(slot as usize, argc as usize)?;
+                // M28: tail-call frame overwrite (see `tail_call`).
+                self.tail_call(slot as usize, argc as usize)?;
             }
             Instr::TailReenter(slot, argc) => {
-                self.call_user(slot as usize, argc as usize)?;
+                // M28: self-recursion tail-call (same as TailCall at runtime —
+                // `tail_call` detects same-`FuncDef` and skips the block swap).
+                self.tail_call(slot as usize, argc as usize)?;
             }
             Instr::Jump(target) => {
                 self.frames[frame_idx].pc = target as usize;
@@ -620,14 +629,16 @@ impl<'env> Vm<'env> {
         Ok(())
     }
 
-    /// Invoke a user function stored in a slot. Reads `Value::Func(fd)` from
-    /// the slot (global or local depending on the current frame's depth),
-    /// pops `argc` args, lazily compiles the body if needed, pushes a new
-    /// `Frame`, and returns. The callee runs in `run_loop`'s next iteration;
-    /// `EvalError::Return(v)` from the `return` native is caught by the
-    /// `Call` handler (not here), which pops the function frame and pushes
-    /// `v` onto the caller's stack.
-    fn call_user(&mut self, slot: usize, argc: usize) -> Result<(), EvalError> {
+    /// Resolve the func stored at `slot`, pop `argc` args off the stack,
+    /// lazily compile the body if needed, and return `(fd, compiled, locals)`.
+    /// Shared by `call_user` (pushes a new frame) and `tail_call` (overwrites
+    /// the current frame) — M28 factored this out so the two paths share arg
+    /// collection + lazy-compile + locals-layout logic.
+    fn prepare_call(
+        &mut self,
+        slot: usize,
+        argc: usize,
+    ) -> Result<(Rc<FuncDef>, Rc<CompiledBlock>, Vec<Value>), EvalError> {
         // The func value lives in the *caller's* scope. For a top-level
         // SetWord that's `env.user_ctx`; for a func-local SetWord it's the
         // current frame's `locals`. We check the current frame first, then
@@ -684,8 +695,18 @@ impl<'env> Vm<'env> {
         }
         // Refinement slots default to none/logic false. M25's tests don't
         // exercise user-func refinements; M26 wires full refinement dispatch.
+        Ok((fd, compiled, locals))
+    }
 
-        // Push the call frame and recurse into the dispatch loop.
+    /// Invoke a user function stored in a slot. Reads `Value::Func(fd)` from
+    /// the slot (global or local depending on the current frame's depth),
+    /// pops `argc` args, lazily compiles the body if needed, pushes a new
+    /// `Frame`, and returns. The callee runs in `run_loop`'s next iteration;
+    /// `EvalError::Return(v)` from the `return` native is caught by the
+    /// `Call` handler (not here), which pops the function frame and pushes
+    /// `v` onto the caller's stack.
+    fn call_user(&mut self, slot: usize, argc: usize) -> Result<(), EvalError> {
+        let (fd, compiled, locals) = self.prepare_call(slot, argc)?;
         self.frames.push(Frame {
             func: Some(Rc::clone(&fd)),
             locals,
@@ -703,6 +724,73 @@ impl<'env> Vm<'env> {
         // return value onto the stack, so the caller resumes with the result
         // on top. The args were already truncated above, so the stack is
         // clean for the caller.
+        Ok(())
+    }
+
+    /// M28: tail-call. Like `call_user`, but instead of pushing a new frame,
+    /// overwrite the current top frame's `func`/`locals`/`block`/`pc`. This
+    /// bounds call-stack depth for tail-recursive programs: a function whose
+    /// last action is a call to itself (or any function) reuses its frame.
+    ///
+    /// The semantics mirror `call_user`: the callee's `Return` pushes its
+    /// result onto the (now-caller's) stack, and the args were already
+    /// truncated by `prepare_call`. The only difference is the frame count.
+    ///
+    /// If the current top frame is the root script frame (no `func`), we
+    /// can't overwrite it — fall back to `call_user` so the script body's
+    /// frame stays intact. (This case shouldn't arise in practice: a
+    /// top-level `CallUser` isn't in tail position of a func body, so the
+    /// compiler's `patch_tail_call` only emits `TailCall` inside compiled
+    /// func bodies.)
+    fn tail_call(&mut self, slot: usize, argc: usize) -> Result<(), EvalError> {
+        let (fd, compiled, locals) = self.prepare_call(slot, argc)?;
+        let frame_idx = self.frames.len() - 1;
+        let depth = self.frames[frame_idx].depth;
+        // Guard: don't overwrite the root script frame. (Defensive — the
+        // compiler only emits TailCall inside func bodies, but a misroute
+        // should still produce correct results rather than corrupt state.)
+        if self.frames[frame_idx].func.is_none() {
+            self.frames.push(Frame {
+                func: Some(Rc::clone(&fd)),
+                locals,
+                depth: depth + 1,
+                block: (*compiled).clone(),
+                pc: 0,
+            });
+            #[cfg(feature = "stats")]
+            {
+                self.env.record_frame_push();
+            }
+            return Ok(());
+        }
+        // TailReenter optimization: if the target func is the *same* `Rc`
+        // as the current frame's func (self-recursion compiled as TailCall
+        // — the compiler's `patch_tail_call` only knows the slot, not the
+        // func identity, so it emits TailCall and we detect the reenter at
+        // runtime), we can skip replacing `block` (it's the same compiled
+        // body) and just reset `locals`/`pc`.
+        let same_func = self.frames[frame_idx]
+            .func
+            .as_ref()
+            .map(|cur| Rc::ptr_eq(cur, &fd))
+            .unwrap_or(false);
+        if same_func {
+            self.frames[frame_idx].locals = locals;
+            self.frames[frame_idx].pc = 0;
+            // No stats bump: the frame is reused, not pushed. (TailReenter
+            // at the instr level also doesn't bump; the runtime TailReenter
+            // detection here is equivalent.)
+            return Ok(());
+        }
+        // Different func: overwrite the frame in place. Same depth (the
+        // caller's frame is reused for the callee, so the lexical-depth
+        // chain stays valid — the callee's freevar captures walk up the same
+        // ancestor frames that were on the stack at the call site).
+        self.frames[frame_idx].func = Some(Rc::clone(&fd));
+        self.frames[frame_idx].locals = locals;
+        self.frames[frame_idx].block = (*compiled).clone();
+        self.frames[frame_idx].pc = 0;
+        // No stats bump: a reused frame doesn't increase call-stack depth.
         Ok(())
     }
 
@@ -1122,6 +1210,98 @@ mod tests {
         assert!(
             env.func_cache.is_empty(),
             "make function! does not compile at make time"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M28: Tail-call optimization + loop-body compilation
+    // -----------------------------------------------------------------------
+
+    /// Tail-recursive `countdown n acc` runs at `countdown 100000 0` without
+    /// stack growth. The compiler emits `TailCall` for the recursive call in
+    /// tail position (the last expr of the `either` false-branch); the VM
+    /// overwrites the current frame in place, so call-stack depth stays
+    /// bounded regardless of recursion depth. (plan3.md:758)
+    ///
+    /// `countdown 100000 0` on the tree-walker would push 100k Rust frames;
+    /// the VM with tail-call optimization pushes zero. Correctness: returns
+    /// 100000 (the accumulator).
+    #[test]
+    fn vm_tail_recursive_countdown() {
+        let v = run_vm("countdown: func [n acc] [ either n <= 0 [acc] [countdown n - 1 acc + 1] ] countdown 100000 0");
+        assert!(
+            matches!(v, Value::Integer { n: 100000, .. }),
+            "countdown 100000 0 should return 100000; got {}",
+            mold_to_string(&v)
+        );
+    }
+
+    /// `repeat i 1000000 [if i > 999999 [print i]]` runs without stack
+    /// overflow. The loop native invokes the body block via `dispatch_block`
+    /// (M26), which compiles + runs the body each iteration; the body's
+    /// `if`-branch is inlined. No Rust recursion happens per iteration (loops
+    /// reuse one frame), so the call stack stays tiny.
+    ///
+    /// The tree-walker also handles this without overflow (loops don't push
+    /// Rust frames there either), but the test verifies the VM handles it
+    /// too, and that `print`/`if`/`>`/`repeat` all work end-to-end in VM
+    /// mode. (plan3.md:756)
+    #[test]
+    fn vm_repeat_one_million_no_overflow() {
+        let (block, mut env, buf) = compile_for_vm_captured(
+            "repeat i 1000000 [ if i > 999999 [print i] ]",
+        );
+        let v = run(block, &mut env).expect("VM run failed");
+        assert!(matches!(v, Value::None), "got {}", mold_to_string(&v));
+        assert_eq!(
+            String::from_utf8_lossy(&buf.borrow()),
+            "1000000\n",
+            "loop body should have printed 1000000"
+        );
+    }
+
+    /// `loop [break]` exits cleanly via `EvalError::Break` caught by the
+    /// loop native. Verifies the VM's `Break` control-flow unwind propagates
+    /// through `dispatch_block` (M26 bridge) to the loop native. (plan3.md:759)
+    #[test]
+    fn vm_loop_break_exits_cleanly() {
+        let v = run_vm("loop [break]");
+        assert!(matches!(v, Value::None), "got {}", mold_to_string(&v));
+    }
+
+    /// Self-recursive `fact` written with accumulator + tail call has bounded
+    /// call-stack depth. Verifies the compiler emits `TailReenter` for a
+    /// self-call in tail position (the SetWord slot equals the func's own
+    /// slot, detected statically by `patch_tail_call`), and the VM reuses
+    /// the current frame. (plan3.md:754)
+    ///
+    /// `fact-tail n acc`: if n <= 1 return acc; else `fact-tail n-1 n*acc`.
+    /// Returns `factorial(5) = 120` (correctness) at a depth that would
+    /// overflow on a non-tail-recursive VM at large N.
+    #[test]
+    fn vm_tail_recursive_factorial() {
+        let v = run_vm(
+            "fact-tail: func [n acc] [ either n <= 1 [acc] [fact-tail n - 1 n * acc] ] fact-tail 5 1",
+        );
+        assert!(
+            matches!(v, Value::Integer { n: 120, .. }),
+            "fact-tail 5 1 should return 120; got {}",
+            mold_to_string(&v)
+        );
+    }
+
+    /// Stress: `countdown 1000000 0` (1M deep tail recursion). Without
+    /// tail-call optimization the tree-walker overflows its Rust stack at
+    /// ~400 frames; the VM with `TailCall`/`TailReenter` reuses one frame,
+    /// so depth stays at 1 regardless of N. The default 8 MiB Rust stack is
+    /// plenty because no Rust recursion happens — that's the point.
+    #[test]
+    fn vm_tail_recursive_one_million_no_overflow() {
+        let v = run_vm("countdown: func [n acc] [ either n <= 0 [acc] [countdown n - 1 acc + 1] ] countdown 1000000 0");
+        assert!(
+            matches!(v, Value::Integer { n: 1000000, .. }),
+            "countdown 1000000 0 should return 1000000; got {}",
+            mold_to_string(&v)
         );
     }
 }

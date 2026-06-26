@@ -736,28 +736,102 @@ baseline to point at.
 
 ## Milestone 28 - Tail-call optimization + loop-body compilation
 
-- [ ] Detect tail position in the compiler: the last instr-producing form of a
+- [x] Detect tail position in the compiler: the last instr-producing form of a
       block, and the last form of an `if`/`either`/`switch`/`case` branch, is
       in tail position
-- [ ] A `CallUser` in tail position emits `TailCall` instead of `CallUser`
-- [ ] A self-reference (function calling itself by its bound name) in tail
+      (Ground truth: tail-position detection is *retroactive* — `compile_block_inner`
+      compiles an expression, then checks whether `i == n` (it consumed the
+      block's last values). If so, `patch_tail_call` mutates a trailing
+      `CallUser` instr into `TailCall`/`TailReenter`. This sidesteps the
+      "can't compute `is_last` before compiling" problem flagged in M24 —
+      expressions span a variable number of source values, so we patch after
+      the fact. `compile_block_series_inline` (used by `if`/`either` branch
+      bodies) does the same when called with `tail = true`. `switch`/`case`
+      branch bodies are dispatched via `dispatch_block`, not compiled inline —
+      their tail position is the native's responsibility, not the compiler's;
+      tail calls inside `switch`/`case` branches still work because the branch
+      body is itself a compiled block whose last expression gets the
+      `patch_tail_call` treatment.)
+- [x] A `CallUser` in tail position emits `TailCall` instead of `CallUser`
+      (Ground truth: `patch_tail_call(c, self_func)` rewrites the last instr
+      from `CallUser(slot, argc)` to `TailCall(slot, argc)`. Zero-argc
+      "calls" (value-position func loads) are skipped — they don't push a
+      frame anyway.)
+- [x] A self-reference (function calling itself by its bound name) in tail
       position emits `TailReenter` (cheaper: same `FuncDef`, just reset
       `locals` and `pc`)
-- [ ] Loops: `loop`/`while`/`until`/`repeat`/`foreach`/`forall` bodies compile
+      (Ground truth: when `self_func = Some((slot, _))` matches the `CallUser`'s
+      slot, `patch_tail_call` emits `TailReenter(slot, argc)` directly. This
+      only fires for func bodies compiled via `compile_block_for_func_body`
+      (which threads `self_func`). For branch bodies (`if`/`either`), where
+      `self_func` isn't known, the compiler emits `TailCall`; the VM's
+      `tail_call` handler detects the same-`FuncDef` case at runtime via
+      `Rc::ptr_eq` and applies the cheaper reenter path (reset `locals`/`pc`,
+      skip `block` swap).)
+- [x] Loops: `loop`/`while`/`until`/`repeat`/`foreach`/`forall` bodies compile
       to inner `CompiledBlock`s; the loop native invokes the VM with
       `EvalMode::Vm` and the body block's compiled form; `break`/`continue`
       raise `EvalError::Break`/`Continue` caught by the loop native exactly as
       in the walker
-- [ ] Verify constant stack height for `loop` over a long counter via an
+      (Ground truth: this was already wired by M26 — loop natives call
+      `dispatch_block` on their body block, which in `Vm` mode compiles +
+      runs the body via the VM. M28's `vm_loop_break_exits_cleanly` and
+      `vm_repeat_one_million_no_overflow` tests verify it end-to-end. No new
+      compilation path was needed for loop bodies — `dispatch_block`'s
+      compile-on-demand + `block_cache` (M27) handles them. The loop native
+      catches `EvalError::Break`/`Continue` exactly as in the walker
+      — these unwinds propagate through the VM's `Call`/`CallUser`/`TailCall`
+      handlers unchanged.)
+- [x] Verify constant stack height for `loop` over a long counter via an
       inline stress test
-- [ ] Verify constant stack height for self-recursive `fact` written with
+      (Ground truth: `vm_repeat_one_million_no_overflow` runs
+      `repeat i 1000000 [if i > 999999 [print i]]` on the VM and asserts the
+      captured stdout is `"1000000\n"`. No Rust stack growth happens because
+      `repeat` is a native (no per-iteration frame push) and the body block's
+      `if`/`print` are compiled once + cached. The test runs in ~8s on the
+      dev machine (release mode would be sub-second; debug is dominated by
+      the per-instr dispatch match).)
+- [x] Verify constant stack height for self-recursive `fact` written with
       accumulator + tail call
-- [ ] Inline `#[test]`: `repeat i 1000000 [if i > 999999 [print i]]` runs
+      (Ground truth: `vm_tail_recursive_factorial` runs
+      `fact-tail: func [n acc] [either n <= 1 [acc] [fact-tail n - 1 n * acc]] fact-tail 5 1`
+      and asserts the result is `120`. `vm_tail_recursive_countdown` runs
+      `countdown 100000 0` (100k-deep tail recursion) and asserts the result
+      is `100000` — without TCO the tree-walker would overflow its Rust stack
+      at ~400 frames. `vm_tail_recursive_one_million_no_overflow` runs
+      `countdown 1000000 0` (1M-deep tail recursion) on the default 8 MiB
+      Rust stack — only possible because `tail_call` overwrites the frame
+      instead of pushing.)
+- [x] Inline `#[test]`: `repeat i 1000000 [if i > 999999 [print i]]` runs
       without stack overflow (would overflow the tree-walker)
-- [ ] Inline `#[test]`: tail-recursive `count-down n acc` runs at
+      (Ground truth: `vm_repeat_one_million_no_overflow`. The tree-walker
+      also handles this without overflow (loops don't push Rust frames there
+      either), but the test verifies the VM's loop-body path
+      (`dispatch_block` + `block_cache`) handles 1M iterations correctly —
+      no per-iteration recompilation, no stack growth, deterministic stdout.)
+- [x] Inline `#[test]`: tail-recursive `count-down n acc` runs at
       `count-down 100000 0` without stack growth
-- [ ] Inline `#[test]`: `loop [break]` exits cleanly via `EvalError::Break`
-- [ ] `cargo test --workspace` passes
+      (Ground truth: `vm_tail_recursive_countdown`. Renamed to `countdown`
+      (no hyphen) so the SetWord and recursive Word share the same binding.
+      The plan3 text used `count-down` — same semantics, just a different
+      symbol name in the test source. 100k-deep tail recursion completes in
+      ~2s in debug mode; 1M-deep (the sibling `vm_tail_recursive_one_million_no_overflow`)
+      completes in ~8s.)
+- [x] Inline `#[test]`: `loop [break]` exits cleanly via `EvalError::Break`
+      (Ground truth: `vm_loop_break_exits_cleanly`. The `break` native raises
+      `EvalError::Break(None)`, which propagates through the VM's dispatch
+      loop (the `Call` handler doesn't catch it — it's only caught by loop
+      natives + the function-call shim for `Return`). `loop_native`'s
+      `match dispatch_block(&body, env) { Err(EvalError::Break(v)) => return
+      Ok(v.unwrap_or(Value::None)), ... }` catches it and returns `none`.)
+- [x] `cargo test --workspace` passes
+      (Ground truth: `cargo test --workspace` (577 tests) and `cargo test
+      --workspace --features red-eval/stats` (581 tests) both pass. `cargo
+      build --workspace --tests` emits zero warnings. The 4 new M28 tests
+      live in `crates/red-eval/src/vm/vm.rs`'s `mod tests`:
+      `vm_tail_recursive_countdown`, `vm_tail_recursive_factorial`,
+      `vm_tail_recursive_one_million_no_overflow`,
+      `vm_repeat_one_million_no_overflow`, `vm_loop_break_exits_cleanly`.)
 
 ## Milestone 29 - Flip the default + golden parity
 

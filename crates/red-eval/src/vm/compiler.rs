@@ -295,15 +295,20 @@ fn compile_block_inner(
     let n = data.len();
     let mut i = block.index;
     while i < n {
+        // M28: tail-position detection. We can't know whether the next
+        // expression is the last until after `compile_expr` consumes its
+        // values (expressions span a variable number of source values —
+        // `n * fact n - 1` is 6 values but 1 expression). So we compile
+        // first, then *retroactively* patch a trailing `CallUser` into a
+        // `TailCall`/`TailReenter` if this turned out to be the last expr.
         compile_expr(&mut compiler, &data, &mut i, scope, /*tail*/ false)?;
-        // If `compile_expr` consumed the last values, this was the final
-        // expression — its result stays on the stack as the block's return
-        // value. Otherwise, pop the intermediate result. (We can't compute
-        // `is_last` before compiling because `if`/`either`/native calls
-        // consume a variable number of values. M28 will rework the `tail`
-        // flag when it adds tail-call optimization.)
         if i < n {
+            // Non-tail: discard the intermediate result.
             compiler.emit(Instr::Pop);
+        } else {
+            // Tail position: if the last emitted instr is a `CallUser`,
+            // promote it to `TailCall` (or `TailReenter` for self-recursion).
+            patch_tail_call(&mut compiler, self_func);
         }
     }
     drop(data);
@@ -665,6 +670,43 @@ fn compile_word(
 // `if` / `either` inlining
 // ---------------------------------------------------------------------------
 
+/// M28: if the last instr emitted is a `CallUser(slot, argc)`, promote it to
+/// `TailCall(slot, argc)`. If `self_func` matches the slot (recursive self-
+/// call), promote further to `TailReenter(slot, argc)` — the VM reuses the
+/// current frame's `FuncDef`, just resetting `locals`/`pc` (cheaper than a
+/// `TailCall`, which still has to look up the func slot).
+///
+/// `self_func = Some((slot, _arity))` only when the block being compiled is a
+/// func body and the slot is the func's own global slot (set up by
+/// `compile_block_for_func_body`). For branch bodies (`if`/`either`) we don't
+/// know `self_func` here, so we always emit `TailCall`; the VM's `TailCall`
+/// handler detects self-recursion at runtime via `Rc::ptr_eq` on the
+/// `FuncDef` and falls into the cheaper `TailReenter` path.
+fn patch_tail_call(c: &mut Compiler, self_func: Option<(u32, usize)>) {
+    let last = match c.instrs.last_mut() {
+        Some(i) => i,
+        None => return,
+    };
+    let (slot, argc) = match last {
+        Instr::CallUser(s, a) => (*s, *a),
+        _ => return,
+    };
+    // Don't promote zero-argc "calls" (those are just value loads of the
+    // func — no frame would be pushed anyway). `does` bodies and the like
+    // take 0 args; tail-promoting them would be a no-op at best and a
+    // misroute at worst (TailCall with argc=0).
+    if argc == 0 {
+        return;
+    }
+    if let Some((self_slot, _)) = self_func {
+        if slot == self_slot as u32 {
+            *last = Instr::TailReenter(slot, argc);
+            return;
+        }
+    }
+    *last = Instr::TailCall(slot, argc);
+}
+
 /// Compile `if cond block` as inline control flow:
 /// ```text
 /// <cond code>          ; pushes cond
@@ -794,7 +836,12 @@ fn compile_either(
 }
 
 /// Compile a block's series inline (no `Return`): each expression in order,
-/// the last in `tail` position. Used by `if`/`either` branch bodies.
+/// the last in tail position. Used by `if`/`either` branch bodies.
+///
+/// M28: the last expression of a branch is in tail position relative to the
+/// *enclosing block* (Red tail-call semantics: the value flows up as the
+/// branch result, then up as the block result). We promote a trailing
+/// `CallUser` to `TailCall`/`TailReenter` so the VM reuses the frame.
 fn compile_block_series_inline(
     c: &mut Compiler,
     series: &Series,
@@ -806,13 +853,17 @@ fn compile_block_series_inline(
     let mut j = series.index;
     while j < n {
         compile_expr(c, &data, &mut j, scope, tail)?;
-        // If `compile_expr` consumed the last values, this was the final
-        // expression — its result stays on the stack as the branch's result.
-        // Otherwise, pop the intermediate result. (Can't compute `is_last`
-        // before compiling because expressions span a variable number of
-        // values — e.g. `n * fact n - 1` is 6 values but 1 expression.)
         if j < n {
             c.emit(Instr::Pop);
+        } else if tail {
+            // Tail position of the enclosing block. Promote the trailing
+            // `CallUser` (if any) to a tail call. `self_func` isn't known
+            // here (branches live inside a func body whose `self_func` was
+            // threaded into `compile_block_inner`); we pass `None` and rely
+            // on the `TailCall` → `TailReenter` runtime check (the VM
+            // compares the target `Rc<FuncDef>` identity to the current
+            // frame's func).
+            patch_tail_call(c, None);
         }
     }
     Ok(())
