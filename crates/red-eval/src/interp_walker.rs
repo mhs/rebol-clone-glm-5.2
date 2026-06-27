@@ -116,7 +116,7 @@ pub(crate) fn dispatch_block(block: &Value, env: &mut Env) -> Result<Value, Eval
     // sound.
     let cache_key = (Rc::as_ptr(&series.data) as usize, series.index);
     if let Some(cached) = env.block_cache.get(&cache_key).cloned() {
-        let expected_span = crate::vm::compiler::block_source_span_pub(&series);
+        let expected_span = crate::vm::compiler::block_source_span(&series);
         if cached.source_span == expected_span {
             return crate::vm::run((*cached).clone(), env);
         }
@@ -176,7 +176,7 @@ pub(crate) fn resolve_compiled_block(block: &Value, env: &mut Env) -> Option<Rc<
     // Check the cache (same logic as `dispatch_block`).
     let cache_key = (Rc::as_ptr(&series.data) as usize, series.index);
     if let Some(cached) = env.block_cache.get(&cache_key).cloned() {
-        let expected_span = crate::vm::compiler::block_source_span_pub(&series);
+        let expected_span = crate::vm::compiler::block_source_span(&series);
         if cached.source_span == expected_span {
             return Some(cached);
         }
@@ -216,7 +216,7 @@ pub(crate) fn dispatch_block_reduce(block: &Value, env: &mut Env) -> Result<Valu
     // `dispatch_block` — verify `source_span` to catch allocator-reuse).
     let cache_key = (Rc::as_ptr(&series.data) as usize, series.index);
     if let Some(cached) = env.block_cache.get(&cache_key).cloned() {
-        let expected_span = crate::vm::compiler::block_source_span_pub(&series);
+        let expected_span = crate::vm::compiler::block_source_span(&series);
         if cached.source_span == expected_span {
             return crate::vm::run_reduce((*cached).clone(), env);
         }

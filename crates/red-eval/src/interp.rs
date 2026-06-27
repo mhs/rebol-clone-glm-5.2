@@ -154,7 +154,7 @@ mod tests {
             // but without the outer `[]` wrapper.
             let mold1: String = data1
                 .iter()
-                .map(|v| mold_to_string(v))
+                .map(mold_to_string)
                 .collect::<Vec<_>>()
                 .join(" ");
             drop(data1);
@@ -164,7 +164,7 @@ mod tests {
                 .data
                 .borrow()
                 .iter()
-                .map(|v| mold_to_string(v))
+                .map(mold_to_string)
                 .collect::<Vec<_>>()
                 .join(" ");
             assert_eq!(mold1, mold2, "round-trip mismatch for {src:?}");

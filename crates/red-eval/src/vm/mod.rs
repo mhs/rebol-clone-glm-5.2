@@ -15,6 +15,10 @@
 pub mod compiler;
 pub mod lex;
 pub mod pool;
+// `module_inception`: the inner `vm` module is the runtime stack machine;
+// the outer `vm` module groups the VM subsystem (compiler/lex/pool/runtime).
+// Renaming would break the documented `red_eval::vm::run` public path.
+#[allow(clippy::module_inception)]
 pub mod vm;
 
 pub use lex::{analyze_block, AnalysisResult, Scope};

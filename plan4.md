@@ -134,13 +134,13 @@ item is independently shippable.
 Address the `cargo clippy` warnings (currently ~13 lib + 3 test) and
 consolidate the re-export surface.
 
-- [ ] **Fix the 4 `too_many_arguments` warnings in `vm/compiler.rs`** *(low)*
+- [x] **Fix the 4 `too_many_arguments` warnings in `vm/compiler.rs`** *(low)*
       `crates/red-eval/src/vm/compiler.rs:731, 1040, 1091, 1157`. Introduce a
       small `CompileCtx { scope: &Scope, frames: &mut Vec<Frame>, env: &Env, … }`
       struct (or `CompileEmit` builder) to group the repeated args, or apply
       `#[allow(clippy::too_many_arguments)]` with a one-line justification per
       site if a struct would harm readability.
-- [ ] **Apply mechanical clippy fixes** *(low)*
+- [x] **Apply mechanical clippy fixes** *(low)*
       - `crates/red-eval/src/interp.rs:157, 167` — replace
         `.map(|v| mold_to_string(v))` with `.map(mold_to_string)`.
       - `crates/red-eval/src/vm/compiler.rs:56` — replace `Cell::new(0)` with
@@ -153,20 +153,20 @@ consolidate the re-export surface.
         `manual_assign_op`, `length_comparison_to_one`, `unnecessary_cast`,
         `explicit_counter_loop` nits — fix where obvious, `#[allow]` with
         justification where the lint is wrong.
-- [ ] **Consolidate `red-eval/src/lib.rs` re-exports** *(low)*
+- [x] **Consolidate `red-eval/src/lib.rs` re-exports** *(low)*
       `lib.rs:30-32` (via `context`) and `lib.rs:44-47` (via `red_core`)
       re-export names from `red_core` via two inconsistent paths. After M32
       deletes `context.rs`, fold everything into one
       `pub use red_core::{...};` block.
-- [ ] **Rename the `_pub`-suffix `pub(crate)` fns** *(low)*
+- [x] **Rename the `_pub`-suffix `pub(crate)` fns** *(low)*
       `crates/red-eval/src/vm/lex.rs:89` (`slot_index_pub`), `:106`
       (`lookup_pub`), `crates/red-eval/src/vm/compiler.rs:1456`
       (`block_source_span_pub`). The suffix is redundant with `pub(crate)`.
       Rename the private counterparts to `_inner`/`_priv` or merge the
       visibility variants.
-- [ ] **Fix `examples/fib.rb` → `examples/fib.red`** *(low)*
+- [x] **Fix `examples/fib.rb` → `examples/fib.red`** *(low)*
       Misleading extension; the file is Red code, not Ruby.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` passes.
 
 ## Milestone 34 — Test coverage for core types
 

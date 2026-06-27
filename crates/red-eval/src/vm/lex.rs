@@ -86,11 +86,7 @@ impl Scope {
     /// then body-local SetWords. The analyzer allocates only params +
     /// refinement args + locals here (body-local SetWords are allocated as
     /// they're encountered during the walk).
-    pub(crate) fn slot_index_pub(&mut self, sym: Symbol) -> usize {
-        self.slot_index(sym)
-    }
-
-    fn slot_index(&mut self, sym: Symbol) -> usize {
+    pub(crate) fn slot_index(&mut self, sym: Symbol) -> usize {
         if let Some(&(_, idx)) = self.bindings.get(&sym) {
             return idx;
         }
@@ -103,11 +99,7 @@ impl Scope {
     /// - `Some((depth, slot))` if found at scope `depth` (0 = global,
     ///   >=1 = function-local).
     /// - `None` if not found (truly unbound — compiler emits `LoadDynamic`).
-    pub(crate) fn lookup_pub(&self, sym: &Symbol) -> Option<(usize, usize)> {
-        self.lookup(sym)
-    }
-
-    fn lookup(&self, sym: &Symbol) -> Option<(usize, usize)> {
+    pub(crate) fn lookup(&self, sym: &Symbol) -> Option<(usize, usize)> {
         if let Some(&entry) = self.bindings.get(sym) {
             return Some(entry);
         }
@@ -121,7 +113,7 @@ impl Scope {
 
     /// Number of slots allocated in this scope (params + refinements + locals
     /// + body-local SetWords). The M25 VM uses this to size a func frame's
-    /// `locals` Vec at `CallUser` time.
+    ///   `locals` Vec at `CallUser` time.
     pub(crate) fn slot_count(&self) -> usize {
         self.bindings.len()
     }
@@ -488,10 +480,8 @@ fn attach_lexical(sym: &Symbol, binding: &mut Binding, scope: &Scope, result: &m
     *binding = Binding::Lexical(depth_diff, slot);
     // If the defining scope is an ancestor (not the current scope), this is
     // a free variable of the current function — record it.
-    if depth_diff > 0 {
-        if !result.freevars.contains(sym) {
-            result.freevars.push(sym.clone());
-        }
+    if depth_diff > 0 && !result.freevars.contains(sym) {
+        result.freevars.push(sym.clone());
     }
 }
 

@@ -52,7 +52,7 @@ use crate::vm::pool::ConstantPool;
 // a test.
 #[cfg(test)]
 thread_local! {
-    static COMPILE_COUNT: std::cell::Cell<u32> = std::cell::Cell::new(0);
+    static COMPILE_COUNT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -98,10 +98,8 @@ impl NativeRegistry {
     /// handles cross-run drift).
     pub fn from_env(env: &Env) -> Self {
         let mut map = HashMap::new();
-        let mut idx: u32 = 0;
-        for (sym, fd) in env.natives.iter() {
+        for (idx, (sym, fd)) in (0_u32..).zip(env.natives.iter()) {
             map.insert(sym.clone(), (idx, Rc::clone(fd)));
-            idx += 1;
         }
         Self {
             map,
@@ -568,7 +566,7 @@ fn compile_prefix(
         // `func_form_skip` returned the *total* skip including the calling word.
         // We've consumed `1 + (spec + body)` = `skip` values total.
         // Adjust: we already advanced 1; advance the remaining `skip - 1`.
-        *i = *i + (skip - 1);
+        *i += skip - 1;
         // SetWord-RHS path: the MakeFunc pushes a `Value::Func` onto the stack,
         // which the enclosing SetWord stores. In value position, the func
         // is left on the stack — `Pop` if non-tail (handled by the caller).
@@ -765,6 +763,7 @@ fn compile_prefix(
 /// - Anything else → just load the value (no args collected). This is the
 ///   "value position" path; the walker's `dispatch_call` returns the value
 ///   as-is when it's not a Func.
+#[allow(clippy::too_many_arguments)] // 4 args share mixed lifetimes; a CompileCtx struct would propagate to ~30 callsites
 fn compile_word(
     c: &mut Compiler,
     data: &[Value],
@@ -893,7 +892,7 @@ fn patch_tail_call(c: &mut Compiler, self_func: Option<(u32, usize)>) {
         return;
     }
     if let Some((self_slot, _)) = self_func {
-        if slot == self_slot as u32 {
+        if slot == self_slot {
             *last = Instr::TailReenter(slot, argc);
             return;
         }
@@ -1105,6 +1104,7 @@ fn either_native_index(c: &Compiler) -> u32 {
 
 /// Compile a generic native call: collect `fd.params.len()` args (honoring
 /// `uneval_first` and variadic semantics), then emit `Call(native_idx, argc)`.
+#[allow(clippy::too_many_arguments)] // mixed-lifetime args; see compile_word
 fn compile_native_call(
     c: &mut Compiler,
     data: &[Value],
@@ -1156,6 +1156,7 @@ fn function_path_info(
 /// Compile a user-func call: collect `fd.params.len()` args, emit
 /// `CallUser(slot, argc)`. The `slot` is the bound slot index (local or
 /// global); M25's `CallUser` handler resolves it to the `Rc<FuncDef>`.
+#[allow(clippy::too_many_arguments)] // mixed-lifetime args; see compile_word
 fn compile_user_call(
     c: &mut Compiler,
     data: &[Value],
@@ -1224,6 +1225,7 @@ fn compile_user_call(
 ///   appears in `leading_refs` (path form) or the next value is a matching
 ///   `Value::Refinement` token (spaced form), emit `MarkRefine(ref)` +
 ///   args + `EndRefine`.
+#[allow(clippy::too_many_arguments)] // mixed-lifetime args; see compile_word
 fn collect_args(
     c: &mut Compiler,
     data: &[Value],
@@ -1399,16 +1401,16 @@ fn compile_make_func(
     };
     let mut child = Scope::child(scope);
     for p in &spec.params {
-        child.slot_index_pub(p.clone());
+        child.slot_index(p.clone());
     }
     for (ref_name, ref_args) in &spec.refinements {
-        child.slot_index_pub(ref_name.clone());
+        child.slot_index(ref_name.clone());
         for arg in ref_args {
-            child.slot_index_pub(arg.clone());
+            child.slot_index(arg.clone());
         }
     }
     for local in &spec.locals {
-        child.slot_index_pub(local.clone());
+        child.slot_index(local.clone());
     }
     let body_series = match &body_val {
         Value::Block { series, .. } => series.clone(),
@@ -1524,7 +1526,7 @@ fn peek_func_arity(data: &[Value], i: usize) -> Option<usize> {
         if let Value::Block { series, .. } = packed {
             let inner = series.data.borrow();
             // The packed block is `[spec body]` — two blocks.
-            if inner.len() >= 1 {
+            if !inner.is_empty() {
                 if let Value::Block { .. } = &inner[series.index] {
                     return extract_spec(&inner[series.index])
                         .ok()
@@ -1607,11 +1609,7 @@ fn slot_coords(binding: &Binding) -> (usize, usize) {
 /// Estimate the source span of a `Series` (used for `CompiledBlock.source_span`).
 /// M24 doesn't need an exact span — just a fallback; M31 (disassembler) will
 /// thread precise spans through.
-pub(crate) fn block_source_span_pub(block: &Series) -> Span {
-    block_source_span(block)
-}
-
-fn block_source_span(block: &Series) -> Span {
+pub(crate) fn block_source_span(block: &Series) -> Span {
     let data = block.data.borrow();
     let first = data
         .first()
@@ -1733,8 +1731,8 @@ fn collect_setwords_inline(series: &Series, scope: &mut Scope) {
         }
         match &data[i] {
             Value::SetWord { sym, .. } => {
-                if scope.lookup_pub(sym).is_none() {
-                    scope.slot_index_pub(sym.clone());
+                if scope.lookup(sym).is_none() {
+                    scope.slot_index(sym.clone());
                 }
                 i += 1;
             }
@@ -1992,7 +1990,7 @@ mod tests {
         // Manually record fact's slot as a global arity-1 func (simulating
         // what the SetWord path would have done in a full compile).
         let mut child = Scope::child(&Scope::root(&ctx_rc));
-        child.slot_index_pub(Symbol::new("n"));
+        child.slot_index(Symbol::new("n"));
         let mut c = Compiler {
             instrs: Vec::new(),
             pool: ConstantPool::new(),

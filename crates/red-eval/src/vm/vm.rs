@@ -42,6 +42,11 @@ use crate::natives::extract_spec;
 use crate::vm::compiler::{compile_block_for_func_body, stub_block, NativeRegistry};
 use crate::vm::lex::Scope;
 
+/// Return type of `Vm::prepare_call`: the func definition, its compiled block,
+/// and the populated `locals` Vec (args in `[0..argc]`). Shared by `call_user`,
+/// `call_user_global`, and `tail_call` so each can push/overwrite a frame.
+type PreparedCall = (Rc<FuncDef>, Rc<CompiledBlock>, Vec<Value>);
+
 /// M30.1.A: capacity of the stack-allocated native-args fast path. Natives
 /// with argc ≤ this copy args into a `[Value; INLINE_ARGS_CAP]` on the call
 /// frame instead of heap-allocating a `Vec`. 8 covers every native in the
@@ -980,7 +985,7 @@ impl<'env> Vm<'env> {
         slot: usize,
         argc: usize,
         is_global: bool,
-    ) -> Result<(Rc<FuncDef>, Rc<CompiledBlock>, Vec<Value>), EvalError> {
+    ) -> Result<PreparedCall, EvalError> {
         // The func value lives in the *caller's* scope. For a top-level
         // SetWord that's `env.user_ctx`; for a func-local SetWord it's the
         // current frame's `locals`. We check the current frame first, then
@@ -1274,16 +1279,16 @@ impl<'env> Vm<'env> {
         let parent_scope = Scope::root(&self.env.user_ctx);
         let mut child = Scope::child(&parent_scope);
         for p in &fd.params {
-            child.slot_index_pub(p.clone());
+            child.slot_index(p.clone());
         }
         for (ref_name, ref_args) in &fd.refinements {
-            child.slot_index_pub(ref_name.clone());
+            child.slot_index(ref_name.clone());
             for arg in ref_args {
-                child.slot_index_pub(arg.clone());
+                child.slot_index(arg.clone());
             }
         }
         for local in &fd.locals {
-            child.slot_index_pub(local.clone());
+            child.slot_index(local.clone());
         }
         // Deep-clone the body before compiling. `analyze_block` (inside
         // `compile_block_for_func_body`) mutates bindings in place, converting

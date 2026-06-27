@@ -602,7 +602,7 @@ fn rebind_inner(
 ///   `dispatch_block` on a block containing `Func` bindings (e.g. a func
 ///   body's branch block), the VM must fall back to the walker. (M29 fix —
 ///   was the root cause of the user-func refinement test failures.)
-/// `Binding::Lexical`/`Unbound` are VM-safe.
+///   `Binding::Lexical`/`Unbound` are VM-safe.
 ///
 /// Used by `interp::dispatch_block` to pick walker vs. VM for plain `Block`
 /// values passed to `do`/`reduce`/loop natives (which carry no cached
