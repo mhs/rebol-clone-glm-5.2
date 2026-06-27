@@ -2,7 +2,77 @@
 
 Performance baseline for the Red-clone interpreter. Established in
 Milestone Pre-22 (`plan3.md`) as the reference the v0.3 VM milestones
-(M22–M30) will be compared against.
+(M22–M30) are compared against.
+
+## Current status (v0.3.3, native arm64)
+
+The VM is the default evaluator (since M29). All Tier 1–4 optimizations
+are applied. The build targets native `aarch64-apple-darwin` (was
+`x86_64-apple-darwin` under Rosetta — the arm64 switch alone gave ~40%
+speedup). The release profile uses `opt-level = 3`, LTO, and
+`codegen-units = 1` for maximum speed.
+
+**Headline numbers (native arm64, speed-optimized release):**
+
+| Fixture              | VM (v0.3.3 arm64)  | Walker (arm64)     | VM vs. walker   | vs. v0.2.0 baseline¹ |
+|----------------------|--------------------|--------------------|-----------------|----------------------|
+| `fib 30`             | 320.22 ms          | 1.0959 s           | **3.43× faster** | **6.49× faster**    |
+| `sum_loop`           | 105.53 ms          | 112.56 ms          | **1.07× faster** | **1.98× faster**    |
+| `sum_while`          | 232.57 ms          | 268.06 ms          | **1.15× faster** | **2.17× faster**    |
+| `ackermann 3 5`      | 6.6441 ms          | 26.813 ms          | **4.04× faster** | **6.51× faster**    |
+| `ackermann_small`    | 82.833 µs          | 99.411 µs          | **1.20× faster** | **2.15× faster**    |
+| `foreach_block`      | 21.820 ms          | 25.541 ms          | **1.17× faster** | **2.14× faster**    |
+| `block_build`        | 1.1273 ms          | 1.3719 ms          | **1.22× faster** | **2.40× faster**    |
+| `parse_heavy`        | 6.5138 ms          | 6.6843 ms          | ~neutral         | **1.90× faster**    |
+| `string_concat`      | 455.93 µs          | 474.89 µs          | ~neutral         | **2.13× faster**    |
+| `func_call_heavy`    | 120.04 ms          | 97.945 ms          | 0.82× (regress)  | **1.67× faster**    |
+
+¹ The v0.2.0 baseline was recorded on x86_64 under Rosetta. The arm64
+walker is ~2× faster than the x86_64 walker, so the "vs. v0.2.0" column
+overstates the improvement (the real VM-vs-walker improvement is the
+"VM vs. walker" column). The v0.2.0 baseline table is preserved below
+for historical reference.
+
+**vs. CPython 3.13 (arm64, same machine):** CPython runs naive recursive
+`fib 30` in ~73ms. Our VM does it in 320ms — **4.4× slower than CPython**.
+The gap is the per-call overhead (Rc refcount ops, 64-byte Value copies,
+frame push/pop) vs. CPython's C-level frame format. Closing this gap
+further would require either NaN-boxing (8-byte values) or JIT compilation
+(see `plan3.md` Tier 3/4/5–8).
+
+**Remaining regression:** `func_call_heavy` (0.82×) — the `does` invocation
+path still allocates a `Frame` per call (the `locals` Vec is pooled, but
+the `Frame` struct push/pop on `self.frames` has overhead). This is a
+Tier 3 candidate (deferred).
+
+### What's been completed
+
+| Milestone | What | Key change |
+|-----------|------|------------|
+| M22–M29 | Bytecode VM | Compiler + stack VM + lexical addressing + tail calls; VM is the default evaluator |
+| M30 (v0.3.0) | Hot-path tuning | ConstInt/ConstNone/ConstBool, frame snapshot cache, unchecked slot access, natives_by_idx cache, dispatch_block reorder, tail_call locals reuse |
+| M30.1 (v0.3.1) | Tier 1 speedups | Stack-allocated native args (`[Value; 8]`), `Instr: Copy` (table-indexed payloads, 16 bytes), reusable `Vm` scratch Vecs |
+| M30.2 (v0.3.2) | Tier 2 speedups | `refresh_cache` returns `usize` not `Rc<[Instr]>`; loop natives compile-once + tight `vm::run` loop via `resolve_compiled_block` |
+| M30.3 (v0.3.3) | Tier 4 recursion | `Frame.block: Rc<CompiledBlock>`, pool `locals` Vec, skip `args` Vec, `CallUserGlobal` instr, self-recursion `ensure_compiled` bypass, borrow-not-clone in `call_native` |
+| Build | Native arm64 | `.cargo/config.toml` targets `aarch64-apple-darwin`; `[profile.release]` uses `opt-level = 3` + LTO + strip |
+| v0.4 (reverted) | Cranelift JIT | Experimental JIT via Cranelift — reverted because native call overhead made `fib` 27× slower than the interpreter (Cranelift doesn't inline recursive calls) |
+
+### Regress guard
+
+The inline `#[test] vm_no_slower_than_walker_on_fib` in
+`crates/red-eval/tests/bench_fixtures.rs` runs `fib 20` in both VM and
+Walk modes, asserting the VM is never > 3× slower (debug) and is ≥ 1.2×
+faster (release). The authoritative regress guard is the criterion bench
+suite via [`critcmp`](https://github.com/BurntSushi/critcmp).
+
+---
+
+## Historical detail (v0.3.0 → v0.3.3, x86_64 under Rosetta)
+
+The sections below record the incremental optimization journey on x86_64
+(under Rosetta translation). The native arm64 numbers above supersede
+them — the arm64 switch gave ~40% across-the-board speedup with zero
+code changes.
 
 ## Baseline (v0.2.0 tree-walker)
 
