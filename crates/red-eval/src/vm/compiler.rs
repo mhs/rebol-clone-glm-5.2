@@ -131,6 +131,19 @@ impl NativeRegistry {
     pub fn contains(&self, sym: &Symbol) -> bool {
         self.map.contains_key(sym)
     }
+
+    /// v0.4 JIT: build a reverse index `Vec<String>` mapping native_idx →
+    /// symbol name. Used by the JIT compiler to inline arithmetic natives
+    /// (+, -, *, <, etc.) by name instead of going through the trampoline.
+    pub fn reverse_names(&self) -> Vec<String> {
+        let mut pairs: Vec<(u32, String)> = self
+            .map
+            .iter()
+            .map(|(sym, (idx, _))| (*idx, sym.as_str().to_string()))
+            .collect();
+        pairs.sort_by_key(|(idx, _)| *idx);
+        pairs.into_iter().map(|(_, name)| name).collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,7 +1126,8 @@ fn compile_user_call(
         native: None,
         variadic: false,
         infix: false,
-    });
+        ..Default::default()
+            });
     // (`compile_prefix` already consumed the calling word.)
     let (argc, _refs) = collect_args(c, data, i, scope, &Symbol::new("__user"), &fd, &[], span)?;
     // M29: if the next value after positional args is a `Value::Refinement`

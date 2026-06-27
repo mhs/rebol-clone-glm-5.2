@@ -602,7 +602,7 @@ pub fn register_io_natives(env: &mut Env) {
                 native: Some(f),
                 variadic: false,
                 infix: false,
-                ..Default::default()
+                                ..Default::default()
             }),
         );
     };
@@ -629,7 +629,7 @@ pub fn register_io_natives(env: &mut Env) {
                     native: Some(f),
                     variadic: false,
                     infix: false,
-                    ..Default::default()
+                                        ..Default::default()
                 }),
             );
         };

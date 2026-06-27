@@ -623,7 +623,7 @@ pub fn register_math_natives(env: &mut Env) {
                     native: Some(f),
                     variadic: false,
                     infix: false,
-                    ..Default::default()
+                                        ..Default::default()
                 }),
             );
         };

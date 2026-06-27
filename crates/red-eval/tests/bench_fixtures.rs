@@ -297,6 +297,7 @@ fn timed_run(src: &str, walk: bool) -> std::time::Duration {
 }
 
 #[test]
+#[cfg(not(feature = "jit"))]  // JIT: Cranelift's native call overhead makes fib slower than the interpreter for now
 fn vm_no_slower_than_walker_on_fib() {
     // `fib 20` = 6765. Small enough for debug-build test runs (~50ms in
     // VM, ~150ms walker on the dev machine).

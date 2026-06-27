@@ -16,6 +16,9 @@ pub mod lex;
 pub mod pool;
 pub mod vm;
 
+#[cfg(feature = "jit")]
+pub mod jit;
+
 pub use ir::{CompiledBlock, Frame, Instr, disasm};
 pub use lex::{AnalysisResult, Scope, analyze_block};
 pub use vm::{run, run_reduce};
