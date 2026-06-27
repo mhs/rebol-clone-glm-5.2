@@ -148,6 +148,14 @@ pub struct Env {
     /// M30.1.C: reusable scratch `Vec` for the VM's operand `stack`. Same
     /// drain/restore contract as `vm_frames_pool`.
     pub vm_stack_pool: Vec<Value>,
+    /// M30.3.2: reusable scratch `Vec` for VM `Frame.locals`. Drained by
+    /// `prepare_call` (via `std::mem::take`) to avoid a fresh `Vec` alloc
+    /// per `CallUser`; saved back by `Return` (which extracts the popped
+    /// frame's `locals` before dropping the `Frame`). The pool stays at its
+    /// high-water capacity across calls, so deep recursion (e.g. `fib 30`)
+    /// only allocates on the first call — the ~2.7M subsequent calls reuse
+    /// the pooled Vec.
+    pub vm_locals_pool: Vec<Vec<Value>>,
     /// High-water mark of `call_stack.len()` since the last
     /// [`Self::reset_stats`] call. Used by the v0.3 VM milestones to prove
     /// tail-call stack bounds. Only present under the `stats` cargo feature;
@@ -194,6 +202,7 @@ impl Env {
             natives_by_idx: None,
             vm_frames_pool: Vec::new(),
             vm_stack_pool: Vec::new(),
+            vm_locals_pool: Vec::new(),
             #[cfg(feature = "stats")]
             max_frame_depth: 0,
             #[cfg(feature = "stats")]

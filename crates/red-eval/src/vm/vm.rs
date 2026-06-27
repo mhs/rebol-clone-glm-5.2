@@ -68,6 +68,8 @@ pub fn run(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
     // capacity across calls, so subsequent calls don't realloc.
     let frames_pool = std::mem::take(&mut env.vm_frames_pool);
     let stack_pool = std::mem::take(&mut env.vm_stack_pool);
+    // M30.3.1: wrap in Rc so Frame clones are cheap (1 Rc bump vs 4 + Vec alloc).
+    let block = Rc::new(block);
     let mut vm = Vm {
         env,
         frames: frames_pool,
@@ -116,6 +118,8 @@ pub fn run_reduce(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalErro
     // M30.1.C: reuse the scratch Vecs (same drain/restore as `run`).
     let frames_pool = std::mem::take(&mut env.vm_frames_pool);
     let stack_pool = std::mem::take(&mut env.vm_stack_pool);
+    // M30.3.1: wrap in Rc so Frame clones are cheap.
+    let block = Rc::new(block);
     let mut vm = Vm {
         env,
         frames: frames_pool,
@@ -201,7 +205,9 @@ struct Vm<'env> {
     // a borrow of `frames`, so we must drop it before mutating `frames`.
     // -----------------------------------------------------------------
     /// Cached clone of the current top frame's `CompiledBlock` (Rc bump).
-    cached_block: Option<CompiledBlock>,
+    /// M30.3.1: cached as `Rc<CompiledBlock>` (was owned `CompiledBlock`).
+    /// A single `Rc` bump on refresh (was 4 Rc bumps + 1 Vec alloc).
+    cached_block: Option<Rc<CompiledBlock>>,
     /// Cached clone of the current top frame's `instrs` slice.
     cached_instrs: Option<Rc<[Instr]>>,
     /// `frame_gen` value at the time the cache was last refreshed.
@@ -213,39 +219,44 @@ struct Vm<'env> {
 
 impl<'env> Vm<'env> {
     /// Refresh the cached `(block, instrs)` snapshot if the top frame has
-    /// changed since the last refresh. Returns a clone of the instrs slice
-    /// (cheap — `Rc` bump) and the frame index. The caller must drop the
-    /// returned `Rc` before mutating `self.frames`.
+    /// changed since the last refresh. Returns the frame index. After this
+    /// returns, `self.cached_instrs` is guaranteed populated and the caller
+    /// can index into it directly.
     ///
     /// M30: this avoids the per-iteration `block.clone()` + `instrs.clone()`
     /// that the original loop did. Tight loops (e.g. `repeat 1000000`) hit
     /// this ~1M times; the cache stays valid across all of them because the
     /// top frame doesn't change. Only `CallUser`/`TailCall`/`Return` bump
     /// `frame_gen`, triggering a refresh on the next iteration.
+    ///
+    /// M30.2.D: previously returned `Rc<[Instr]>` (one Rc bump per iteration
+    /// on the cache-hit path). Now returns only the frame index — the caller
+    /// indexes into `self.cached_instrs` directly, eliminating the per-iter
+    /// Rc refcount op. Safe because `Instr: Copy` (M30.1.B) means the caller
+    /// reads `cached_instrs[pc]` as a bitwise copy with no borrow extension.
     #[inline]
-    fn refresh_cache(&mut self) -> (usize, Rc<[Instr]>) {
+    fn refresh_cache(&mut self) -> usize {
         let frame_idx = self.frames.len() - 1;
         if self.cached_frame_gen != self.frame_gen {
-            let block = self.frames[frame_idx].block.clone();
+            // M30.3.1: `block` is `Rc<CompiledBlock>` — one Rc bump (was 4 + Vec alloc).
+            let block = Rc::clone(&self.frames[frame_idx].block);
             let instrs = block.instrs.clone();
             self.cached_block = Some(block);
-            self.cached_instrs = Some(instrs.clone());
+            self.cached_instrs = Some(instrs);
             self.cached_frame_gen = self.frame_gen;
-            (frame_idx, instrs)
-        } else {
-            (
-                frame_idx,
-                self.cached_instrs.clone().expect("cache invariant: cached_instrs set when frame_gen matches"),
-            )
         }
+        frame_idx
     }
 
     fn run_loop(&mut self) -> Result<Value, EvalError> {
         loop {
-            // Snapshot the top frame's instrs. M30.1.B: `Instr` is `Copy`,
-            // so `instrs[pc]` is a cheap bitwise copy — no `Rc` refcount op.
-            let (frame_idx, instrs) = self.refresh_cache();
+            // M30.2.D: no Rc<[Instr]> clone here — `refresh_cache` populates
+            // `self.cached_instrs` and we index into it directly. `Instr` is
+            // `Copy` (16 bytes), so `instrs[pc]` is a bitwise copy with no
+            // refcount ops and no borrow-extension across the match.
+            let frame_idx = self.refresh_cache();
             let pc = self.frames[frame_idx].pc;
+            let instrs = self.cached_instrs.as_ref().expect("cache invariant");
             if pc >= instrs.len() {
                 // Fell off the end without `Return`/`Halt` — treat as
                 // implicit return of top-of-stack (defensive).
@@ -365,6 +376,11 @@ impl<'env> Vm<'env> {
                 Instr::CallUser(slot, argc) => {
                     self.call_user(slot as usize, argc as usize)?;
                 }
+                Instr::CallUserGlobal(slot, argc) => {
+                    // M30.3.4: skip the `frames.last().and_then(...)` local-slot
+                    // check in `prepare_call` — the func is in `user_ctx`.
+                    self.call_user_global(slot as usize, argc as usize)?;
+                }
                 Instr::TailCall(slot, argc) => {
                     // M28: tail-call frame overwrite (see `tail_call`). The
                     // VM reuses the current frame, bounding call-stack depth
@@ -401,7 +417,16 @@ impl<'env> Vm<'env> {
                     // caller's `CallUser` sees the return value. If this was
                     // the top-level frame, return the result directly.
                     let result = self.stack.pop().unwrap_or(Value::None);
-                    self.frames.pop();
+                    // M30.3.2: save the popped frame's `locals` Vec to the
+                    // pool so the next `prepare_call` can reuse its capacity
+                    // instead of allocating fresh. The pool stays at high-water
+                    // capacity, so deep recursion only allocates on the first call.
+                    let popped_frame = self.frames.pop();
+                    if let Some(frame) = popped_frame {
+                        let mut locals = frame.locals;
+                        locals.clear();
+                        self.env.vm_locals_pool.push(locals);
+                    }
                     self.frame_gen = self.frame_gen.wrapping_add(1);
                     if self.frames.is_empty() {
                         return Ok(result);
@@ -505,8 +530,10 @@ impl<'env> Vm<'env> {
     /// inside the reduce block) behave as in `run_loop`.
     fn run_loop_reduce(&mut self) -> Result<Value, EvalError> {
         loop {
-            let (frame_idx, instrs) = self.refresh_cache();
+            // M30.2.D: no Rc<[Instr]> clone — index into `cached_instrs` directly.
+            let frame_idx = self.refresh_cache();
             let pc = self.frames[frame_idx].pc;
+            let instrs = self.cached_instrs.as_ref().expect("cache invariant");
             if pc >= instrs.len() {
                 return Ok(self.collect_reduce_stack());
             }
@@ -515,7 +542,13 @@ impl<'env> Vm<'env> {
             self.frames[frame_idx].pc = pc + 1;
             match instr {
                 Instr::Return => {
-                    self.frames.pop();
+                    // M30.3.2: pool the popped frame's locals Vec.
+                    let popped = self.frames.pop();
+                    if let Some(frame) = popped {
+                        let mut locals = frame.locals;
+                        locals.clear();
+                        self.env.vm_locals_pool.push(locals);
+                    }
                     self.frame_gen = self.frame_gen.wrapping_add(1);
                     if self.frames.is_empty() {
                         // Top-level Return in reduce mode: collect the whole
@@ -640,6 +673,9 @@ impl<'env> Vm<'env> {
             Instr::CallUser(slot, argc) => {
                 self.call_user(slot as usize, argc as usize)?;
             }
+            Instr::CallUserGlobal(slot, argc) => {
+                self.call_user_global(slot as usize, argc as usize)?;
+            }
             Instr::TailCall(slot, argc) => {
                 // M28: tail-call frame overwrite (see `tail_call`).
                 self.tail_call(slot as usize, argc as usize)?;
@@ -755,10 +791,13 @@ impl<'env> Vm<'env> {
         native_idx: usize,
         argc: usize,
     ) -> Result<(), EvalError> {
+        // M30.3.6: borrow the `Rc<FuncDef>` instead of cloning it. We only
+        // need `fd.native` (a `fn` pointer — `Copy`), so extract it before
+        // the mutable `self.env` borrow below. Saves 1 Rc bump + decrement
+        // per native call (the `+` in `fib`'s body fires this ~1.4M times).
         let fd = self
             .natives_by_idx
             .get(native_idx)
-            .cloned()
             .ok_or_else(|| EvalError::Native {
                 message: format!("VM: bad native index {native_idx}"),
                 span: Span::new(0, 0),
@@ -843,21 +882,30 @@ impl<'env> Vm<'env> {
         &mut self,
         slot: usize,
         argc: usize,
+        is_global: bool,
     ) -> Result<(Rc<FuncDef>, Rc<CompiledBlock>, Vec<Value>), EvalError> {
         // The func value lives in the *caller's* scope. For a top-level
         // SetWord that's `env.user_ctx`; for a func-local SetWord it's the
         // current frame's `locals`. We check the current frame first, then
         // fall back to user_ctx (matches the compiler's `slot_coords`:
         // depth 0 = global).
-        let func_val = if let Some(local) = self
-            .frames
-            .last()
-            .and_then(|f| f.locals.get(slot))
-            .cloned()
-        {
-            local
+        // M30.3.4: when `is_global` is true (emitted via `CallUserGlobal`),
+        // skip the always-failing `frames.last().and_then(...)` check and go
+        // straight to `user_ctx.slot_value_unchecked`. For `fib 30`, this
+        // fires on every recursive call (~2.7M times).
+        let func_val = if !is_global {
+            if let Some(local) = self
+                .frames
+                .last()
+                .and_then(|f| f.locals.get(slot))
+                .cloned()
+            {
+                local
+            } else {
+                self.env.user_ctx.slot_value(slot)
+            }
         } else {
-            self.env.user_ctx.slot_value(slot)
+            self.env.user_ctx.slot_value_unchecked(slot)
         };
         let fd = match func_val {
             Value::Func(fd) => fd,
@@ -869,7 +917,11 @@ impl<'env> Vm<'env> {
                 });
             }
         };
-        // Pop argc args.
+        // M30.3.3: don't pop args yet — `ensure_compiled` doesn't touch the
+        // operand stack (confirmed: only touches `env.func_cache`/`natives`/
+        // `user_ctx` for `Scope::root`). The args stay on the stack across
+        // this call, so we can copy them directly into `locals` below,
+        // eliminating the intermediate `args: Vec<Value>` allocation.
         let len = self.stack.len();
         if argc > len {
             return Err(EvalError::Arity {
@@ -879,8 +931,7 @@ impl<'env> Vm<'env> {
                 span: Span::new(0, 0),
             });
         }
-        let args: Vec<Value> = self.stack[len - argc..].to_vec();
-        self.stack.truncate(len - argc);
+        let start = len - argc;
 
         // Lazily compile the body if needed.
         let compiled = self.ensure_compiled(&fd, slot, argc)?;
@@ -892,12 +943,20 @@ impl<'env> Vm<'env> {
         // `CompiledBlock.n_locals` gives the total count; we size locals to
         // that and fill params from args.
         let n_locals = compiled.n_locals.max(fd.params.len());
-        let mut locals = vec![Value::None; n_locals];
-        for (i, arg) in args.iter().enumerate() {
+        // M30.3.2: drain a Vec from the pool instead of allocating fresh.
+        let mut locals = self.env.vm_locals_pool.pop().unwrap_or_default();
+        // Resize to n_locals (reuses capacity if n_locals <= locals.capacity()).
+        locals.clear();
+        locals.resize(n_locals, Value::None);
+        // M30.3.3: copy args directly from the stack into locals[0..argc],
+        // skipping the intermediate `args: Vec<Value>` allocation.
+        for i in 0..argc {
             if i < locals.len() {
-                locals[i] = arg.clone();
+                locals[i] = self.stack[start + i].clone();
             }
         }
+        // Now pop the args from the operand stack.
+        self.stack.truncate(start);
         // Refinement slots default to none/logic false. M25's tests don't
         // exercise user-func refinements; M26 wires full refinement dispatch.
         Ok((fd, compiled, locals))
@@ -911,12 +970,12 @@ impl<'env> Vm<'env> {
     /// `Call` handler (not here), which pops the function frame and pushes
     /// `v` onto the caller's stack.
     fn call_user(&mut self, slot: usize, argc: usize) -> Result<(), EvalError> {
-        let (fd, compiled, locals) = self.prepare_call(slot, argc)?;
+        let (fd, compiled, locals) = self.prepare_call(slot, argc, false)?;
         self.frames.push(Frame {
             func: Some(Rc::clone(&fd)),
             locals,
             depth: self.frames.last().map(|f| f.depth + 1).unwrap_or(1),
-            block: (*compiled).clone(),
+            block: compiled,
             pc: 0,
         });
         self.frame_gen = self.frame_gen.wrapping_add(1);
@@ -924,12 +983,25 @@ impl<'env> Vm<'env> {
         {
             self.env.record_frame_push();
         }
+        Ok(())
+    }
 
-        // The callee runs in `run_loop`'s next iteration (the new top frame).
-        // When it hits `Return`, that handler pops the frame and pushes the
-        // return value onto the stack, so the caller resumes with the result
-        // on top. The args were already truncated above, so the stack is
-        // clean for the caller.
+    /// M30.3.4: like `call_user` but the func is known to be in a global slot.
+    /// Skips the `frames.last().and_then(...)` local-slot check in `prepare_call`.
+    fn call_user_global(&mut self, slot: usize, argc: usize) -> Result<(), EvalError> {
+        let (fd, compiled, locals) = self.prepare_call(slot, argc, true)?;
+        self.frames.push(Frame {
+            func: Some(Rc::clone(&fd)),
+            locals,
+            depth: self.frames.last().map(|f| f.depth + 1).unwrap_or(1),
+            block: compiled,
+            pc: 0,
+        });
+        self.frame_gen = self.frame_gen.wrapping_add(1);
+        #[cfg(feature = "stats")]
+        {
+            self.env.record_frame_push();
+        }
         Ok(())
     }
 
@@ -949,7 +1021,7 @@ impl<'env> Vm<'env> {
     /// compiler's `patch_tail_call` only emits `TailCall` inside compiled
     /// func bodies.)
     fn tail_call(&mut self, slot: usize, argc: usize) -> Result<(), EvalError> {
-        let (fd, compiled, locals) = self.prepare_call(slot, argc)?;
+        let (fd, compiled, locals) = self.prepare_call(slot, argc, false)?;
         let frame_idx = self.frames.len() - 1;
         let depth = self.frames[frame_idx].depth;
         // Guard: don't overwrite the root script frame. (Defensive — the
@@ -960,7 +1032,7 @@ impl<'env> Vm<'env> {
                 func: Some(Rc::clone(&fd)),
                 locals,
                 depth: depth + 1,
-                block: (*compiled).clone(),
+                block: compiled,  // M30.3.1: Rc move (was (*compiled).clone())
                 pc: 0,
             });
             self.frame_gen = self.frame_gen.wrapping_add(1);
@@ -1008,7 +1080,7 @@ impl<'env> Vm<'env> {
             existing.clear();
             existing.extend_from_slice(&locals);
         }
-        self.frames[frame_idx].block = (*compiled).clone();
+        self.frames[frame_idx].block = compiled;  // M30.3.1: Rc move (was (*compiled).clone())
         self.frames[frame_idx].pc = 0;
         self.frame_gen = self.frame_gen.wrapping_add(1);
         // No stats bump: a reused frame doesn't increase call-stack depth.
@@ -1029,6 +1101,19 @@ impl<'env> Vm<'env> {
         // eager-compile path; stays `None` for funcs created in `Walk` mode).
         if let Some(c) = fd.compiled.clone() {
             return Ok(c);
+        }
+        // M30.3.5: Self-recursion fast path. If the target `fd` is the same
+        // `Rc<FuncDef>` as the current frame's `func` (via `Rc::ptr_eq`), the
+        // compiled block is already on the current frame — skip the `HashMap`
+        // lookup. For `fib 30`, this fires on every recursive call (~2.7M
+        // times), eliminating ~2.7M HashMap lookups. Requires `Frame.block` to
+        // be `Rc<CompiledBlock>` (Tier 4.1) so we can return it directly.
+        if let Some(cur_frame) = self.frames.last() {
+            if let Some(cur_fd) = &cur_frame.func {
+                if Rc::ptr_eq(cur_fd, fd) {
+                    return Ok(Rc::clone(&cur_frame.block));
+                }
+            }
         }
         // Fast path 2: Env-level cache (authoritative, M27). Keyed by
         // `Rc::as_ptr(fd)` — stable across `Rc` clones of the same underlying

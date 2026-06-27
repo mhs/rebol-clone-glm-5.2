@@ -1,3 +1,20 @@
 [workspace]
 members = ["crates/red-core", "crates/red-eval", "crates/red-cli"]
 resolver = "2"
+
+[profile.release]
+# Speed-optimized release profile. The binary is ~3.8 MiB — small enough
+# that size optimization isn't worth the ~3× speed regression.
+# - `opt-level = 3`: full speed optimization (vs. `"z"` for size, which made
+#   the VM 3× slower: `fib 30` went from 535ms to 1.52s).
+# - `lto = true`: whole-program link-time optimization across all crates.
+#   Inlines cross-crate calls (e.g. `red-core::Value::clone` into
+#   `red-eval::vm::run`), eliminating function-call overhead AND dead code.
+# - `codegen-units = 1`: single codegen unit. Enables better inlining and
+#   dead-code elimination at the cost of parallelism (slower compile).
+# - `strip = true`: strip debug symbols from the binary (~500 KiB saved,
+#   no speed impact).
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

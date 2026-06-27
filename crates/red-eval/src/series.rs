@@ -26,7 +26,7 @@ use red_core::value::{Series, Span, Symbol, Value};
 use red_core::{Env, EvalError, RefineArgs};
 use std::rc::Rc;
 
-use crate::interp::dispatch_block;
+use crate::interp::{dispatch_block, resolve_compiled_block};
 use crate::natives::{type_name, values_equal};
 
 // ---------------------------------------------------------------------------
@@ -607,6 +607,9 @@ fn copy(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eval
 /// `foreach 'word series body` — iterate the values from cursor to tail,
 /// binding `word` to each in the user context, evaluating `body`. Returns the
 /// last body value (or `none` if the body never ran).
+///
+/// M30.2.E: in VM mode, resolves the body's `CompiledBlock` once and runs
+/// a tight `vm::run` loop.
 fn foreach(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 3 {
         return Err(arity(args, "foreach", 3, args.len()));
@@ -616,6 +619,7 @@ fn foreach(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, E
     let (series, _, _) = extract_series(&args[1])?;
     let body = body_block(args, 2, "foreach")?;
 
+    let compiled = resolve_compiled_block(&body, env);
     let mut last = Value::None;
     let mut i = series.index;
     loop {
@@ -627,7 +631,12 @@ fn foreach(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, E
             data[i].clone()
         };
         env.user_ctx.set_slot(idx, v);
-        match dispatch_block(&body, env) {
+        let result = if let Some(ref c) = compiled {
+            crate::vm::run((**c).clone(), env)
+        } else {
+            dispatch_block(&body, env)
+        };
+        match result {
             Ok(v) => last = v,
             Err(EvalError::Break(bv)) => return Ok(bv.unwrap_or(Value::None)),
             Err(EvalError::Continue) => {}
@@ -641,6 +650,9 @@ fn foreach(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, E
 /// `forall 'word series body` — `word` holds the positioned series; each
 /// iteration evaluates `body` with `word` at the current cursor, then advances
 /// the cursor. Terminates when the series reaches its tail.
+///
+/// M30.2.E: in VM mode, resolves the body's `CompiledBlock` once and runs
+/// a tight `vm::run` loop.
 fn forall(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 3 {
         return Err(arity(args, "forall", 3, args.len()));
@@ -652,6 +664,7 @@ fn forall(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
 
     env.user_ctx
         .set_slot(idx, mk_series(series.clone(), span, is_paren));
+    let compiled = resolve_compiled_block(&body, env);
     let mut last = Value::None;
     loop {
         if series.index >= storage_len(&series) {
@@ -660,7 +673,12 @@ fn forall(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
         // Refresh the word so the body sees the current cursor.
         env.user_ctx
             .set_slot(idx, mk_series(series.clone(), span, is_paren));
-        match dispatch_block(&body, env) {
+        let result = if let Some(ref c) = compiled {
+            crate::vm::run((**c).clone(), env)
+        } else {
+            dispatch_block(&body, env)
+        };
+        match result {
             Ok(v) => last = v,
             Err(EvalError::Break(bv)) => return Ok(bv.unwrap_or(Value::None)),
             Err(EvalError::Continue) => {}

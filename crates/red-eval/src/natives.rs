@@ -26,7 +26,9 @@ use red_core::printer::mold_to_string;
 use red_core::value::{Binding, FuncDef, Series, Span, Symbol, Value};
 use red_core::{Env, EvalError, NativeFn, RefineArgs};
 
-use crate::interp::{dispatch_block, dispatch_block_reduce, eval_expression};
+use crate::interp::{
+    dispatch_block, dispatch_block_reduce, eval_expression, resolve_compiled_block,
+};
 
 // ---------------------------------------------------------------------------
 // I/O natives (M6)
@@ -410,8 +412,21 @@ fn either(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
 
 /// `loop block` — evaluates `block` repeatedly until `break`. Returns the
 /// break-value (or `none` if `break` had no value).
+///
+/// M30.2.E: in VM mode, resolves the body's `CompiledBlock` once and runs
+/// a tight `vm::run` loop.
 fn loop_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     let body = expect_block(args, 0, "loop")?;
+    if let Some(compiled) = resolve_compiled_block(&body, env) {
+        loop {
+            match crate::vm::run((*compiled).clone(), env) {
+                Ok(_) => {}
+                Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
+                Err(EvalError::Continue) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
     loop {
         match dispatch_block(&body, env) {
             Ok(_) => {}
@@ -424,6 +439,13 @@ fn loop_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
 
 /// `repeat 'word count block` — binds `word` to 1..=count, evaluates `block`
 /// each iteration. Accepts both lit-word (`'i`) and bare-word (`i`) forms.
+///
+/// M30.2.E: in VM mode, resolves the body's `CompiledBlock` once (cache
+/// lookup or compile-on-demand) and calls `vm::run` in a tight loop —
+/// eliminating the per-iteration `dispatch_block` overhead (HashMap lookup +
+/// Rc bumps + CompiledBlock clone + pool drain/restore) that remained after
+/// Tier 1. Falls back to `dispatch_block` per iteration in Walk mode or when
+/// the block can't be VM-compiled (foreign bindings / `needs_rebind`).
 fn repeat(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 3 {
         return Err(arity_err(args, "repeat", 3, args.len()));
@@ -457,6 +479,21 @@ fn repeat(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
             sym: sym.clone(),
             span: args[0].span_or_default(),
         })?;
+    // M30.2.E: resolve the compiled block once. If VM-mode + cacheable,
+    // run a tight `vm::run` loop (no per-iteration dispatch overhead).
+    if let Some(compiled) = resolve_compiled_block(&body, env) {
+        for n in 1..=count {
+            env.user_ctx.set_slot(idx, Value::integer(n));
+            match crate::vm::run((*compiled).clone(), env) {
+                Ok(_) => {}
+                Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
+                Err(EvalError::Continue) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        return Ok(Value::None);
+    }
+    // Fallback: Walk mode or non-VM-able block.
     for n in 1..=count {
         env.user_ctx.set_slot(idx, Value::integer(n));
         match dispatch_block(&body, env) {
@@ -471,8 +508,25 @@ fn repeat(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
 
 /// `until block` — evaluates `block` repeatedly until its last value is
 /// truthy. Returns `true`.
+///
+/// M30.2.E: in VM mode, resolves the body's `CompiledBlock` once and runs
+/// a tight `vm::run` loop.
 fn until(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     let body = expect_block(args, 0, "until")?;
+    if let Some(compiled) = resolve_compiled_block(&body, env) {
+        loop {
+            match crate::vm::run((*compiled).clone(), env) {
+                Ok(v) => {
+                    if truthy(&v) {
+                        return Ok(Value::Logic(true));
+                    }
+                }
+                Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
+                Err(EvalError::Continue) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
     loop {
         match dispatch_block(&body, env) {
             Ok(v) => {
@@ -489,12 +543,31 @@ fn until(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Eva
 
 /// `while cond-block body-block` — evaluates `cond-block`; if truthy,
 /// evaluates `body-block` and repeats. Returns `none`.
+///
+/// M30.2.E: in VM mode, resolves both blocks' `CompiledBlock`s once and
+/// runs tight `vm::run` loops.
 fn while_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "while", 2, args.len()));
     }
     let cond = expect_block(args, 0, "while")?;
     let body = expect_block(args, 1, "while")?;
+    let cond_compiled = resolve_compiled_block(&cond, env);
+    let body_compiled = resolve_compiled_block(&body, env);
+    if let (Some(cond_c), Some(body_c)) = (cond_compiled, body_compiled) {
+        loop {
+            let c = crate::vm::run((*cond_c).clone(), env)?;
+            if !truthy(&c) {
+                return Ok(Value::None);
+            }
+            match crate::vm::run((*body_c).clone(), env) {
+                Ok(_) => {}
+                Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
+                Err(EvalError::Continue) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
     loop {
         let c = dispatch_block(&cond, env)?;
         if !truthy(&c) {

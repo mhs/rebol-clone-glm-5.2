@@ -1059,14 +1059,18 @@ fixes (Tier 2). Tier 3 items are documented but deferred (deep refactors).
 
 ### Tier 2 — Medium impact, higher effort (deferred to v0.3.2+)
 
-- [ ] **D. Avoid per-iteration `Rc<[Instr]>` clone in dispatch cache**
+- [x] **D. Avoid per-iteration `Rc<[Instr]>` clone in dispatch cache**
       `refresh_cache()` clones `cached_instrs: Option<Rc<[Instr]>>` on every
       iteration — one `Rc` bump per instr. After Tier 1.B makes `Instr: Copy`,
       the dispatch can read `instrs[pc]` directly without holding a borrow
       across the match, eliminating the `Rc` return from `refresh_cache`.
       (Depends on Tier 1.B.)
+      (Ground truth: `refresh_cache` now returns only `usize` (the frame
+      index); the loop indexes `self.cached_instrs.as_ref().unwrap()[pc]`
+      directly. Zero `Rc` refcount ops per iteration on the cache-hit path.
+      `run_loop` and `run_loop_reduce` both updated.)
 
-- [ ] **E. Compile-once loop bodies with VM-internal iteration**
+- [x] **E. Compile-once loop bodies with VM-internal iteration**
       `repeat`/`while`/`foreach`/`forall` call `dispatch_block` per iteration.
       Each call pays: 1 HashMap lookup + 3 Rc bumps + 2 Vec allocs (pre-Tier 1.C)
       + 1 Vec alloc per native call (pre-Tier 1.A). Even after Tier 1, the
@@ -1078,6 +1082,17 @@ fixes (Tier 2). Tier 3 items are documented but deferred (deep refactors).
       error-handling restructuring.
       (Files: `crates/red-eval/src/vm/vm.rs` — new `run_loop_body`;
       `crates/red-eval/src/natives.rs`/`series.rs` — loop natives call it.)
+      (Ground truth: implemented as `resolve_compiled_block` in
+      `interp_legacy.rs` — resolves the body's `CompiledBlock` once (cache
+      lookup or compile-on-demand), then the loop native calls `vm::run` in
+      a tight loop. `Break`/`Continue` are caught by the loop native's match
+      on the `vm::run` result (same as the `dispatch_block` path). All six
+      loop natives updated: `loop`/`repeat`/`until`/`while` in `natives.rs`,
+      `foreach`/`forall` in `series.rs`. The `CompiledBlock` side tables
+      (`symbols`/`freevars_table`) were made `Rc`-backed so the per-iteration
+      `(*compiled).clone()` is allocation-free. Brought `sum_loop` from
+      0.96× → **1.10× faster than walker** and `sum_while` from 0.96× →
+      **1.16× faster**.)
 
 ### Tier 3 — Low payoff or deep refactor (documented, deferred)
 
@@ -1091,6 +1106,77 @@ fixes (Tier 2). Tier 3 items are documented but deferred (deep refactors).
       (`Int`/`Bool`/`None` as a small fast enum for the VM stack, full
       `Value` for source-origin) is feasible but touches every native
       signature, the printer, the parser. Very high effort.
+
+### Tier 4 — Recursion hot-path (v0.3.3)
+
+Analysis of the `fib 30` bench (2.62× faster than walker, but ~2.7M
+recursive calls per run) identified ~3 heap allocs + ~10 `Rc` refcount
+ops per `CallUser` → `Return` cycle. These 6 optimizations target the
+per-recursion-call overhead. All are semantics-preserving.
+
+- [x] **1. `Frame.block: Rc<CompiledBlock>`** — the biggest single win.
+      Currently `Frame.block: CompiledBlock` (owned), so every `CallUser`
+      clones the whole `CompiledBlock` (4 `Rc` bumps for instrs/pool/
+      symbols/freevars_table + 1 `Vec<Symbol>` alloc for the `freevars`
+      field), every `Return` drops it (4 `Rc` decrements + 1 Vec drop),
+      and every `refresh_cache` refresh re-clones it. Changing to
+      `Rc<CompiledBlock>` makes each of these a single `Rc` bump/decrement.
+      Eliminates ~4 Rc ops + 1 Vec alloc/drop per recursion call.
+      (Ground truth: `Frame.block` changed to `Rc<CompiledBlock>` in
+      `vm_ir.rs`. `call_user`/`tail_call` move the `Rc` instead of cloning
+      the inner `CompiledBlock`. `refresh_cache` does `Rc::clone(&frame.block)`.
+      `Vm::cached_block` changed to `Option<Rc<CompiledBlock>>`. Cut `fib`
+      34% (813ms → 535ms).)
+
+- [x] **2. Pool the `locals` Vec** — `prepare_call` allocates a fresh
+      `locals: vec![Value::None; n_locals]` per call; `Return` drops it.
+      Add `Env::vm_locals_pool: Vec<Vec<Value>>` (same pattern as the
+      Tier 1.C frames/stack pools). `Return` saves the popped frame's
+      `locals` Vec; `prepare_call` drains one and `resize()`s it.
+      Eliminates 1 Vec alloc + drop per call.
+      (Ground truth: `Env::vm_locals_pool` added. `prepare_call` drains via
+      `self.env.vm_locals_pool.pop().unwrap_or_default()`. Both `Return` arms
+      (in `run_loop` and `run_loop_reduce`) extract the popped frame's `locals`,
+      `clear()`, and push to the pool.)
+
+- [x] **3. Skip intermediate `args` Vec** — `prepare_call` does
+      `self.stack[len-argc..].to_vec()` to collect args, then copies them
+      into `locals[0..argc]`. Reorder: leave args on the stack across
+      `ensure_compiled` (which doesn't touch the operand stack), copy
+      directly from `self.stack[len-argc..]` into `locals[0..argc]`, then
+      truncate. Eliminates 1 Vec alloc + argc clones per call.
+      (Ground truth: `prepare_call` reorders — args stay on stack across
+      `ensure_compiled`, then copied directly into `locals[0..argc]` via
+      `self.stack[start + i].clone()`, then `self.stack.truncate(start)`.)
+
+- [x] **4. `CallUserGlobal` instr** — the compiler knows whether a call
+      target is local (depth ≥ 1) or global (depth 0). A new
+      `CallUserGlobal(slot, argc)` variant skips the always-failing
+      `frames.last().and_then(|f| f.locals.get(slot))` check in
+      `prepare_call` and calls `slot_value_unchecked` directly.
+      Eliminates 1 redundant bounds check + `Option` machinery per call.
+      (Ground truth: `Instr::CallUserGlobal(u32, u32)` added to `vm_ir.rs`.
+      `compile_user_call` emits it when `depth == 0`. `Vm::call_user_global`
+      dispatches via `prepare_call(slot, argc, is_global: true)`. `patch_tail_call`
+      checks both `CallUser` and `CallUserGlobal` for tail promotion.)
+
+- [x] **5. Self-recursion `ensure_compiled` bypass** — when `CallUser`'s
+      target `Rc<FuncDef>` is pointer-equal to the current frame's `func`
+      (`Rc::ptr_eq`), return the current frame's `block` directly instead
+      of looking up `env.func_cache`. Requires Tier 4.1 first (so
+      `Frame.block` is `Rc<CompiledBlock>` to return). Eliminates 1
+      `HashMap` lookup per recursive call.
+      (Ground truth: `ensure_compiled` checks `Rc::ptr_eq(cur_fd, fd)` before
+      the `env.func_cache` HashMap lookup. Returns `Rc::clone(&cur_frame.block)`.)
+
+- [x] **6. Borrow instead of clone in `call_native`** —
+      `self.natives_by_idx.get(idx).cloned()` clones the `Rc<FuncDef>` to
+      extract `fd.native` (a `fn` pointer). Borrow instead: index to get
+      `&Rc<FuncDef>`, take `fd.native` as `&NativeFn` (the `Rc<Vec<...>>`
+      outlives the call). Saves 1 `Rc` bump + decrement per native call.
+      (Ground truth: `call_native` does `self.natives_by_idx.get(idx)?`
+      without `.cloned()`, extracts `fd.native` (a `fn` pointer — Copy)
+      before the mutable `self.env` borrow.)
 
 ## Milestone 31 - Disassembler + debug ergonomics
 

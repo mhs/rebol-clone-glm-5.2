@@ -296,8 +296,8 @@ pub(crate) fn compile_block_reduce(
     Ok(CompiledBlock {
         instrs: Rc::from(compiler.instrs.as_slice()),
         pool: compiler.pool.into_rc(),
-        symbols: compiler.symbols,
-        freevars_table: compiler.freevars_table,
+        symbols: Rc::from(compiler.symbols.as_slice()),
+        freevars_table: Rc::from(compiler.freevars_table.as_slice()),
         n_locals: scope_locals_count(scope),
         freevars: analysis.freevars,
         source_span: span,
@@ -379,8 +379,8 @@ fn compile_block_inner(
     Ok(CompiledBlock {
         instrs: Rc::from(compiler.instrs.as_slice()),
         pool: compiler.pool.into_rc(),
-        symbols: compiler.symbols,
-        freevars_table: compiler.freevars_table,
+        symbols: Rc::from(compiler.symbols.as_slice()),
+        freevars_table: Rc::from(compiler.freevars_table.as_slice()),
         n_locals: scope_locals_count(scope),
         freevars: analysis.freevars,
         source_span: span,
@@ -395,8 +395,8 @@ fn stub_block(block: &Series, analysis: AnalysisResult) -> CompiledBlock {
     CompiledBlock {
         instrs: Rc::from([Instr::Halt]),
         pool: Rc::from([]),
-        symbols: Vec::new(),
-        freevars_table: Vec::new(),
+        symbols: Rc::from(&Vec::<Symbol>::new()[..]),
+        freevars_table: Rc::from(&Vec::<Vec<Symbol>>::new()[..]),
         n_locals: 0,
         freevars: analysis.freevars,
         source_span: block_source_span(block),
@@ -784,7 +784,7 @@ fn compile_word(
     // value, causing the VM to load the func value instead of calling it
     // (returning `#[function]` instead of the call result). (M29 fix.)
     if let Some(arity) = c.func_arities.get(depth, slot) {
-        return compile_user_call(c, data, i, scope, slot, arity, span);
+        return compile_user_call(c, data, i, scope, slot, arity, depth, span);
     }
     // Value position — just load.
     emit_load(c, binding, span, sym)?;
@@ -813,7 +813,8 @@ fn patch_tail_call(c: &mut Compiler, self_func: Option<(u32, usize)>) {
         None => return,
     };
     let (slot, argc) = match last {
-        Instr::CallUser(s, a) => (*s, *a),
+        // M30.3.4: `CallUserGlobal` is also a candidate for tail-call promotion.
+        Instr::CallUser(s, a) | Instr::CallUserGlobal(s, a) => (*s, *a),
         _ => return,
     };
     // Don't promote zero-argc "calls" (those are just value loads of the
@@ -1094,6 +1095,7 @@ fn compile_user_call(
     scope: &Scope,
     slot: usize,
     arity: usize,
+    depth: usize,
     span: Span,
 ) -> Result<(), CompileError> {
     // Synthesize a minimal FuncDef for arg-collection purposes — the real
@@ -1128,7 +1130,13 @@ fn compile_user_call(
             kind: CompileErrorKind::MalformedSpec,
         });
     }
-    c.emit(Instr::CallUser(slot as u32, argc as u32));
+    // M30.3.4: emit `CallUserGlobal` for depth-0 (global) slots — skips the
+    // always-failing `frames.last().and_then(...)` check in `prepare_call`.
+    if depth == 0 {
+        c.emit(Instr::CallUserGlobal(slot as u32, argc as u32));
+    } else {
+        c.emit(Instr::CallUser(slot as u32, argc as u32));
+    }
     Ok(())
 }
 
@@ -1851,14 +1859,19 @@ mod tests {
         drop(body_data);
         drop(data);
         c.emit(Instr::Return);
-        // Assert the body's instrs contain `CallUser(fact_slot, 1)`.
+        // Assert the body's instrs contain `CallUser(fact_slot, 1)` or
+        // `CallUserGlobal(fact_slot, 1)` (M30.3.4: globals emit the latter).
         let has_calluser = c
             .instrs
             .iter()
-            .any(|instr| matches!(instr, Instr::CallUser(slot, argc) if *slot as usize == fact_slot && *argc == 1));
+            .any(|instr| matches!(
+                instr,
+                Instr::CallUser(slot, argc) | Instr::CallUserGlobal(slot, argc)
+                if *slot as usize == fact_slot && *argc == 1
+            ));
         assert!(
             has_calluser,
-            "fact body should contain CallUser({}, 1), got {:?}",
+            "fact body should contain CallUser({}, 1) or CallUserGlobal, got {:?}",
             fact_slot, c.instrs
         );
     }

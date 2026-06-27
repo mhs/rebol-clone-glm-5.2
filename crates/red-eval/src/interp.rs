@@ -36,7 +36,8 @@ pub use crate::interp_legacy::{
 // of the external `red_eval::` surface — they're `pub(crate)` in
 // `interp_legacy`):
 pub(crate) use crate::interp_legacy::{
-    dispatch_block, dispatch_block_reduce, eval_expression, eval_get_path, set_path_value,
+    dispatch_block, dispatch_block_reduce, eval_expression, eval_get_path,
+    resolve_compiled_block, set_path_value,
 };
 
 use red_core::{Env, EvalError, EvalMode, Value};

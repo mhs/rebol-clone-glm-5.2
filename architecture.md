@@ -532,31 +532,26 @@ by the function-call shim, not by `eval` itself. Span comes from the
 offending value (every `Value` reachable in eval has its span, either
 inline or via its `Series`'s token span).
 
-## Performance (v0.3.1 VM, M30 + M30.1)
+## Performance (v0.3.3 VM, M30 + M30.1 + M30.2 + M30.3)
 
 The bytecode VM (M22–M29) is the default evaluator. M30 added hot-path
 optimizations + an A/B bench harness (`fixtures/*` for VM,
 `walk_fixtures/*` for the walker) so the two modes can be compared
 directly via `critcmp`. M30.1 (v0.3.1) applied three Tier 1 speedups
 that brought the loop-heavy fixtures from regression to parity with the
-walker. See `BENCHMARKS.md` for the full numbers; the headline findings:
+walker. M30.2 (v0.3.2) applied two Tier 2 speedups that made the
+loop-heavy fixtures **faster than the walker**. M30.3 (v0.3.3) applied
+six Tier 4 recursion speedups that cut deep-recursion overhead ~34%.
+See `BENCHMARKS.md` for the full numbers; the headline findings:
 
-**Wins:** `fib 30` (2.44×) and `ackermann 3 5` (3.02×) — the deep-
-recursion cases the VM's lexical addressing + tail-call optimization
-(M28) + frame snapshot caching target. v0.3.1 improved these 30%/24%
-over v0.3.0 via the `Instr: Copy` shrink + `Vm`-pool reuse.
+**Wins:** `fib 30` (3.52×) and `ackermann 3 5` (3.91×) — the deep-
+recursion cases. The loop-heavy fixtures also beat the walker:
+`sum_loop` at 1.05×, `sum_while` at 1.12×, `foreach_block` at 1.09×.
 
-**Loop-heavy fixtures (now at parity):** `sum_loop` (0.96×) and
-`sum_while` (0.96×) regressed at 0.77×/0.79× in v0.3.0 — the per-
-`dispatch_block` `Vm` allocation + per-`Call` `Vec` allocation dominated.
-v0.3.1's Tier 1.A (inline args) + Tier 1.C (reusable `Vm` pools)
-eliminated both overheads, bringing them to statistical parity with the
-walker.
-
-**Remaining regressions:** `func_call_heavy` (0.55×) — the `does`
-invocation path allocates a fresh `Frame.locals: Vec<Value>` per call.
-This is the next optimization target (Tier 2.E or a `locals`-pool
-equivalent of Tier 1.C).
+**Remaining regression:** `func_call_heavy` (0.83×) — the `does`
+invocation path still allocates a `Frame` per call (the `locals` Vec is
+pooled, but the `Frame` struct itself is pushed/popped). This is a Tier 3
+candidate (deferred).
 
 ### M30 optimizations (v0.3.0)
 
@@ -646,6 +641,88 @@ don't realloc. The drain/restore dance is required because `Vm` borrows
 `env: &mut Env` for its whole lifetime — the pools must be extracted
 before the borrow and restored after `Vm` is dropped.
 
+### M30.2 Tier 2 optimizations (v0.3.2)
+
+**D. Eliminate per-iteration `Rc<[Instr]>` clone** (`Vm::refresh_cache` in
+`vm.rs`): `refresh_cache()` previously returned `(usize, Rc<[Instr]>)` —
+one `Rc` bump per iteration on the cache-hit path. Since `Instr: Copy`
+(Tier 1.B), the dispatch loop can read `instrs[pc]` directly without
+holding a borrow across the match. `refresh_cache` now returns only
+`usize` (the frame index); the loop indexes
+`self.cached_instrs.as_ref().unwrap()[pc]` directly — zero `Rc` refcount
+ops per iteration.
+
+**E. Compile-once loop bodies with VM-internal iteration**
+(`resolve_compiled_block` in `interp_legacy.rs`; loop natives in
+`natives.rs`/`series.rs`): the loop natives
+(`repeat`/`while`/`until`/`loop`/`foreach`/`forall`) previously called
+`dispatch_block` per iteration — each call paying a HashMap lookup + Rc
+bumps + `CompiledBlock` clone + pool drain/restore. M30.2 added
+`resolve_compiled_block`, which resolves the body's `CompiledBlock` once
+(cache lookup or compile-on-demand) and returns it as `Rc<CompiledBlock>`.
+The loop natives then call `vm::run((*compiled).clone(), env)` in a tight
+loop, catching `EvalError::Break`/`Continue` from the result (same as the
+`dispatch_block` path). The `CompiledBlock` side tables (`symbols`/
+`freevars_table`) were made `Rc<[Symbol]>`/`Rc<[Vec<Symbol>]>` so the
+per-iteration clone is allocation-free (one `Rc` bump per table, no
+`Vec` clone). If `resolve_compiled_block` returns `None` (Walk mode or
+non-VM-able block), the native falls back to the per-iteration
+`dispatch_block` path.
+
+### M30.3 Tier 4 optimizations (v0.3.3, recursion hot-path)
+
+Six optimizations targeting the per-`CallUser` → `Return` cycle in
+deep recursion (e.g. `fib 30` does ~2.7M recursive calls). Cut `fib`
+34% and `ackermann` 30% vs. v0.3.2.
+
+**1. `Frame.block: Rc<CompiledBlock>`** (`red-core/src/vm_ir.rs`):
+`Frame.block` was an owned `CompiledBlock`, so every `CallUser` cloned
+the whole struct (4 `Rc` bumps for instrs/pool/symbols/freevars_table +
+1 `Vec<Symbol>` alloc for the `freevars` field), every `Return` dropped
+it (4 decrements + 1 Vec drop), and every `refresh_cache` refresh
+re-cloned it. Changing to `Rc<CompiledBlock>` makes each of these a
+single `Rc` bump/decrement. The `Vm::cached_block` field also changed to
+`Option<Rc<CompiledBlock>>`.
+
+**2. Pool the `locals` Vec** (`Env::vm_locals_pool` in
+`red-core/src/env.rs`; drain in `prepare_call`, save in `Return`):
+`prepare_call` previously allocated `locals: vec![Value::None; n_locals]`
+per call; `Return` dropped it. Now `prepare_call` drains a Vec from
+`env.vm_locals_pool` (or allocates if empty), `clear()`+`resize()`s it,
+and `Return` saves the popped frame's `locals` Vec back to the pool. The
+pool stays at high-water capacity, so deep recursion only allocates on
+the first call.
+
+**3. Skip intermediate `args` Vec** (`prepare_call` in `vm.rs`):
+`prepare_call` previously did `self.stack[len-argc..].to_vec()` to
+collect args, then copied them into `locals[0..argc]`. Reordered: leave
+args on the stack across `ensure_compiled` (which doesn't touch the
+operand stack), copy directly from `self.stack[start..]` into `locals`,
+then truncate. Eliminates 1 Vec alloc + argc clones per call.
+
+**4. `CallUserGlobal` instr** (`red-core/src/vm_ir.rs`; compiler emission
+in `compiler.rs`; dispatch in `vm.rs`): the compiler knows whether a
+call target is local (depth ≥ 1) or global (depth 0). A new
+`CallUserGlobal(slot, argc)` variant skips the always-failing
+`frames.last().and_then(|f| f.locals.get(slot))` check in
+`prepare_call` and calls `slot_value_unchecked` directly. For `fib 30`,
+this fires on every recursive call. The `patch_tail_call` function
+checks both `CallUser` and `CallUserGlobal` for tail-position promotion.
+
+**5. Self-recursion `ensure_compiled` bypass** (`ensure_compiled` in
+`vm.rs`): when the target `Rc<FuncDef>` is pointer-equal to the current
+frame's `func` (via `Rc::ptr_eq`), the compiled block is returned from
+the current frame's `block` directly, skipping the `HashMap` lookup in
+`env.func_cache`. For `fib 30`, this fires on every recursive call
+(~2.7M times), eliminating ~2.7M HashMap lookups. Requires Tier 4.1 (so
+`Frame.block` is `Rc<CompiledBlock>` to return).
+
+**6. Borrow instead of clone in `call_native`** (`call_native` in
+`vm.rs`): `natives_by_idx.get(idx)` without `.cloned()` — the `NativeFn`
+is a `fn` pointer (Copy), extracted before the mutable `self.env`
+borrow. Saves 1 `Rc` bump + decrement per native call (the `+` in `fib`'s
+body fires this ~1.4M times).
+
 ### Bench harness (M30 A/B comparison)
 
 `crates/red-eval/benches/eval.rs` runs four groups:
@@ -658,6 +735,22 @@ before the borrow and restored after `Vm` is dropped.
 `vm_no_slower_than_walker_on_fib` test in `tests/bench_fixtures.rs`
 catches gross routing regressions in `cargo test`. See
 `crates/red-eval/benches/README.md` for the full workflow.
+
+### Release build (speed-optimized)
+
+The workspace `Cargo.toml` carries a speed-optimized `[profile.release]`:
+`opt-level = 3`, `lto = true`, `codegen-units = 1`, `strip = true`.
+This produces a ~2.8 MiB binary that runs `fib 30` in ~560ms (matching
+the `cargo bench` numbers, which use the same `opt-level = 3`). The
+main levers:
+- `opt-level = 3`: full speed optimization. (Previously used
+  `opt-level = "z"` for size, which made the VM 3× slower: `fib 30`
+  went from 560ms to 1.52s — not worth the 900 KiB savings.)
+- `lto = true` + `codegen-units = 1`: cross-crate inlining + dead-code
+  elimination. The `red-core::Value::clone` calls inlined into
+  `red-eval::vm::run` eliminate function-call overhead; unused native
+  paths are dropped.
+- `strip = true`: strips debug symbols (~500 KiB). No speed impact.
 
 ## Cross-cutting
 

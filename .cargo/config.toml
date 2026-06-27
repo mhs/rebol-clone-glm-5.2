@@ -1,0 +1,7 @@
+# Build for the native arm64 target by default. The installed Rust toolchain
+# is x86_64-apple-darwin (installed under Rosetta), so without this override
+# `cargo build` produces x86_64 binaries that run under Rosetta translation
+# (~20-30% overhead). Building for aarch64-apple-darwin produces native arm64
+# code that runs at full speed on Apple Silicon.
+[build]
+target = "aarch64-apple-darwin"

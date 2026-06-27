@@ -73,6 +73,12 @@ pub enum Instr {
     SetDynamic(u32),
     Call(u32, u32),
     CallUser(u32, u32),
+    /// M30.3.4: like `CallUser` but the func is known to be in a global slot
+    /// (depth 0, `Binding::Local(user_ctx, slot)`). The VM skips the
+    /// `frames.last().and_then(|f| f.locals.get(slot))` check (which always
+    /// fails for globals) and calls `slot_value_unchecked` directly. Emitted
+    /// by the compiler when `slot_coords` reports depth 0.
+    CallUserGlobal(u32, u32),
     TailCall(u32, u32),
     TailReenter(u32, u32),
     Jump(u32),
@@ -110,11 +116,15 @@ pub struct CompiledBlock {
     /// M30.1.B: symbol table for `LoadDynamic`/`SetDynamic`/`MarkRefine`.
     /// Indexed by the `u32` carried by those instr variants. Populated by
     /// the compiler when it emits a dynamic-binding instr.
-    pub symbols: Vec<Symbol>,
+    /// M30.2.E: `Rc`-backed so `CompiledBlock::clone` is cheap (one Rc bump,
+    /// not a `Vec` alloc). The Tier 2.E loop natives clone the block per
+    /// iteration, so this must be allocation-free.
+    pub symbols: Rc<[Symbol]>,
     /// M30.1.B: freevar-list table for `MakeFunc`. Indexed by the `freevars_idx`
     /// carried by `MakeFunc`. Each entry is the `Vec<Symbol>` freevar capture
-    /// list for one `MakeFunc` emission.
-    pub freevars_table: Vec<Vec<Symbol>>,
+    /// list for one `MakeFunc` emission. M30.2.E: `Rc`-backed (same reason
+    /// as `symbols`).
+    pub freevars_table: Rc<[Vec<Symbol>]>,
     pub n_locals: usize,
     pub freevars: Vec<Symbol>,
     pub source_span: Span,
@@ -126,12 +136,18 @@ pub struct CompiledBlock {
 /// `TailCall`/`TailReenter` (constant-stack loops). `depth` is the lexical
 /// distance from the top-level script frame — used by `LoadLocal`/`SetLocal`
 /// to walk the frame chain to the defining scope.
+///
+/// M30.3.1: `block` is `Rc<CompiledBlock>` (was owned `CompiledBlock`). This
+/// makes `CallUser`'s frame push a single `Rc` bump (was 4 Rc bumps + 1
+/// `Vec<Symbol>` alloc for the `freevars` field via `#[derive(Clone)]`).
+/// `Return`'s frame pop drops one `Rc` (was 4 decrements + 1 Vec drop).
+/// `refresh_cache` clones one `Rc` (was 4 bumps + 1 Vec alloc).
 #[derive(Clone, Debug)]
 pub struct Frame {
     pub func: Option<Rc<FuncDef>>,
     pub locals: Vec<Value>,
     pub depth: usize,
-    pub block: CompiledBlock,
+    pub block: Rc<CompiledBlock>,
     pub pc: usize,
 }
 
@@ -187,6 +203,9 @@ pub fn disasm(block: &CompiledBlock) -> String {
             }
             Instr::CallUser(f, a) => {
                 let _ = writeln!(out, "CallUser({f}, {a})");
+            }
+            Instr::CallUserGlobal(f, a) => {
+                let _ = writeln!(out, "CallUserGlobal({f}, {a})");
             }
             Instr::TailCall(f, a) => {
                 let _ = writeln!(out, "TailCall({f}, {a})");
@@ -278,8 +297,8 @@ mod tests {
         let block = CompiledBlock {
             instrs: Rc::new([Instr::Const(0), Instr::Return]),
             pool,
-            symbols: Vec::new(),
-            freevars_table: Vec::new(),
+            symbols: Rc::from(&Vec::<Symbol>::new()[..]),
+            freevars_table: Rc::from(&Vec::<Vec<Symbol>>::new()[..]),
             n_locals: 0,
             freevars: Vec::new(),
             source_span: Span::new(0, 0),
@@ -302,8 +321,8 @@ mod tests {
         let block = CompiledBlock {
             instrs: Rc::new([Instr::Const(0), Instr::Return]),
             pool,
-            symbols: Vec::new(),
-            freevars_table: Vec::new(),
+            symbols: Rc::from(&Vec::<Symbol>::new()[..]),
+            freevars_table: Rc::from(&Vec::<Vec<Symbol>>::new()[..]),
             n_locals: 0,
             freevars: Vec::new(),
             source_span: Span::new(0, 0),

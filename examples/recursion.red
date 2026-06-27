@@ -6,12 +6,12 @@ Red []
 print "factorial (linear recursion):"
 fact: func [n][either n <= 1 [1][n * fact n - 1]]
 print fact 5
-print fact 10
+print fact 20
 
 print "fibonacci (binary recursion):"
 fib: func [n][either n < 2 [n][(fib n - 1) + fib n - 2]]
 print fib 6
-print fib 10
+print fib 30
 
 print "list length (recursing over a block):"
 len: func [blk][

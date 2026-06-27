@@ -107,6 +107,158 @@ the v0.3 design targeted — but does not meet the plan3 5× target on `fib`
 either. The inline `vm_no_slower_than_walker_on_fib` test catches gross
 routing regressions; the bench suite is the authoritative check.
 
+## v0.3.3 VM (Tier 4 recursion speedups)
+
+Milestone 30.3 (v0.3.3) applied six Tier 4 recursion hot-path
+optimizations (documented in `plan3.md` → "Tier 4 — Recursion hot-path"):
+
+- **1. `Frame.block: Rc<CompiledBlock>`** — the biggest single win.
+  Changing `Frame.block` from owned `CompiledBlock` to `Rc<CompiledBlock>`
+  makes each `CallUser` frame push a single `Rc` bump (was 4 Rc bumps +
+  1 `Vec<Symbol>` alloc for the `freevars` field). `Return`'s frame pop
+  drops one `Rc` (was 4 decrements + 1 Vec drop). `refresh_cache` clones
+  one `Rc` (was 4 bumps + 1 Vec alloc).
+- **2. Pool the `locals` Vec** — `Env::vm_locals_pool: Vec<Vec<Value>>`.
+  `prepare_call` drains a Vec from the pool instead of allocating fresh;
+  `Return` saves the popped frame's `locals` Vec back. Eliminates 1 Vec
+  alloc + drop per `CallUser`/`Return` cycle.
+- **3. Skip intermediate `args` Vec** — `prepare_call` leaves args on
+  the stack across `ensure_compiled` (which doesn't touch the operand
+  stack), then copies them directly into `locals[0..argc]`. Eliminates
+  1 Vec alloc + argc clones per call.
+- **4. `CallUserGlobal` instr** — the compiler emits `CallUserGlobal(slot,
+  argc)` for global slots (depth 0), skipping the always-failing
+  `frames.last().and_then(...)` local-slot check in `prepare_call` and
+  calling `slot_value_unchecked` directly.
+- **5. Self-recursion `ensure_compiled` bypass** — when the target
+  `Rc<FuncDef>` is pointer-equal to the current frame's `func` (via
+  `Rc::ptr_eq`), the compiled block is returned from the current frame
+  directly, skipping the `HashMap` lookup. Requires Tier 4.1.
+- **6. Borrow instead of clone in `call_native`** — `natives_by_idx.get(idx)`
+  without `.cloned()`; the `NativeFn` is a `fn` pointer borrowed for the
+  call duration. Saves 1 `Rc` bump + decrement per native call.
+
+- **Host:** Apple M4, 10 cores, 24 GB RAM, macOS
+- **Rust toolchain:** `rustc 1.94.0 (4a4ef493e 2026-03-02)`
+- **Command:** `cargo bench --bench eval` (criterion default; uses
+  `[profile.bench]` with `opt-level = 3`)
+- **Date:** 2026-06-27
+
+### End-to-end fixtures
+
+| Fixture              | v0.3.3 VM              | v0.3.3 Walker          | Speedup vs. walker | v0.3.2 VM     | v0.3.2→v0.3.3 delta |
+|----------------------|------------------------|------------------------|--------------------|---------------|---------------------|
+| `fib`                | 534.85 ms             | 1.8854 s               | **3.52× faster**   | 813.38 ms     | **−34.2%**          |
+| `sum_loop`           | 188.61 ms             | 197.95 ms             | **1.05× faster**   | 199.37 ms     | −5.4%               |
+| `sum_while`          | 441.69 ms             | 496.67 ms             | **1.12× faster**   | 455.69 ms     | −3.1%               |
+| `ackermann`          | 11.349 ms             | 44.265 ms             | **3.91× faster**   | 16.221 ms     | **−30.0%**          |
+| `ackermann_small`    | 130.66 µs             | 165.97 µs             | **1.27× faster**   | 152.77 µs     | −14.5%              |
+| `foreach_block`      | 40.883 ms             | 44.506 ms             | **1.09× faster**   | 63.561 ms     | **−35.7%**          |
+| `block_build`        | 2.0609 ms             | 2.3796 ms             | **1.15× faster**   | 2.2558 ms     | −8.6%               |
+| `parse_heavy`        | 11.206 ms             | 10.693 ms             | ~neutral           | 12.140 ms     | −7.7%               |
+| `string_concat`      | 810.91 µs             | 780.49 µs             | ~neutral           | 895.08 µs     | −9.4%               |
+| `func_call_heavy`    | 203.46 ms             | 168.36 ms             | 0.83×              | 298.51 ms     | **−31.9%**          |
+
+**Wins:** `fib 30` jumped to **3.52× faster** (was 2.62×) — the Tier 4
+optimizations target the per-recursion-call overhead, and `fib` is the
+canonical recursion benchmark. `ackermann 3 5` improved to **3.91×**
+(was 2.71×). `foreach_block` went from 0.73× (regression) to **1.09×
+faster** — now beating the walker. `func_call_heavy` improved 32% but
+still regresses (0.83×) — the per-call `Frame.locals` pool helps, but
+the `does` invocation path allocates a fresh `Frame` per call (the pool
+saves the `locals` Vec, but the `Frame` struct itself is pushed/popped on
+`self.frames`, which is already pooled).
+
+**Cumulative speedup vs. v0.2.0 walker (the original baseline):**
+- `fib 30`: 2.0769s walker → 534.85ms VM = **3.88× faster** (plan3 target was 5×)
+- `ackermann 3 5`: 43.221ms walker → 11.349ms VM = **3.81× faster**
+- `sum_loop`: 208.62ms walker → 188.61ms VM = **1.11× faster**
+- `sum_while`: 503.85ms walker → 441.69ms VM = **1.14× faster**
+
+### Eval-only micro-benches (`micro/*`)
+
+| Bench               | v0.3.3 VM              | v0.3.3 Walker          |
+|---------------------|------------------------|------------------------|
+| `eval_literal`      | 31.076 µs              | 18.842 µs              |
+| `eval_word_lookup`  | 28.406 µs              | 17.189 µs              |
+| `eval_setword`      | 29.448 µs              | 16.991 µs              |
+| `eval_call_native`  | 27.294 µs              | 16.693 µs              |
+| `eval_call_user`    | 41.447 µs              | 18.615 µs              |
+| `eval_paren`        | 28.992 µs              | 17.433 µs              |
+
+`eval_call_user` improved 17% from v0.3.2 (49.09µs → 41.45µs) — the Tier 4
+optimizations directly target the user-func call path.
+
+## v0.3.2 VM (Tier 2 speedups)
+
+Milestone 30.2 (v0.3.2) applied two Tier 2 speedups (documented in
+`plan3.md` → "Milestone 30.1 - v0.3.1 Speedup plan" → Tier 2):
+
+- **D. Eliminate per-iteration `Rc<[Instr]>` clone** — the dispatch cache's
+  `refresh_cache()` no longer returns an `Rc<[Instr]>` (one Rc bump per
+  iteration). Since `Instr: Copy` (Tier 1.B), the loop indexes into
+  `self.cached_instrs` directly — zero refcount ops per iteration.
+- **E. Compile-once loop bodies with VM-internal iteration** — the loop
+  natives (`repeat`/`while`/`until`/`loop`/`foreach`/`forall`) now resolve
+  the body's `CompiledBlock` once via `resolve_compiled_block`, then call
+  `vm::run` in a tight loop — eliminating the per-iteration
+  `dispatch_block` overhead (HashMap lookup + Rc bumps + CompiledBlock
+  clone + pool drain/restore). The `CompiledBlock`'s side tables
+  (`symbols`/`freevars_table`) were made `Rc`-backed so the per-iteration
+  clone is allocation-free.
+
+- **Host:** Apple M4, 10 cores, 24 GB RAM, macOS
+- **Rust toolchain:** `rustc 1.94.0 (4a4ef493e 2026-03-02)`
+- **Command:** `cargo bench --bench eval` (criterion default; uses
+  `[profile.bench]` with `opt-level = 3` — the workspace `[profile.release]`
+  uses `opt-level = "z"` for size, which would mask speed improvements)
+- **Date:** 2026-06-26
+
+### End-to-end fixtures
+
+| Fixture              | v0.3.2 VM              | v0.3.2 Walker          | Speedup vs. walker | v0.3.1 VM     | v0.3.1→v0.3.2 delta |
+|----------------------|------------------------|------------------------|--------------------|---------------|---------------------|
+| `fib`                | 813.38 ms             | 2.1277 s               | **2.62× faster**   | 964.33 ms     | **−15.7%**          |
+| `sum_loop`           | 199.37 ms             | 220.05 ms             | **1.10× faster**   | 236.23 ms     | **−15.7%**          |
+| `sum_while`          | 455.69 ms             | 526.77 ms             | **1.16× faster**   | 583.67 ms     | **−22.0%**          |
+| `ackermann`          | 16.221 ms             | 44.008 ms             | **2.71× faster**   | 16.724 ms     | −3.0%               |
+| `ackermann_small`    | 152.77 µs             | 176.80 µs             | **1.16× faster**   | 179.71 µs     | −15.0%              |
+| `foreach_block`      | 63.561 ms             | 46.619 ms             | 0.73×              | 56.319 ms     | +12.8% (regression) |
+| `block_build`        | 2.2558 ms             | 2.5893 ms             | **1.15× faster**   | 3.4879 ms     | **−35.3%**          |
+| `parse_heavy`        | 12.140 ms             | 11.347 ms             | ~neutral           | 12.595 ms     | −3.6%               |
+| `string_concat`      | 895.08 µs             | 870.23 µs             | ~neutral           | 1.0174 ms     | −12.0%              |
+| `func_call_heavy`    | 298.51 ms             | 177.90 ms             | 0.60×              | 372.10 ms     | **−19.7%**          |
+
+**Wins:** `fib 30` improved to **2.62×** (was 2.44×). The loop-heavy
+fixtures — the original v0.3.0 regressions — now **beat the walker**:
+`sum_loop` at **1.10× faster** (was 0.96× parity) and `sum_while` at
+**1.16× faster** (was 0.96×). `block_build` jumped to **1.15× faster**
+(was 0.75×) — the `append`-heavy loop benefits from the tight `vm::run`
+loop. `ackermann_small` improved to 1.16× (was 1.12×).
+
+**Remaining regressions:** `foreach_block` (0.73×) — the `foreach` native
+pays a `resolve_compiled_block` call + `series.data.borrow()` per
+iteration; the series-cursor path doesn't benefit as much from the tight
+loop. `func_call_heavy` (0.60×) — the `does` invocation path allocates a
+fresh `Frame.locals: Vec<Value>` per call via `prepare_call`; Tier 2.E
+helped (372ms → 299ms) but the per-call allocation overhead remains. Both
+are Tier 3 candidates (deferred).
+
+### Eval-only micro-benches (`micro/*`)
+
+| Bench               | v0.3.2 VM              | v0.3.2 Walker          |
+|---------------------|------------------------|------------------------|
+| `eval_literal`      | 28.703 µs              | 15.904 µs              |
+| `eval_word_lookup`  | 28.186 µs              | 16.045 µs              |
+| `eval_setword`      | 29.652 µs              | 16.844 µs              |
+| `eval_call_native`  | 29.488 µs              | 17.443 µs              |
+| `eval_call_user`    | 49.090 µs              | 19.142 µs              |
+| `eval_paren`        | 28.339 µs              | 15.450 µs              |
+
+The micro benches are dominated by per-batch `Env` construction (~15 µs
+baseline in both modes). The end-to-end fixture numbers above are the
+better measure of real-world impact.
+
 ## v0.3.1 VM (Tier 1 speedups)
 
 Milestone 30.1 (v0.3.1) applied three Tier 1 hot-path optimizations

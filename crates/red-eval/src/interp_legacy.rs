@@ -37,6 +37,7 @@ use std::rc::Rc;
 use red_core::lexer;
 use red_core::parser::parse_program;
 use red_core::value::{Binding, FuncDef, Series, Span, Symbol, Value};
+use red_core::vm_ir::CompiledBlock;
 use red_core::{Context, Env, Error, EvalError, EvalMode, RefineArgs};
 
 use crate::binding::{bind_pass, has_foreign_bindings};
@@ -147,6 +148,56 @@ pub(crate) fn dispatch_block(block: &Value, env: &mut Env) -> Result<Value, Eval
             crate::vm::run(compiled, env)
         }
         _ => eval(block, env),
+    }
+}
+
+/// M30.2.E: Resolve a block to its `CompiledBlock` for VM execution, using
+/// the same cache as `dispatch_block` but without running it. Returns
+/// `None` if the block should fall back to the walker (foreign bindings,
+/// `needs_rebind`, or `EvalMode::Walk`). The loop natives
+/// (`repeat`/`while`/`foreach`/`forall`/`loop`/`until`) call this once to
+/// get the compiled form, then call `vm::run` in a tight loop — eliminating
+/// the per-iteration `dispatch_block` overhead (HashMap lookup + Rc bumps +
+/// `CompiledBlock` clone + pool drain/restore) that caused the v0.3.0 loop
+/// regressions.
+///
+/// On the first call (cache miss), this compiles the block, inserts it
+/// into `env.block_cache`, and returns it. Subsequent calls hit the cache
+/// (the cache key is `(Rc::as_ptr(&series.data), series.index)`, stable
+/// across `Rc` clones of the same series).
+pub(crate) fn resolve_compiled_block(
+    block: &Value,
+    env: &mut Env,
+) -> Option<Rc<CompiledBlock>> {
+    if env.mode == EvalMode::Walk {
+        return None;
+    }
+    let series = match block {
+        Value::Block { series, .. } | Value::Paren { series, .. } => series.clone(),
+        _ => return None,
+    };
+    // Check the cache (same logic as `dispatch_block`).
+    let cache_key = (Rc::as_ptr(&series.data) as usize, series.index);
+    if let Some(cached) = env.block_cache.get(&cache_key).cloned() {
+        let expected_span = crate::vm::compiler::block_source_span_pub(&series);
+        if cached.source_span == expected_span {
+            return Some(cached);
+        }
+    }
+    // Cache miss: check foreign bindings + compile.
+    if has_foreign_bindings(&series, &env.user_ctx) {
+        return None;
+    }
+    let registry = crate::vm::compiler::NativeRegistry::from_env(env);
+    let mut scope = crate::vm::lex::Scope::root(&env.user_ctx);
+    let compile_series = crate::binding::deep_clone_series(&series);
+    match crate::vm::compiler::compile_block(&compile_series, &mut scope, &registry) {
+        Ok(compiled) if !compiled.needs_rebind => {
+            let rc = Rc::new(compiled);
+            env.block_cache.insert(cache_key, Rc::clone(&rc));
+            Some(rc)
+        }
+        _ => None,
     }
 }
 
