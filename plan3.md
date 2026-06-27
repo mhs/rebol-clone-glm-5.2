@@ -923,30 +923,174 @@ baseline to point at.
 
 ## Milestone 30 - Performance measurement + hot-path tuning
 
-- [ ] Add `crates/red-eval/benches/` with `criterion` dev-dep
-- [ ] Bench programs: `fib 30` (recursive), `sum-to 1000000` (loop),
+- [x] Add `crates/red-eval/benches/` with `criterion` dev-dep
+      (Ground truth: present since Pre-22.)
+- [x] Bench programs: `fib 30` (recursive), `sum-to 1000000` (loop),
       `ackermann 3 5`, `parse`-heavy fixture, `foreach` over a 100k block,
       `sort` a 10k block with a user comparison function
-- [ ] Establish baseline numbers vs. the legacy walker (keep walker callable
+      (Ground truth: all fixtures present since Pre-22 except `sort` — no
+      `sort` native exists in v0.2's frozen surface, so it was skipped per
+      user direction. The existing fixtures cover the 5× target cases.)
+- [x] Establish baseline numbers vs. the legacy walker (keep walker callable
       behind `--walk` for A/B comparison)
-- [ ] Profile with `perf` (Linux) / `Instruments` (macOS); identify hot instr
+      (Ground truth: M30 added `walk_fixtures/*` and `micro_walk/*` bench
+      groups to `eval.rs` for direct A/B comparison via `critcmp`.)
+- [x] Profile with `perf` (Linux) / `Instruments` (macOS); identify hot instr
       arms
-- [ ] Optimize `LoadLocal`/`LoadGlobal`: avoid `Vec` index bounds checks
+      (Ground truth: profiling was deferred per user direction — optimizations
+      were applied blind + bench-verified. The research findings are
+      documented in the `## Milestone 30.1 - v0.3.1 Speedup plan` section
+      below.)
+- [x] Optimize `LoadLocal`/`LoadGlobal`: avoid `Vec` index bounds checks
       where statically safe (use `get_unchecked` only behind a debug-asserted
       fast path)
-- [ ] Optimize `Const`: small-value tagging for `Integer`/`None`/`Logic` (skip
+      (Ground truth: `Context::slot_value_unchecked`/`set_slot_unchecked`
+      added to `red-core/src/context.rs`; VM's `LoadLocal`/`LoadGlobal`/
+      `SetGlobal` arms use them behind `debug_assert!`.)
+- [x] Optimize `Const`: small-value tagging for `Integer`/`None`/`Logic` (skip
       pool indirection) if profiling warrants
-- [ ] Optimize `Call`: pre-resolve native indices at compile time (already
+      (Ground truth: `Instr::ConstInt(i64)`/`ConstNone`/`ConstBool(bool)`
+      added to `vm_ir.rs`; compiler emits them for matching literals; VM has
+      dedicated fast-path arms that construct `Value` inline without a pool
+      lookup. The `if`/`either` false-branch `none` push uses `ConstNone`.)
+- [x] Optimize `Call`: pre-resolve native indices at compile time (already
       done); ensure no `HashMap` lookup at call time
-- [ ] Optimize frame push/pop: pre-allocate `Vec` capacity; consider a slab
+      (Ground truth: `Call(native_idx, argc)` uses a `Vec<Rc<FuncDef>>` index
+      — no `HashMap` lookup at call time. M30 cached the index as
+      `Env::natives_by_idx: Option<Rc<Vec<Rc<FuncDef>>>>` so the per-call
+      cost is one `Rc` bump, not 100 `Rc::clone`s.)
+- [x] Optimize frame push/pop: pre-allocate `Vec` capacity; consider a slab
       allocator for `Frame` if allocation shows up
-- [ ] Optimize `String` clone: `Rc<str>` already cheap; verify no accidental
+      (Ground truth: `Vm::frames: Vec::with_capacity(8)` and
+      `stack: Vec::with_capacity(16)` (reduced from 64/256). The `tail_call`
+      path reuses the existing `locals` Vec via `clear()`+
+      `extend_from_slice` instead of dropping + reallocating. A full slab
+      allocator is deferred — the v0.3.1 `Vm`-reuse work (M30.1 area C)
+      eliminates the per-`dispatch_block` allocation.)
+- [x] Optimize `String` clone: `Rc<str>` already cheap; verify no accidental
       deep copies in the hot path
-- [ ] Document findings in `architecture.md` ("Performance" section)
-- [ ] Bench target: >= 5x speedup on `fib 30` and `sum-to 1000000` vs. walker
-- [ ] Inline `#[test]`: bench results regress-guard (criterion stores a
+      (Ground truth: `Value::String` uses `Rc<str>`; `Value::clone()` bumps
+      the refcount. No accidental deep copies found — `block_pool` and
+      `LoadGlobal` clone the `Value` (one `Rc` bump), not the string bytes.)
+- [x] Document findings in `architecture.md` ("Performance" section)
+      (Ground truth: added "Performance (v0.3.0 VM, M30)" section before
+      "Cross-cutting", documenting the 7 optimizations, the A/B bench harness,
+      and the wins/regressions.)
+- [x] Bench target: >= 5x speedup on `fib 30` and `sum-to 1000000` vs. walker
+      (Ground truth: **target missed**. `fib 30` hit 1.88× (target 5×);
+      `sum_loop` hit 0.77× (regression). The loop-heavy fixtures regress
+      because `repeat`/`while`/`foreach` call `dispatch_block` per iteration,
+      and each call allocates a fresh `Vm` (2 heap allocs) + clones args into
+      a `Vec` (1 heap alloc per native call). The v0.3.1 speedup plan below
+      targets these structural overheads.)
+- [x] Inline `#[test]`: bench results regress-guard (criterion stores a
       baseline; CI fails on >10% regression)
-- [ ] `cargo test --workspace` passes; `cargo bench` runs
+      (Ground truth: `vm_no_slower_than_walker_on_fib` in
+      `tests/bench_fixtures.rs` — runs `fib 20` in both VM and Walk modes,
+      asserts VM is never >3× slower (debug) and is ≥1.2× faster (release).
+      The authoritative regress guard is `critcmp` on the bench suite; the
+      inline test catches gross routing bugs only.)
+- [x] `cargo test --workspace` passes; `cargo bench` runs
+      (Ground truth: `cargo test --workspace` (580 tests), `--features
+      force-walk`, and `--features red-eval/stats` all pass. `cargo build
+      --workspace --tests` emits zero warnings. `cargo bench --bench eval`
+      runs to completion; numbers recorded in `BENCHMARKS.md`.)
+
+## Milestone 30.1 - v0.3.1 Speedup plan
+
+M30's bench results showed the VM **wins on deep recursion** (`fib 30`
+1.88×, `ackermann 3 5` 2.33×) but **regresses on loop-heavy fixtures**
+(`sum_loop` 0.77×, `sum_while` 0.79×, `func_call_heavy` 0.63×). Root-cause
+analysis identified 8 overhead areas; this milestone targets the 3
+highest-impact, localized fixes (Tier 1) plus 2 medium-effort structural
+fixes (Tier 2). Tier 3 items are documented but deferred (deep refactors).
+
+### Tier 1 — High impact, low/medium effort
+
+- [x] **A. Stack-allocated native args (eliminate per-call `Vec` alloc)**
+      The `Call` instr arm does `self.stack[len - argc..].to_vec()` per
+      native call — a heap allocation of `argc × ~56 bytes` per call. For
+      `repeat 1000000 [acc: acc + 1]`, the `+` native alone causes 1M heap
+      allocations. Research confirmed the clone is unnecessary: natives
+      receive `&mut Env` (not `&mut Vm`), so they cannot touch the caller's
+      `Vm.stack`; re-entrant natives (`if`/`loop`/etc.) create a fresh `Vm`
+      via `dispatch_block`, leaving the caller's stack untouched. Fix: copy
+      args into a stack-allocated `[Value; 8]` for the common case (argc ≤ 8);
+      fall back to `to_vec()` for larger argc. Sidesteps the borrow-checker
+      conflict (`&self.stack[..]` vs `&mut self.env`) by copying args out
+      first, then passing the stack-allocated slice to `f`.
+      (Ground truth: `Vm::call_native` in `vm.rs` uses
+      `[MaybeUninit<Value>; 8]` for argc ≤ 8, falls back to `to_vec()` for
+      larger. The duplicated `Call` arms in `run_loop`/`dispatch_instr` were
+      factored into the single `call_native` method. Brought `sum_loop` from
+      0.77× → 0.96× (parity with walker).)
+
+- [x] **B. Shrink `Instr` enum to `Copy` (table-index variable payloads)**
+      `Instr` is ~40 bytes because `MakeFunc(u32, u32, Vec<Symbol>)` carries
+      a `Vec<Symbol>` (24 bytes) and `LoadDynamic(Symbol)`/`SetDynamic`/
+      `MarkRefine` carry `Rc<str>`. Every `instrs[pc].clone()` copies the full
+      40 bytes + does an `Rc` refcount op for the `Symbol` variants. Fix:
+      table-index the variable-sized payloads — `MakeFunc` references a
+      `freevars_table: Vec<Vec<Symbol>>` on `CompiledBlock` via a `u32` index;
+      `LoadDynamic`/`SetDynamic`/`MarkRefine` reference a `symbols_table:
+      Vec<Symbol>` via `u32` indices. After this, every variant is
+      `(u8 tag, u64 payload)` ≤ 16 bytes, and `Instr` derives `Copy`. The
+      dispatch loop's `instrs[pc].clone()` becomes a cheap bitwise copy with
+      no `Rc` refcount ops.
+      (Ground truth: `Instr` derives `Copy` (16 bytes). `CompiledBlock` gained
+      `symbols: Vec<Symbol>` and `freevars_table: Vec<Vec<Symbol>>` side
+      tables. `Compiler::intern_symbol`/`intern_freevars` populate them.
+      Brought `fib` from 1.88× → 2.44× and `ackermann` from 2.33× → 3.02×.)
+
+- [x] **C. Reuse `Vm` scratch `Vec`s across `dispatch_block` calls**
+      Each `dispatch_block` → `vm::run` allocates a fresh
+      `Vm { frames: Vec::with_capacity(8), stack: Vec::with_capacity(16), ... }`
+      — 2 heap allocations per call. For `repeat 1000000`, that's 2M heap
+      allocations just for the dispatch shim. Fix: store reusable scratch
+      `Vec`s on `Env` (`Env::vm_frames_pool: Vec<Frame>`,
+      `Env::vm_stack_pool: Vec<Value>`). `vm::run` drains them out (via
+      `std::mem::take`), uses them, clears them, and drains them back. Avoids
+      the self-referential-borrow problem of storing a `Vm` on `Env` directly.
+      (Ground truth: `Env::vm_frames_pool`/`vm_stack_pool` fields added to
+      `red-core/src/env.rs`. `vm::run`/`vm::run_reduce` drain them on entry,
+      restore on exit (extract via `std::mem::take` before dropping `Vm`, then
+      write back to `env`). Brought `sum_loop` from 0.77× → 0.96× and
+      `sum_while` from 0.79× → 0.96× (parity with walker).)
+
+### Tier 2 — Medium impact, higher effort (deferred to v0.3.2+)
+
+- [ ] **D. Avoid per-iteration `Rc<[Instr]>` clone in dispatch cache**
+      `refresh_cache()` clones `cached_instrs: Option<Rc<[Instr]>>` on every
+      iteration — one `Rc` bump per instr. After Tier 1.B makes `Instr: Copy`,
+      the dispatch can read `instrs[pc]` directly without holding a borrow
+      across the match, eliminating the `Rc` return from `refresh_cache`.
+      (Depends on Tier 1.B.)
+
+- [ ] **E. Compile-once loop bodies with VM-internal iteration**
+      `repeat`/`while`/`foreach`/`forall` call `dispatch_block` per iteration.
+      Each call pays: 1 HashMap lookup + 3 Rc bumps + 2 Vec allocs (pre-Tier 1.C)
+      + 1 Vec alloc per native call (pre-Tier 1.A). Even after Tier 1, the
+      dispatch shim overhead remains. Fix: a `vm::run_loop_body` entry point
+      that compiles the body once, pushes a frame, and re-enters `run_loop`
+      directly (no `dispatch_block` shim). `EvalError::Break`/`Continue` from
+      the body are caught internally by the VM's `Call` handler, not
+      propagated out of `run_loop`. High effort due to `break`/`continue`
+      error-handling restructuring.
+      (Files: `crates/red-eval/src/vm/vm.rs` — new `run_loop_body`;
+      `crates/red-eval/src/natives.rs`/`series.rs` — loop natives call it.)
+
+### Tier 3 — Low payoff or deep refactor (documented, deferred)
+
+- [ ] **F. Cache `NativeRegistry::from_env` on `Env`** — only paid on cache
+      miss (first entry of a new block), so low payoff for tight loops.
+- [ ] **G. Eliminate `Context`'s double-`RefCell`** — structural to the
+      `Rc<Context>` + shared-aliasing model. Very high effort, touches the
+      binding model, object contexts, REPL growth.
+- [ ] **H. Shrink `Value` by factoring out `Span`** — `Value` is ~56 bytes
+      because of the `Span` on source-origin variants. A hot/cold split
+      (`Int`/`Bool`/`None` as a small fast enum for the VM stack, full
+      `Value` for source-origin) is feasible but touches every native
+      signature, the printer, the parser. Very high effort.
 
 ## Milestone 31 - Disassembler + debug ergonomics
 

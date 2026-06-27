@@ -532,6 +532,133 @@ by the function-call shim, not by `eval` itself. Span comes from the
 offending value (every `Value` reachable in eval has its span, either
 inline or via its `Series`'s token span).
 
+## Performance (v0.3.1 VM, M30 + M30.1)
+
+The bytecode VM (M22–M29) is the default evaluator. M30 added hot-path
+optimizations + an A/B bench harness (`fixtures/*` for VM,
+`walk_fixtures/*` for the walker) so the two modes can be compared
+directly via `critcmp`. M30.1 (v0.3.1) applied three Tier 1 speedups
+that brought the loop-heavy fixtures from regression to parity with the
+walker. See `BENCHMARKS.md` for the full numbers; the headline findings:
+
+**Wins:** `fib 30` (2.44×) and `ackermann 3 5` (3.02×) — the deep-
+recursion cases the VM's lexical addressing + tail-call optimization
+(M28) + frame snapshot caching target. v0.3.1 improved these 30%/24%
+over v0.3.0 via the `Instr: Copy` shrink + `Vm`-pool reuse.
+
+**Loop-heavy fixtures (now at parity):** `sum_loop` (0.96×) and
+`sum_while` (0.96×) regressed at 0.77×/0.79× in v0.3.0 — the per-
+`dispatch_block` `Vm` allocation + per-`Call` `Vec` allocation dominated.
+v0.3.1's Tier 1.A (inline args) + Tier 1.C (reusable `Vm` pools)
+eliminated both overheads, bringing them to statistical parity with the
+walker.
+
+**Remaining regressions:** `func_call_heavy` (0.55×) — the `does`
+invocation path allocates a fresh `Frame.locals: Vec<Value>` per call.
+This is the next optimization target (Tier 2.E or a `locals`-pool
+equivalent of Tier 1.C).
+
+### M30 optimizations (v0.3.0)
+
+1. **`Instr::ConstInt`/`ConstNone`/`ConstBool`** (in `red-core/src/vm_ir.rs`)
+   — small-value fast paths that skip the pool indirection for the common
+   literal kinds. The compiler (`emit_const` in `compiler.rs`) emits these
+   in preference to `Const(idx)` for matching literals; the VM's `Const`
+   arm shrinks from a `block_pool` lookup + `Value` clone to an inline
+   `Value::Integer` construction. The `if`/`either` false-branch `none`
+   push uses `ConstNone` (was `Const(none_idx)` + a pool entry).
+2. **Frame snapshot caching** (`Vm::refresh_cache` in `vm.rs`) — the
+   dispatch loop caches the top frame's `(block, instrs)` snapshot and
+   only refreshes when `frame_gen` changes (bumped on frame push/pop/
+   overwrite), avoiding a per-iteration `Rc` clone of the block + instrs
+   slice. Tight loops hit the cache 999,999 times out of 1,000,000.
+3. **Unchecked slot access** (`Context::slot_value_unchecked`/
+   `set_slot_unchecked` in `red-core/src/context.rs`) — `LoadLocal`/
+   `LoadGlobal`/`SetLocal`/`SetGlobal` use `get_unchecked` behind a
+   `debug_assert!`. The compiler's `Scope` proved the slot exists at
+   compile time; the bounds check was redundant in release.
+4. **`natives_by_idx` cache** (`Env::natives_by_idx: Option<Rc<Vec<Rc<FuncDef>>>>`
+   in `red-core/src/env.rs`) — the `Vec<Rc<FuncDef>>` indexed view of
+   `env.natives` is built once (first `vm::run`) and cached. The original
+   `build_natives_by_idx` did ~100 `Rc::clone`s per `dispatch_block` call
+   (100M refcount ops for a 1M-iteration loop); the cache makes it one
+   `Rc` bump per call. Invalidated by `invalidate_native_index` (called
+   by `register_natives`).
+5. **`dispatch_block` cache-before-foreign-check** (in
+   `red-eval/src/interp_legacy.rs`) — the Env-level block cache is checked
+   *before* `has_foreign_bindings` (the O(n) per-value walk). A cached
+   block is by construction non-foreign (the cache only stores blocks that
+   passed the check on first compile), so the recheck is skipped on hits.
+   Without this reorder, a 1M-iteration `repeat` paid the O(n) walk 1M
+   times — the root cause of the initial v0.3.0 `sum_loop` regression.
+6. **Reduced `Vm` Vec capacities** — `frames: Vec::with_capacity(8)` and
+   `stack: Vec::with_capacity(16)` (was 64/256). The dispatch_block path
+   runs small bodies (1-2 frames, < 8 stack slots); the larger capacities
+   were over-allocating per call. (Superseded by Tier 1.C's pool reuse in
+   v0.3.1 — the capacities are now irrelevant since the Vecs are reused.)
+7. **`tail_call` locals reuse** — the `TailCall`/`TailReenter` handlers
+   now `clear()` + `extend_from_slice` the existing `locals` Vec rather
+   than dropping + reallocating, avoiding 1M `Vec` allocations in a 1M-
+   deep tail-recursion loop.
+
+### M30.1 Tier 1 optimizations (v0.3.1)
+
+**A. Stack-allocated native args** (`Vm::call_native` in `vm.rs`):
+The `Call` instr arm previously did `self.stack[len - argc..].to_vec()`
+per native call — a heap allocation of `argc × ~64 bytes` per call. For
+`repeat 1000000 [acc: acc + 1]`, the `+` native alone caused 1M heap
+allocations. Research confirmed the clone was unnecessary: natives
+receive `&mut Env` (not `&mut Vm`), so they cannot touch the caller's
+`Vm.stack`; re-entrant natives (`if`/`loop`/etc.) create a fresh `Vm`
+via `dispatch_block`, leaving the caller's stack untouched. Fix: copy
+args into a stack-allocated `[MaybeUninit<Value>; 8]` for argc ≤ 8;
+fall back to `to_vec()` for larger argc. Sidesteps the borrow-checker
+conflict (`&self.stack[..]` vs `&mut self.env`) by copying args out
+first, then passing the stack-allocated slice to `f`. The `Call` logic
+was also factored out of the duplicated `run_loop`/`dispatch_instr` arms
+into a single `call_native` method.
+
+**B. `Instr: Copy` via table-indexed payloads** (`red-core/src/vm_ir.rs`):
+`Instr` was ~40 bytes because `MakeFunc(u32, u32, Vec<Symbol>)` carried
+a `Vec<Symbol>` (24 bytes) and `LoadDynamic(Symbol)`/`SetDynamic`/
+`MarkRefine` carried `Rc<str>`. Every `instrs[pc].clone()` copied the
+full 40 bytes + did an `Rc` refcount op for the `Symbol` variants. Fix:
+table-index the variable-sized payloads — `MakeFunc(spec_idx, body_idx,
+freevars_idx)` references `CompiledBlock::freevars_table[freevars_idx]`
+(a `Vec<Vec<Symbol>>`); `LoadDynamic(sym_idx)`/`SetDynamic(sym_idx)`/
+`MarkRefine(sym_idx)` reference `CompiledBlock::symbols[sym_idx]` (a
+`Vec<Symbol>`). After this, every variant is `(u8 tag, u64 payload)` ≤
+16 bytes, and `Instr` derives `Copy`. The dispatch loop's `instrs[pc]`
+read is now a bitwise copy with no `Rc` refcount ops and no borrow-
+extension across the match. The compiler's `Compiler::intern_symbol`/
+`intern_freevars` helpers populate the side tables.
+
+**C. Reusable `Vm` scratch `Vec`s** (`Env::vm_frames_pool`/
+`vm_stack_pool` in `red-core/src/env.rs`, drain/restore in `vm.rs`):
+Each `dispatch_block` → `vm::run` previously allocated a fresh
+`Vm { frames: Vec::with_capacity(8), stack: Vec::with_capacity(16), ... }`
+— 2 heap allocations per call. For `repeat 1000000`, that was 2M heap
+allocations just for the dispatch shim. Fix: `vm::run` drains
+`env.vm_frames_pool`/`env.vm_stack_pool` via `std::mem::take` on entry,
+uses them, clears them, and drains them back on exit. The pools stay at
+their high-water capacity across calls, so subsequent `vm::run` calls
+don't realloc. The drain/restore dance is required because `Vm` borrows
+`env: &mut Env` for its whole lifetime — the pools must be extracted
+before the borrow and restored after `Vm` is dropped.
+
+### Bench harness (M30 A/B comparison)
+
+`crates/red-eval/benches/eval.rs` runs four groups:
+- `fixtures/*` — VM mode end-to-end (lex + parse + bind + eval).
+- `walk_fixtures/*` — `EvalMode::Walk` end-to-end (the v0.2.0 tree-walker).
+- `micro/*` — VM mode, isolated `eval` cost on a pre-built `Env`.
+- `micro_walk/*` — walker mode, isolated `eval` cost.
+
+`critcmp v0.2.0 v0.3.0` compares two saved baselines; the inline
+`vm_no_slower_than_walker_on_fib` test in `tests/bench_fixtures.rs`
+catches gross routing regressions in `cargo test`. See
+`crates/red-eval/benches/README.md` for the full workflow.
+
 ## Cross-cutting
 
 - **Span flow**: lex→parse→eval. Every source-origin `Value` carries its

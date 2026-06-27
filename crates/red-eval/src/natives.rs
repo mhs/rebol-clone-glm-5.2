@@ -1670,6 +1670,15 @@ pub fn register_natives(env: &mut Env) {
 
     // File & shell I/O (M20)
     crate::io::register_io_natives(env);
+
+    // M30: invalidate the VM's indexed-natives cache so the next `vm::run`
+    // rebuilds it from the now-complete `natives` map. (Cheap: the rebuild
+    // is O(n) on the first `vm::run`, then cached for the rest of the
+    // process. Without this, the VM would index a partial native set on its
+    // first call if `register_natives` were interleaved with VM runs — which
+    // it isn't in practice, but the defensive invalidate keeps the invariant
+    // "natives_by_idx is consistent with env.natives" true at all times.)
+    env.invalidate_native_index();
 }
 
 /// Install the predefined constant words (`none`, `true`, `false`, `newline`,

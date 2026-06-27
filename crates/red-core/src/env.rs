@@ -127,6 +127,27 @@ pub struct Env {
     /// `user_ctx` slots are append-only (cached `LoadGlobal(slot)` indices
     /// remain valid). M27.
     pub block_cache: HashMap<(usize, usize), Rc<CompiledBlock>>,
+    /// M30: indexed view of `natives` (same `Rc<FuncDef>` pointers, ordered
+    /// by the snapshot the compiler's `NativeRegistry::from_env` took). Built
+    /// lazily by `vm::run` on first call, then cached here so the 1M-iteration
+    /// `repeat`/`while`/`foreach` paths don't rebuild it per `dispatch_block`
+    /// call (the root cause of the v0.3.0 `sum_loop`/`sum_while` regressions:
+    /// ~100 `Rc::clone`s × 1M iterations = 100M refcount ops just for native
+    /// lookup). `Rc`-wrapped so `vm::run` can clone it cheaply into each `Vm`
+    /// (one Rc bump instead of a `Vec` alloc per `dispatch_block` call).
+    /// Invalidated by `invalidate_native_index` whenever `natives` is mutated
+    /// (currently only at `register_natives` time, before any VM run).
+    pub natives_by_idx: Option<Rc<Vec<Rc<FuncDef>>>>,
+    /// M30.1.C: reusable scratch `Vec` for the VM's `frames` stack. Drained
+    /// by `vm::run` via `std::mem::take` on entry, cleared + drained back on
+    /// exit. Eliminates 1 heap allocation per `dispatch_block` call (was
+    /// `Vec::with_capacity(8)` per call → 1M allocs for a 1M-iteration
+    /// `repeat`). The vec stays at its high-water capacity across calls, so
+    /// subsequent `vm::run` calls don't realloc until they exceed it.
+    pub vm_frames_pool: Vec<crate::vm_ir::Frame>,
+    /// M30.1.C: reusable scratch `Vec` for the VM's operand `stack`. Same
+    /// drain/restore contract as `vm_frames_pool`.
+    pub vm_stack_pool: Vec<Value>,
     /// High-water mark of `call_stack.len()` since the last
     /// [`Self::reset_stats`] call. Used by the v0.3 VM milestones to prove
     /// tail-call stack bounds. Only present under the `stats` cargo feature;
@@ -170,6 +191,9 @@ impl Env {
             mode: EvalMode::Vm,
             func_cache: HashMap::new(),
             block_cache: HashMap::new(),
+            natives_by_idx: None,
+            vm_frames_pool: Vec::new(),
+            vm_stack_pool: Vec::new(),
             #[cfg(feature = "stats")]
             max_frame_depth: 0,
             #[cfg(feature = "stats")]
@@ -220,6 +244,15 @@ impl Env {
     pub fn clear_caches(&mut self) {
         self.func_cache.clear();
         self.block_cache.clear();
+    }
+
+    /// M30: drop the indexed-natives cache so the next `vm::run` rebuilds it
+    /// from the current `natives` map. Called by `register_natives` after it
+    /// inserts/overwrites native entries. Cheap (the rebuild is O(n) on next
+    /// `vm::run`, and only happens once per process — `register_natives` runs
+    /// at startup, before any VM run).
+    pub fn invalidate_native_index(&mut self) {
+        self.natives_by_idx = None;
     }
 }
 

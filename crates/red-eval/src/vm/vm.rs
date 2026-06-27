@@ -29,6 +29,7 @@
 //! `needs_rebind` flag. For M25's test cases (no `do`/`reduce`/loop native
 //! invocation in VM mode), the walker recursion path is unused.
 
+use std::mem::MaybeUninit;
 use std::rc::Rc;
 
 use red_core::value::{FuncDef, Span, Symbol, Value};
@@ -40,6 +41,13 @@ use crate::interp::{eval_get_path, set_path_value};
 use crate::natives::extract_spec;
 use crate::vm::compiler::{NativeRegistry, compile_block_for_func_body};
 use crate::vm::lex::Scope;
+
+/// M30.1.A: capacity of the stack-allocated native-args fast path. Natives
+/// with argc ≤ this copy args into a `[Value; INLINE_ARGS_CAP]` on the call
+/// frame instead of heap-allocating a `Vec`. 8 covers every native in the
+/// registry (the highest-arity fixed native is `make`/`to` at ~3 args;
+/// variadic natives collect via `LoadDynamic`, not via argc).
+const INLINE_ARGS_CAP: usize = 8;
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -53,14 +61,27 @@ use crate::vm::lex::Scope;
 /// propagation).
 pub fn run(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
     let natives_by_idx = build_natives_by_idx(env);
+    // M30.1.C: drain the reusable scratch Vecs from `env` instead of
+    // allocating fresh ones. Each `dispatch_block`→`vm::run` call previously
+    // allocated 2 Vecs (`frames` + `stack`); for a 1M-iteration `repeat`,
+    // that was 2M heap allocations. The pools stay at their high-water
+    // capacity across calls, so subsequent calls don't realloc.
+    let frames_pool = std::mem::take(&mut env.vm_frames_pool);
+    let stack_pool = std::mem::take(&mut env.vm_stack_pool);
     let mut vm = Vm {
         env,
-        frames: Vec::new(),
-        stack: Vec::new(),
+        frames: frames_pool,
+        stack: stack_pool,
         natives_by_idx,
         ref_marks: Vec::new(),
         pending_refs: Vec::new(),
+        cached_block: None,
+        cached_instrs: None,
+        cached_frame_gen: 0,
+        frame_gen: 0,
     };
+    vm.frames.clear();
+    vm.stack.clear();
     vm.frames.push(Frame {
         func: None,
         locals: Vec::new(),
@@ -68,7 +89,20 @@ pub fn run(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
         block,
         pc: 0,
     });
-    vm.run_loop()
+    vm.frame_gen = vm.frame_gen.wrapping_add(1);
+    let result = vm.run_loop();
+    // M30.1.C: restore the pools. Extract the Vecs from `vm` before dropping
+    // it (the Vm borrows `env: &mut Env`, so we can't touch `env` while `vm`
+    // is alive). `std::mem::take` leaves `vm.frames`/`vm.stack` as empty
+    // Vecs (no alloc) so `vm`'s Drop is cheap.
+    let mut frames_pool = std::mem::take(&mut vm.frames);
+    let mut stack_pool = std::mem::take(&mut vm.stack);
+    frames_pool.clear();
+    stack_pool.clear();
+    drop(vm);
+    env.vm_frames_pool = frames_pool;
+    env.vm_stack_pool = stack_pool;
+    result
 }
 
 /// Run a compiled block in "reduce mode": every expression's result stays on
@@ -79,14 +113,23 @@ pub fn run(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
 /// mode (M26).
 pub fn run_reduce(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
     let natives_by_idx = build_natives_by_idx(env);
+    // M30.1.C: reuse the scratch Vecs (same drain/restore as `run`).
+    let frames_pool = std::mem::take(&mut env.vm_frames_pool);
+    let stack_pool = std::mem::take(&mut env.vm_stack_pool);
     let mut vm = Vm {
         env,
-        frames: Vec::new(),
-        stack: Vec::new(),
+        frames: frames_pool,
+        stack: stack_pool,
         natives_by_idx,
         ref_marks: Vec::new(),
         pending_refs: Vec::new(),
+        cached_block: None,
+        cached_instrs: None,
+        cached_frame_gen: 0,
+        frame_gen: 0,
     };
+    vm.frames.clear();
+    vm.stack.clear();
     vm.frames.push(Frame {
         func: None,
         locals: Vec::new(),
@@ -94,20 +137,38 @@ pub fn run_reduce(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalErro
         block,
         pc: 0,
     });
-    vm.run_loop_reduce()
+    vm.frame_gen = vm.frame_gen.wrapping_add(1);
+    let result = vm.run_loop_reduce();
+    let mut frames_pool = std::mem::take(&mut vm.frames);
+    let mut stack_pool = std::mem::take(&mut vm.stack);
+    frames_pool.clear();
+    stack_pool.clear();
+    drop(vm);
+    env.vm_frames_pool = frames_pool;
+    env.vm_stack_pool = stack_pool;
+    result
 }
 
 /// Build a `Vec<Rc<FuncDef>>` indexed by the same `u32` indices the
-/// compiler's `NativeRegistry::from_env` assigned. Iterates `env.natives` in
-/// HashMap order — stable within a single process run, matching the
-/// compiler's snapshot. (If `env.natives` is mutated after compilation, the
-/// indices go stale — M27 invalidates the compiled cache in that case.)
-fn build_natives_by_idx(env: &Env) -> Vec<Rc<FuncDef>> {
+/// compiler's `NativeRegistry::from_env` assigned. M30: cached on
+/// `Env::natives_by_idx` so the 1M-iteration loop path doesn't rebuild it
+/// per `dispatch_block` call (the original `Rc::clone`-per-native-per-call
+/// was the root cause of the v0.3.0 `sum_loop` regression — ~100 clones × 1M
+/// iterations = 100M refcount ops). Invalidated by `invalidate_native_index`
+/// when `env.natives` is mutated (at `register_natives` time, before any VM
+/// run).
+fn build_natives_by_idx(env: &mut Env) -> Rc<Vec<Rc<FuncDef>>> {
+    if let Some(cached) = &env.natives_by_idx {
+        // One Rc bump — no `Vec` alloc, no per-native `Rc::clone`.
+        return Rc::clone(cached);
+    }
     let mut out: Vec<Rc<FuncDef>> = Vec::with_capacity(env.natives.len());
     for fd in env.natives.values() {
         out.push(Rc::clone(fd));
     }
-    out
+    let rc = Rc::new(out);
+    env.natives_by_idx = Some(Rc::clone(&rc));
+    rc
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +180,9 @@ struct Vm<'env> {
     frames: Vec<Frame>,
     stack: Vec<Value>,
     /// Native `FuncDef`s indexed by the `u32` carried by `Call(native_idx, _)`.
-    natives_by_idx: Vec<Rc<FuncDef>>,
+    /// M30: `Rc`-cloned from `Env::natives_by_idx` (one Rc bump per `vm::run`,
+    /// not one `Vec` alloc + N `Rc::clone`s).
+    natives_by_idx: Rc<Vec<Rc<FuncDef>>>,
     /// `(refinement_name, stack_height_at_mark)` for the currently-open
     /// `MarkRefine`/`EndRefine` region. `EndRefine` pops the topmost entry,
     /// collects `stack[height..]` into a `Vec<Value>`, truncates the stack,
@@ -128,44 +191,133 @@ struct Vm<'env> {
     /// Accumulated refinement args for the current call, drained into a
     /// `RefineArgs` at `Call` time.
     pending_refs: Vec<(Symbol, Vec<Value>)>,
+    // -----------------------------------------------------------------
+    // M30 dispatch-loop cache. The original loop cloned the top frame's
+    // `block` (Rc bump) and `instrs` slice (Rc<[Instr]> bump) on *every*
+    // iteration — two atomic refcount ops per instr even when the frame
+    // was unchanged across thousands of iterations (tight loops, deep
+    // recursion). We now snapshot `(block, instrs)` and refresh only when
+    // `frame_gen` changes (frame push/pop/overwrite). The snapshot holds
+    // a borrow of `frames`, so we must drop it before mutating `frames`.
+    // -----------------------------------------------------------------
+    /// Cached clone of the current top frame's `CompiledBlock` (Rc bump).
+    cached_block: Option<CompiledBlock>,
+    /// Cached clone of the current top frame's `instrs` slice.
+    cached_instrs: Option<Rc<[Instr]>>,
+    /// `frame_gen` value at the time the cache was last refreshed.
+    cached_frame_gen: u64,
+    /// Bumped on every frame push/pop/overwrite. Wrapping is safe — the
+    /// cache only needs to detect *change*, not ordering.
+    frame_gen: u64,
 }
 
 impl<'env> Vm<'env> {
-    fn run_loop(&mut self) -> Result<Value, EvalError> {
-        loop {
-            // Borrow the top frame's block instrs. We clone the instr slice
-            // out via `Rc` index to avoid holding a borrow across the match
-            // (handlers mutate `self.frames`/`self.stack`).
-            let frame_idx = self.frames.len() - 1;
-            let pc = self.frames[frame_idx].pc;
+    /// Refresh the cached `(block, instrs)` snapshot if the top frame has
+    /// changed since the last refresh. Returns a clone of the instrs slice
+    /// (cheap — `Rc` bump) and the frame index. The caller must drop the
+    /// returned `Rc` before mutating `self.frames`.
+    ///
+    /// M30: this avoids the per-iteration `block.clone()` + `instrs.clone()`
+    /// that the original loop did. Tight loops (e.g. `repeat 1000000`) hit
+    /// this ~1M times; the cache stays valid across all of them because the
+    /// top frame doesn't change. Only `CallUser`/`TailCall`/`Return` bump
+    /// `frame_gen`, triggering a refresh on the next iteration.
+    #[inline]
+    fn refresh_cache(&mut self) -> (usize, Rc<[Instr]>) {
+        let frame_idx = self.frames.len() - 1;
+        if self.cached_frame_gen != self.frame_gen {
             let block = self.frames[frame_idx].block.clone();
             let instrs = block.instrs.clone();
+            self.cached_block = Some(block);
+            self.cached_instrs = Some(instrs.clone());
+            self.cached_frame_gen = self.frame_gen;
+            (frame_idx, instrs)
+        } else {
+            (
+                frame_idx,
+                self.cached_instrs.clone().expect("cache invariant: cached_instrs set when frame_gen matches"),
+            )
+        }
+    }
+
+    fn run_loop(&mut self) -> Result<Value, EvalError> {
+        loop {
+            // Snapshot the top frame's instrs. M30.1.B: `Instr` is `Copy`,
+            // so `instrs[pc]` is a cheap bitwise copy — no `Rc` refcount op.
+            let (frame_idx, instrs) = self.refresh_cache();
+            let pc = self.frames[frame_idx].pc;
             if pc >= instrs.len() {
                 // Fell off the end without `Return`/`Halt` — treat as
                 // implicit return of top-of-stack (defensive).
                 return Ok(self.stack.pop().unwrap_or(Value::None));
             }
-            let instr = instrs[pc].clone();
+            // M30.1.B: `Instr` is `Copy` (16 bytes), so this is a bitwise
+            // copy — no `Rc` refcount ops, no borrow-extension across the match.
+            let instr = instrs[pc];
             // Advance pc before dispatch (jump instrs overwrite it).
             self.frames[frame_idx].pc = pc + 1;
-            drop(block);
 
             match instr {
                 Instr::Const(i) => {
-                    let v = block_pool(&self.frames[frame_idx].block, i as usize);
+                    // M30: `ConstInt`/`ConstNone`/`ConstBool` are the
+                    // small-value fast paths; `Const` handles the rest
+                    // (Float/String/Block/etc.) via the pool. The pool
+                    // lookup still clones the `Value` (unavoidable — the
+                    // stack owns its values).
+                    let block = self.cached_block.as_ref().expect("cache invariant");
+                    let v = block_pool(block, i as usize);
                     self.stack.push(v);
                 }
+                Instr::ConstInt(n) => {
+                    // M30 fast path: skip pool indirection for `Integer`.
+                    // Constructs the `Value` inline (no `Rc`, no clone) —
+                    // the dominant literal kind in `fib`/`sum_loop`/loops.
+                    self.stack.push(Value::Integer {
+                        n,
+                        span: Span::new(0, 0),
+                    });
+                }
+                Instr::ConstNone => {
+                    self.stack.push(Value::None);
+                }
+                Instr::ConstBool(b) => {
+                    self.stack.push(Value::Logic(b));
+                }
                 Instr::LoadLocal(d, slot) => {
+                    // M30: unchecked slot access. The compiler's `Scope`
+                    // proved the slot exists at compile time; the bounds
+                    // check is redundant in release. `debug_assert!` keeps
+                    // debug builds safe.
                     let len = self.frames.len();
-                    let src = &self.frames[len - 1 - d as usize].locals;
-                    let v = src.get(slot as usize).cloned().unwrap_or(Value::None);
+                    let frame_idx2 = len - 1 - d as usize;
+                    let locals = &self.frames[frame_idx2].locals;
+                    debug_assert!(
+                        (slot as usize) < locals.len(),
+                        "LoadLocal OOB: slot={} len={}",
+                        slot,
+                        locals.len()
+                    );
+                    // SAFETY: compiler-proven slot index.
+                    let v = unsafe {
+                        locals
+                            .get_unchecked(slot as usize)
+                            .clone()
+                    };
                     self.stack.push(v);
                 }
                 Instr::LoadGlobal(slot) => {
-                    let v = self.env.user_ctx.slot_value(slot as usize);
+                    // M30: unchecked global slot access. Same contract as
+                    // `LoadLocal` — the compiler proved the slot at compile
+                    // time via the user context's binding pass.
+                    let v = self.env.user_ctx.slot_value_unchecked(slot as usize);
                     self.stack.push(v);
                 }
-                Instr::LoadDynamic(sym) => {
+                Instr::LoadDynamic(sym_idx) => {
+                    // M30.1.B: look up the symbol from the block's side table.
+                    let sym = self.cached_block.as_ref().expect("cache invariant")
+                        .symbols.get(sym_idx as usize)
+                        .cloned()
+                        .unwrap_or_else(|| Symbol::new(""));
                     let v = if let Some(val) = self.env.user_ctx.get(&sym) {
                         val
                     } else if let Some(fd) = self.env.natives.get(&sym) {
@@ -185,84 +337,30 @@ impl<'env> Vm<'env> {
                     if (slot as usize) >= locals.len() {
                         locals.resize(slot as usize + 1, Value::None);
                     }
+                    // SAFETY: resize above guarantees the slot exists.
                     locals[slot as usize] = val.clone();
                     self.stack.push(val);
                 }
                 Instr::SetGlobal(slot) => {
                     let val = self.stack.pop().unwrap_or(Value::None);
-                    self.env.user_ctx.set_slot(slot as usize, val.clone());
+                    // M30: unchecked global slot write. The compiler only
+                    // emits `SetGlobal(slot)` for words bound by the binding
+                    // pass, which allocates the slot.
+                    self.env.user_ctx.set_slot_unchecked(slot as usize, val.clone());
                     self.stack.push(val);
                 }
-                Instr::SetDynamic(sym) => {
+                Instr::SetDynamic(sym_idx) => {
+                    // M30.1.B: look up the symbol from the block's side table.
+                    let sym = self.cached_block.as_ref().expect("cache invariant")
+                        .symbols.get(sym_idx as usize)
+                        .cloned()
+                        .unwrap_or_else(|| Symbol::new(""));
                     let val = self.stack.pop().unwrap_or(Value::None);
                     self.env.user_ctx.set(sym, val.clone());
                     self.stack.push(val);
                 }
                 Instr::Call(native_idx, argc) => {
-                    let fd = self
-                        .natives_by_idx
-                        .get(native_idx as usize)
-                        .cloned()
-                        .ok_or_else(|| EvalError::Native {
-                            message: format!("VM: bad native index {native_idx}"),
-                            span: Span::new(0, 0),
-                        })?;
-                    let f = fd.native.ok_or_else(|| EvalError::Native {
-                        message: format!("VM: native {native_idx} has no handler"),
-                        span: Span::new(0, 0),
-                    })?;
-                    // Slice the top `argc` args without moving them.
-                    let len = self.stack.len();
-                    if argc as usize > len {
-                        return Err(EvalError::Arity {
-                            native: Symbol::new("<native>"),
-                            expected: argc as usize,
-                            got: len,
-                            span: Span::new(0, 0),
-                        });
-                    }
-                    let args: Vec<Value> =
-                        self.stack[len - argc as usize..].to_vec();
-                    // Assemble RefineArgs from `pending_refs`.
-                    let refs = RefineArgs::from_pairs(std::mem::take(&mut self.pending_refs));
-                    let result = f(&args, &refs, self.env);
-                    // Pop argc args regardless of success/failure.
-                    self.stack.truncate(len - argc as usize);
-                    match result {
-                        Ok(v) => self.stack.push(v),
-                        Err(EvalError::Return(v)) => {
-                            // `return` native: unwind to the nearest function
-                            // frame (the current top frame if it has
-                            // `func: Some(...)`, else search down). Push the
-                            // return value onto the caller's stack.
-                            //
-                            // M29: if there's no function frame at all (top-
-                            // level `return`), propagate the `Return` error
-                            // — matching the walker, which lets
-                            // `EvalError::Return` bubble up as an error at the
-                            // top level (the `return_outside_function_errors`
-                            // test asserts this).
-                            while let Some(frame) = self.frames.last() {
-                                let is_func = frame.func.is_some();
-                                self.frames.pop();
-                                if is_func {
-                                    break;
-                                }
-                            }
-                            if self.frames.is_empty() {
-                                // No function frame found: `return` outside a
-                                // function. Propagate as an error (walker parity).
-                                return Err(EvalError::Return(v));
-                            }
-                            self.stack.push(v);
-                        }
-                        Err(EvalError::Quit(code)) => {
-                            // `exit`/`quit` unwind to top level.
-                            while self.frames.pop().is_some() {}
-                            return Err(EvalError::Quit(code));
-                        }
-                        Err(e) => return Err(e),
-                    }
+                    self.call_native(native_idx as usize, argc as usize)?;
                 }
                 Instr::CallUser(slot, argc) => {
                     self.call_user(slot as usize, argc as usize)?;
@@ -304,14 +402,21 @@ impl<'env> Vm<'env> {
                     // the top-level frame, return the result directly.
                     let result = self.stack.pop().unwrap_or(Value::None);
                     self.frames.pop();
+                    self.frame_gen = self.frame_gen.wrapping_add(1);
                     if self.frames.is_empty() {
                         return Ok(result);
                     }
                     self.stack.push(result);
                 }
-                Instr::MakeFunc(spec_idx, body_idx, freevars) => {
-                    let spec_val = block_pool(&self.frames[frame_idx].block, spec_idx as usize);
-                    let body_val = block_pool(&self.frames[frame_idx].block, body_idx as usize);
+                Instr::MakeFunc(spec_idx, body_idx, fv_idx) => {
+                    // M30.1.B: freevar list is looked up from the side table.
+                    let block = self.cached_block.as_ref().expect("cache invariant").clone();
+                    let spec_val = block_pool(&block, spec_idx as usize);
+                    let body_val = block_pool(&block, body_idx as usize);
+                    let freevars = block.freevars_table
+                        .get(fv_idx as usize)
+                        .cloned()
+                        .unwrap_or_default();
                     let fd = self.build_func_def(spec_val, body_val, freevars)?;
                     self.stack.push(Value::Func(Rc::new(fd)));
                 }
@@ -355,7 +460,12 @@ impl<'env> Vm<'env> {
                     set_path_value(&parts, rhs.clone(), self.env, span)?;
                     self.stack.push(rhs);
                 }
-                Instr::MarkRefine(sym) => {
+                Instr::MarkRefine(sym_idx) => {
+                    // M30.1.B: look up the symbol from the block's side table.
+                    let sym = self.cached_block.as_ref().expect("cache invariant")
+                        .symbols.get(sym_idx as usize)
+                        .cloned()
+                        .unwrap_or_else(|| Symbol::new(""));
                     self.ref_marks.push((sym, self.stack.len()));
                 }
                 Instr::EndRefine => {
@@ -395,19 +505,18 @@ impl<'env> Vm<'env> {
     /// inside the reduce block) behave as in `run_loop`.
     fn run_loop_reduce(&mut self) -> Result<Value, EvalError> {
         loop {
-            let frame_idx = self.frames.len() - 1;
+            let (frame_idx, instrs) = self.refresh_cache();
             let pc = self.frames[frame_idx].pc;
-            let block = self.frames[frame_idx].block.clone();
-            let instrs = block.instrs.clone();
             if pc >= instrs.len() {
                 return Ok(self.collect_reduce_stack());
             }
-            let instr = instrs[pc].clone();
+            // M30.1.B: `Instr` is `Copy` — bitwise copy, no clone.
+            let instr = instrs[pc];
             self.frames[frame_idx].pc = pc + 1;
-            drop(block);
             match instr {
                 Instr::Return => {
                     self.frames.pop();
+                    self.frame_gen = self.frame_gen.wrapping_add(1);
                     if self.frames.is_empty() {
                         // Top-level Return in reduce mode: collect the whole
                         // stack into a Block. (Each expression left its result;
@@ -429,12 +538,7 @@ impl<'env> Vm<'env> {
                     });
                 }
                 _ => {
-                    // Delegate all other instrs to `run_loop`'s dispatch by
-                    // re-emitting the instr. We do this by falling back to a
-                    // shared `dispatch_instr` helper — but to avoid a large
-                    // refactor, we instead reconstruct a single-step: push the
-                    // instr back via a synthetic one-instr frame would be
-                    // wrong. The cleanest approach is to share the match.
+                    // Delegate all other instrs to the shared `dispatch_instr`.
                     self.dispatch_instr(instr, frame_idx)?;
                 }
             }
@@ -454,20 +558,45 @@ impl<'env> Vm<'env> {
     fn dispatch_instr(&mut self, instr: Instr, frame_idx: usize) -> Result<(), EvalError> {
         match instr {
             Instr::Const(i) => {
-                let v = block_pool(&self.frames[frame_idx].block, i as usize);
+                let block = self.cached_block.as_ref().expect("cache invariant").clone();
+                let v = block_pool(&block, i as usize);
                 self.stack.push(v);
+            }
+            Instr::ConstInt(n) => {
+                self.stack.push(Value::Integer {
+                    n,
+                    span: Span::new(0, 0),
+                });
+            }
+            Instr::ConstNone => {
+                self.stack.push(Value::None);
+            }
+            Instr::ConstBool(b) => {
+                self.stack.push(Value::Logic(b));
             }
             Instr::LoadLocal(d, slot) => {
                 let len = self.frames.len();
-                let src = &self.frames[len - 1 - d as usize].locals;
-                let v = src.get(slot as usize).cloned().unwrap_or(Value::None);
+                let locals = &self.frames[len - 1 - d as usize].locals;
+                debug_assert!(
+                    (slot as usize) < locals.len(),
+                    "LoadLocal OOB: slot={} len={}",
+                    slot,
+                    locals.len()
+                );
+                // SAFETY: compiler-proven slot index.
+                let v = unsafe { locals.get_unchecked(slot as usize).clone() };
                 self.stack.push(v);
             }
             Instr::LoadGlobal(slot) => {
-                let v = self.env.user_ctx.slot_value(slot as usize);
+                let v = self.env.user_ctx.slot_value_unchecked(slot as usize);
                 self.stack.push(v);
             }
-            Instr::LoadDynamic(sym) => {
+            Instr::LoadDynamic(sym_idx) => {
+                // M30.1.B: look up the symbol from the block's side table.
+                let sym = self.cached_block.as_ref().expect("cache invariant")
+                    .symbols.get(sym_idx as usize)
+                    .cloned()
+                    .unwrap_or_else(|| Symbol::new(""));
                 let v = if let Some(val) = self.env.user_ctx.get(&sym) {
                     val
                 } else if let Some(fd) = self.env.natives.get(&sym) {
@@ -492,61 +621,21 @@ impl<'env> Vm<'env> {
             }
             Instr::SetGlobal(slot) => {
                 let val = self.stack.pop().unwrap_or(Value::None);
-                self.env.user_ctx.set_slot(slot as usize, val.clone());
+                self.env.user_ctx.set_slot_unchecked(slot as usize, val.clone());
                 self.stack.push(val);
             }
-            Instr::SetDynamic(sym) => {
+            Instr::SetDynamic(sym_idx) => {
+                // M30.1.B: look up the symbol from the block's side table.
+                let sym = self.cached_block.as_ref().expect("cache invariant")
+                    .symbols.get(sym_idx as usize)
+                    .cloned()
+                    .unwrap_or_else(|| Symbol::new(""));
                 let val = self.stack.pop().unwrap_or(Value::None);
                 self.env.user_ctx.set(sym, val.clone());
                 self.stack.push(val);
             }
             Instr::Call(native_idx, argc) => {
-                let fd = self
-                    .natives_by_idx
-                    .get(native_idx as usize)
-                    .cloned()
-                    .ok_or_else(|| EvalError::Native {
-                        message: format!("VM: bad native index {native_idx}"),
-                        span: Span::new(0, 0),
-                    })?;
-                let f = fd.native.ok_or_else(|| EvalError::Native {
-                    message: format!("VM: native {native_idx} has no handler"),
-                    span: Span::new(0, 0),
-                })?;
-                let len = self.stack.len();
-                if argc as usize > len {
-                    return Err(EvalError::Arity {
-                        native: Symbol::new("<native>"),
-                        expected: argc as usize,
-                        got: len,
-                        span: Span::new(0, 0),
-                    });
-                }
-                let args: Vec<Value> = self.stack[len - argc as usize..].to_vec();
-                let refs = RefineArgs::from_pairs(std::mem::take(&mut self.pending_refs));
-                let result = f(&args, &refs, self.env);
-                self.stack.truncate(len - argc as usize);
-                match result {
-                    Ok(v) => self.stack.push(v),
-                    Err(EvalError::Return(v)) => {
-                        while let Some(frame) = self.frames.last() {
-                            let is_func = frame.func.is_some();
-                            self.frames.pop();
-                            if is_func {
-                                break;
-                            }
-                        }
-                        if self.frames.is_empty() {
-                            return Err(EvalError::Return(v));
-                        }
-                        self.stack.push(v);
-                    }
-                    Err(EvalError::Quit(code)) => {
-                        while self.frames.pop().is_some() {}
-                        return Err(EvalError::Quit(code));
-                    }
-                    Err(e) => return Err(e),
-                }
+                self.call_native(native_idx as usize, argc as usize)?;
             }
             Instr::CallUser(slot, argc) => {
                 self.call_user(slot as usize, argc as usize)?;
@@ -572,9 +661,15 @@ impl<'env> Vm<'env> {
             Instr::Pop => {
                 self.stack.pop();
             }
-            Instr::MakeFunc(spec_idx, body_idx, freevars) => {
-                let spec_val = block_pool(&self.frames[frame_idx].block, spec_idx as usize);
-                let body_val = block_pool(&self.frames[frame_idx].block, body_idx as usize);
+            Instr::MakeFunc(spec_idx, body_idx, fv_idx) => {
+                let block = self.cached_block.as_ref().expect("cache invariant").clone();
+                let spec_val = block_pool(&block, spec_idx as usize);
+                let body_val = block_pool(&block, body_idx as usize);
+                // M30.1.B: freevar list is looked up from the side table.
+                let freevars = block.freevars_table
+                    .get(fv_idx as usize)
+                    .cloned()
+                    .unwrap_or_default();
                 let fd = self.build_func_def(spec_val, body_val, freevars)?;
                 self.stack.push(Value::Func(Rc::new(fd)));
             }
@@ -615,7 +710,12 @@ impl<'env> Vm<'env> {
                 set_path_value(&parts, rhs.clone(), self.env, span)?;
                 self.stack.push(rhs);
             }
-            Instr::MarkRefine(sym) => {
+            Instr::MarkRefine(sym_idx) => {
+                // M30.1.B: look up the symbol from the block's side table.
+                let sym = self.cached_block.as_ref().expect("cache invariant")
+                    .symbols.get(sym_idx as usize)
+                    .cloned()
+                    .unwrap_or_else(|| Symbol::new(""));
                 self.ref_marks.push((sym, self.stack.len()));
             }
             Instr::EndRefine => {
@@ -634,6 +734,102 @@ impl<'env> Vm<'env> {
                 // Should not reach here via `dispatch_instr` — `run_loop` and
                 // `run_loop_reduce` handle these in their own match arms.
             }
+        }
+        Ok(())
+    }
+
+    /// M30.1.A: Invoke a native function indexed by `native_idx` with `argc`
+    /// args popped from the operand stack. Shared by the `Call` arm in both
+    /// `run_loop` and `dispatch_instr` (previously duplicated).
+    ///
+    /// **Stack-allocated args fast path:** for the common case (argc ≤ 8), the
+    /// args are copied into a stack-allocated `[Value; 8]` instead of a
+    /// heap-allocated `Vec`. This eliminates 1 heap allocation per native call
+    /// — for `repeat 1000000 [acc: acc + 1]`, the `+` native alone caused 1M
+    /// heap allocations before this optimization. Natives receive `&mut Env`
+    /// (not `&mut Vm`), so they cannot touch the caller's `Vm.stack`; the
+    /// copy is safe because re-entrant natives (`if`/`loop`/etc.) create a
+    /// fresh `Vm` via `dispatch_block`, leaving the caller's stack untouched.
+    fn call_native(
+        &mut self,
+        native_idx: usize,
+        argc: usize,
+    ) -> Result<(), EvalError> {
+        let fd = self
+            .natives_by_idx
+            .get(native_idx)
+            .cloned()
+            .ok_or_else(|| EvalError::Native {
+                message: format!("VM: bad native index {native_idx}"),
+                span: Span::new(0, 0),
+            })?;
+        let f = fd.native.ok_or_else(|| EvalError::Native {
+            message: format!("VM: native {native_idx} has no handler"),
+            span: Span::new(0, 0),
+        })?;
+        let len = self.stack.len();
+        if argc > len {
+            return Err(EvalError::Arity {
+                native: Symbol::new("<native>"),
+                expected: argc,
+                got: len,
+                span: Span::new(0, 0),
+            });
+        }
+        let start = len - argc;
+        // Assemble RefineArgs from `pending_refs`.
+        let refs = RefineArgs::from_pairs(std::mem::take(&mut self.pending_refs));
+        // Call the native. The args slice is built without heap allocation
+        // for argc ≤ 8 (stack-allocated). The native can't touch
+        // `self.stack` (it only has `&mut Env`), so we truncate *after*
+        // the call returns.
+        let result = if argc <= INLINE_ARGS_CAP {
+            // M30.1.A: stack-allocated args fast path. `[Value; 8]` lives on
+            // the call frame (512 bytes) — cheaper than a heap alloc for the
+            // hot `Call` path (1M allocs for a tight `repeat` loop before this).
+            // `MaybeUninit` avoids the `Value: Copy` requirement for array
+            // initialization; we initialize exactly `argc` slots below.
+            let mut buf: [MaybeUninit<Value>; INLINE_ARGS_CAP] =
+                [const { MaybeUninit::uninit() }; INLINE_ARGS_CAP];
+            for (i, v) in self.stack[start..len].iter().enumerate() {
+                buf[i].write(v.clone());
+            }
+            // SAFETY: we initialized buf[0..argc] above.
+            let args: &[Value] = unsafe {
+                std::slice::from_raw_parts(buf.as_ptr() as *const Value, argc)
+            };
+            f(args, &refs, self.env)
+        } else {
+            // Fall back to heap allocation for very high-arity natives
+            // (rare — `make`/`to` with many args, variadic collection).
+            let args: Vec<Value> = self.stack[start..len].to_vec();
+            f(&args, &refs, self.env)
+        };
+        // Pop argc args regardless of success/failure.
+        self.stack.truncate(start);
+        match result {
+            Ok(v) => self.stack.push(v),
+            Err(EvalError::Return(v)) => {
+                // `return` native: unwind to the nearest function frame.
+                while let Some(frame) = self.frames.last() {
+                    let is_func = frame.func.is_some();
+                    self.frames.pop();
+                    self.frame_gen = self.frame_gen.wrapping_add(1);
+                    if is_func {
+                        break;
+                    }
+                }
+                if self.frames.is_empty() {
+                    return Err(EvalError::Return(v));
+                }
+                self.stack.push(v);
+            }
+            Err(EvalError::Quit(code)) => {
+                self.frames.clear();
+                self.frame_gen = self.frame_gen.wrapping_add(1);
+                return Err(EvalError::Quit(code));
+            }
+            Err(e) => return Err(e),
         }
         Ok(())
     }
@@ -723,6 +919,7 @@ impl<'env> Vm<'env> {
             block: (*compiled).clone(),
             pc: 0,
         });
+        self.frame_gen = self.frame_gen.wrapping_add(1);
         #[cfg(feature = "stats")]
         {
             self.env.record_frame_push();
@@ -766,6 +963,7 @@ impl<'env> Vm<'env> {
                 block: (*compiled).clone(),
                 pc: 0,
             });
+            self.frame_gen = self.frame_gen.wrapping_add(1);
             #[cfg(feature = "stats")]
             {
                 self.env.record_frame_push();
@@ -784,8 +982,16 @@ impl<'env> Vm<'env> {
             .map(|cur| Rc::ptr_eq(cur, &fd))
             .unwrap_or(false);
         if same_func {
-            self.frames[frame_idx].locals = locals;
+            // M30: reuse the existing `locals` Vec's allocation rather than
+            // dropping + reallocating. The original `self.frames[frame_idx].locals = locals`
+            // dropped the old Vec and installed a fresh one — for a tight
+            // 1M-deep tail loop, that's 1M Vec allocations. Instead we
+            // truncate the existing Vec and copy the new values in.
+            let existing = &mut self.frames[frame_idx].locals;
+            existing.clear();
+            existing.extend_from_slice(&locals);
             self.frames[frame_idx].pc = 0;
+            // Block cache stays valid (same FuncDef → same compiled body).
             // No stats bump: the frame is reused, not pushed. (TailReenter
             // at the instr level also doesn't bump; the runtime TailReenter
             // detection here is equivalent.)
@@ -796,9 +1002,15 @@ impl<'env> Vm<'env> {
         // chain stays valid — the callee's freevar captures walk up the same
         // ancestor frames that were on the stack at the call site).
         self.frames[frame_idx].func = Some(Rc::clone(&fd));
-        self.frames[frame_idx].locals = locals;
+        // M30: reuse the existing Vec allocation here too.
+        {
+            let existing = &mut self.frames[frame_idx].locals;
+            existing.clear();
+            existing.extend_from_slice(&locals);
+        }
         self.frames[frame_idx].block = (*compiled).clone();
         self.frames[frame_idx].pc = 0;
+        self.frame_gen = self.frame_gen.wrapping_add(1);
         // No stats bump: a reused frame doesn't increase call-stack depth.
         Ok(())
     }

@@ -89,11 +89,6 @@ pub(crate) fn dispatch_block(block: &Value, env: &mut Env) -> Result<Value, Eval
         Value::Block { series, .. } | Value::Paren { series, .. } => series.clone(),
         _ => return Ok(block.clone()),
     };
-    // `bind`/`use` may rebind words to a child context the VM can't lexically
-    // address. Detect that and route to the walker.
-    if has_foreign_bindings(&series, &env.user_ctx) {
-        return eval(block, env);
-    }
     // M27: check the Env-level block cache by Series identity before
     // recompiling. Safe without explicit invalidation because `bind`/`use`
     // deep-clone the series (new `Rc` → new identity → miss) and `user_ctx`
@@ -109,12 +104,28 @@ pub(crate) fn dispatch_block(block: &Value, env: &mut Env) -> Result<Value, Eval
     // `block_source_span` — a cheap O(1) structural check that catches
     // allocator reuse (two different blocks almost always have different
     // spans). If the spans don't match, we recompile (cache miss).
+    //
+    // M30 PERF: the cache check happens *before* `has_foreign_bindings` so a
+    // cached block skips the per-value foreign-bindings walk on every re-
+    // entry. Without this ordering, a 1M-iteration `repeat` paid the O(n)
+    // walk 1M times — the root cause of the v0.3.0 `sum_loop`/`sum_while`
+    // regressions (VM 3x slower than walker on those fixtures). A cached
+    // block is by construction non-foreign (the cache only stores blocks
+    // that passed the check on first compile), so skipping the recheck is
+    // sound.
     let cache_key = (Rc::as_ptr(&series.data) as usize, series.index);
     if let Some(cached) = env.block_cache.get(&cache_key).cloned() {
         let expected_span = crate::vm::compiler::block_source_span_pub(&series);
         if cached.source_span == expected_span {
             return crate::vm::run((*cached).clone(), env);
         }
+    }
+    // `bind`/`use` may rebind words to a child context the VM can't lexically
+    // address. Detect that and route to the walker. Only paid on a cache miss
+    // (first entry of a block) — subsequent entries hit the cache above and
+    // skip this O(n) walk.
+    if has_foreign_bindings(&series, &env.user_ctx) {
+        return eval(block, env);
     }
     // Compile-on-demand. The M23 analyzer marks `use`/object forms
     // `needs_rebind`; such blocks return a stub `[Halt]` from `compile_block`,

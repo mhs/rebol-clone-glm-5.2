@@ -76,10 +76,43 @@ impl Context {
         self.slots.borrow()[idx].borrow().clone()
     }
 
+    /// M30 fast path: read a slot by index without a bounds check. The caller
+    /// (the VM) statically knows `idx` is valid because the compiler's `Scope`
+    /// proved it at compile time. A `debug_assert!` guards against routing
+    /// bugs in debug builds; release builds skip the bounds check.
+    ///
+    /// # Safety
+    /// `idx` must be < `self.slots.borrow().len()`.
+    pub fn slot_value_unchecked(&self, idx: usize) -> Value {
+        let slots = self.slots.borrow();
+        debug_assert!(idx < slots.len(), "slot_value_unchecked OOB: {idx}");
+        // SAFETY: caller guarantees idx < len. Bind to a local first so the
+        // `Ref` destructor runs before `slots` (the outer borrow) drops.
+        let v = unsafe { slots.get_unchecked(idx).borrow().clone() };
+        v
+    }
+
     /// Write a slot by index via `RefCell`. Safe to call on a shared
     /// `&Rc<Context>` — only slot contents change, never the name map.
     pub fn set_slot(&self, idx: usize, val: Value) {
         *self.slots.borrow()[idx].borrow_mut() = val;
+    }
+
+    /// M30 fast path: write a slot by index without a bounds check. Same
+    /// contract as `slot_value_unchecked` — the VM only calls this with
+    /// compiler-proven slot indices.
+    ///
+    /// # Safety
+    /// `idx` must be < `self.slots.borrow().len()`.
+    pub fn set_slot_unchecked(&self, idx: usize, val: Value) {
+        let slots = self.slots.borrow();
+        debug_assert!(idx < slots.len(), "set_slot_unchecked OOB: {idx}");
+        // SAFETY: caller guarantees idx < len. Take the `RefMut` out in a
+        // block so its destructor runs before `slots` (the outer borrow).
+        {
+            *unsafe { slots.get_unchecked(idx) }.borrow_mut() = val;
+        }
+        drop(slots);
     }
 
     /// Words in declaration order. Used by `words-of`/`values-of`/`reflect`

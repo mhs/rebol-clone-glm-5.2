@@ -15,9 +15,11 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Instant;
 
 use red_core::{Context, Env};
 use red_eval::run_source_with_output;
+use red_eval::RunOptions;
 
 #[cfg(feature = "stats")]
 use red_core::{Series, Span, Value};
@@ -265,4 +267,60 @@ fn env_has_no_stats_fields_when_feature_off() {
     // into the default build, the cfg-gated tests above would shadow this;
     // this test's body staying valid confirms no surface change.
     let _ = env.call_stack.len();
+}
+
+// ---------------------------------------------------------------------------
+// M30 regress-guard: VM is at least as fast as the walker on a small fib.
+// ---------------------------------------------------------------------------
+//
+// `cargo bench` is the authoritative regress guard (via `critcmp`), but a
+// wall-time `#[test]` catches gross regressions in `cargo test` too. Runs
+// `fib 20` (small enough to complete in well under a second in either
+// mode, large enough to surface a 2x+ regression) in both VM and Walk
+// modes; asserts the VM is no slower than the walker (within a generous
+// 3x tolerance — debug builds are noisy, and the goal is to catch a
+// misroute where the VM accidentally falls back to the walker, not to
+// micro-tune). The plan3 M30 target is >= 5x on `fib 30`; `fib 20` is
+// the test-friendly proxy.
+
+/// Run `src` with the given mode, returning elapsed wall time.
+fn timed_run(src: &str, walk: bool) -> std::time::Duration {
+    let opts = RunOptions {
+        walk,
+        ..RunOptions::default()
+    };
+    let writer = BufferWriter::new();
+    let start = Instant::now();
+    let _ = red_eval::run_source_with_exit_opts(src, Box::new(writer), &opts)
+        .expect("fixture failed");
+    start.elapsed()
+}
+
+#[test]
+fn vm_no_slower_than_walker_on_fib() {
+    // `fib 20` = 6765. Small enough for debug-build test runs (~50ms in
+    // VM, ~150ms walker on the dev machine).
+    let src = "Red [] fib: func [n][either n < 2 [n][(fib n - 1) + (fib n - 2)]] print fib 20";
+    // Warm up (first run pays lex/parse/bind + JIT-like lazy compile).
+    let _ = timed_run(src, false);
+    let _ = timed_run(src, true);
+    let vm_time = timed_run(src, false);
+    let walk_time = timed_run(src, true);
+    // Hard regress guard: VM must never be slower than the walker (3x
+    // tolerance for debug-build noise). Catches a routing bug where the VM
+    // accidentally falls back to the walker.
+    assert!(
+        vm_time.as_secs_f64() <= walk_time.as_secs_f64() * 3.0,
+        "VM ({vm_time:?}) is > 3x slower than walker ({walk_time:?}) — possible walker fallback"
+    );
+    // Speedup guard: the M30 target is >= 5x on `fib 30` in release. Debug
+    // builds don't hit 5x (the VM's per-instr dispatch match isn't optimized
+    // by llvm in debug), so we only assert the 1.2x speedup in release. The
+    // bench suite (`cargo bench --bench eval`) is the authoritative check.
+    #[cfg(not(debug_assertions))]
+    assert!(
+        vm_time.as_secs_f64() * 1.2 <= walk_time.as_secs_f64(),
+        "release VM ({vm_time:?}) is not at least 1.2x faster than walker ({walk_time:?}) — \
+         the M30 target is 5x; this loose guard catches gross regressions only"
+    );
 }

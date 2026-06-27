@@ -16,30 +16,61 @@ use std::rc::Rc;
 use crate::value::{FuncDef, Span, Symbol, Value};
 
 /// A single bytecode instruction. Variants use `u32` indices (into the block's
-/// `pool` or the function-locals vector) to keep the enum compact.
+/// `pool`, the function-locals vector, or the block's side tables) to keep
+/// the enum compact.
+///
+/// **M30.1.B:** the enum is `Copy` (no `Vec`/`Rc`/`Symbol` payloads). Variable-
+/// sized payloads are table-indexed:
+/// - `LoadDynamic(sym_idx)` / `SetDynamic(sym_idx)` / `MarkRefine(sym_idx)`
+///   reference `CompiledBlock::symbols[sym_idx]` (a `Vec<Symbol>`).
+/// - `MakeFunc(spec_idx, body_idx, freevars_idx)` references
+///   `CompiledBlock::freevars_table[freevars_idx]` (a `Vec<Vec<Symbol>>`).
+///
+/// This shrinks the enum from ~40 bytes (bloated by `MakeFunc`'s `Vec<Symbol>`)
+/// to 16 bytes (tag + u64 payload), and eliminates `Rc` refcount ops on the
+/// `Symbol`-carrying variants. The dispatch loop's per-iteration `instrs[pc]`
+/// read becomes a cheap bitwise copy.
 ///
 /// Variant groups (mirroring `plan3.md`'s design summary):
-/// - Constants: `Const(i)` pushes `pool[i]`.
-/// - Loads: `LoadLocal(depth, slot)`, `LoadGlobal(slot)`, `LoadDynamic(sym)`.
-/// - Stores: `SetLocal(d, slot)`, `SetGlobal(slot)`, `SetDynamic(sym)`.
+/// - Constants: `Const(i)` pushes `pool[i]`. The small-value fast paths
+///   `ConstInt(n)`/`ConstNone`/`ConstBool(b)` (M30) skip the pool indirection
+///   for the common literal kinds, avoiding a `block_pool` lookup + `Rc`
+///   clone on the hot `Const` arm. The compiler emits these in preference to
+///   `Const` whenever the literal fits (see `compiler.rs::emit_const`).
+/// - Loads: `LoadLocal(depth, slot)`, `LoadGlobal(slot)`, `LoadDynamic(sym_idx)`.
+/// - Stores: `SetLocal(d, slot)`, `SetGlobal(slot)`, `SetDynamic(sym_idx)`.
 /// - Calls: `Call(native_idx, argc)`, `CallUser(func_slot, argc)`,
 ///   `TailCall(...)`, `TailReenter(...)` for tail-position calls.
 /// - Control: `Jump(target)`, `JumpIfFalse(target)`, `Pop`, `Return`, `Halt`.
-/// - Functions: `MakeFunc(spec_idx, body_idx, freevars)` builds a `FuncDef`
+/// - Functions: `MakeFunc(spec_idx, body_idx, freevars_idx)` builds a `FuncDef`
 ///   at runtime when `func`/`does`/`function` is invoked on literal-block args.
+///   The freevar list is looked up from `CompiledBlock::freevars_table`.
 /// - Blocks: `EnterBlock`, `DropTo(n)` for nested `reduce`-style evaluation.
 /// - Paths: `GetPath`, `SetPath` delegate to the M19 path resolver.
-/// - Refinements: `MarkRefine(sym)` + `EndRefine` bracket a refinement's
+/// - Refinements: `MarkRefine(sym_idx)` + `EndRefine` bracket a refinement's
 ///   args on the stack so the VM can assemble `RefineArgs` for the native.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum Instr {
     Const(u32),
+    /// M30 small-value fast path: push `Integer(n)` without a pool lookup.
+    /// Emitted by the compiler for any `Value::Integer` literal (the most
+    /// common constant kind in compute-heavy loops like `fib`/`sum_loop`).
+    ConstInt(i64),
+    /// M30 fast path: push `None`. (`if true [...]`/`if false [...]` tails
+    /// frequently leave `none` on the stack.)
+    ConstNone,
+    /// M30 fast path: push `Logic(b)`. (`true`/`false` literals and the
+    /// results of comparison natives that the compiler can statically fold.)
+    ConstBool(bool),
     LoadLocal(u32, u32),
     LoadGlobal(u32),
-    LoadDynamic(Symbol),
+    /// M30.1.B: index into `CompiledBlock::symbols`. (Was `LoadDynamic(Symbol)`
+    /// — the `Rc<str>` clone per dispatch iteration was a hot-path overhead.)
+    LoadDynamic(u32),
     SetLocal(u32, u32),
     SetGlobal(u32),
-    SetDynamic(Symbol),
+    /// M30.1.B: index into `CompiledBlock::symbols`.
+    SetDynamic(u32),
     Call(u32, u32),
     CallUser(u32, u32),
     TailCall(u32, u32),
@@ -48,25 +79,42 @@ pub enum Instr {
     JumpIfFalse(u32),
     Pop,
     Return,
-    MakeFunc(u32, u32, Vec<Symbol>),
+    /// M30.1.B: `freevars_idx` indexes into `CompiledBlock::freevars_table`.
+    /// (Was `MakeFunc(u32, u32, Vec<Symbol>)` — the `Vec` bloated the enum to
+    /// ~40 bytes and forced a heap alloc per `MakeFunc` emission.)
+    MakeFunc(u32, u32, u32),
     EnterBlock,
     DropTo(u32),
     GetPath,
     SetPath,
-    MarkRefine(Symbol),
+    /// M30.1.B: index into `CompiledBlock::symbols`.
+    MarkRefine(u32),
     EndRefine,
     Halt,
 }
 
-/// A compiled block: an instruction stream plus its constant pool and
-/// metadata. `Rc`-backed internally so cloning (e.g. across `MakeFunc` or
-/// `CallUser`) is cheap. The `needs_rebind` flag marks blocks that must fall
-/// back to the legacy tree-walker because `bind`/`use`/`make object!` mutated
-/// their bindings after compilation (per M23/M27).
+/// A compiled block: an instruction stream plus its constant pool, symbol
+/// table, freevar table, and metadata. `Rc`-backed internally so cloning
+/// (e.g. across `MakeFunc` or `CallUser`) is cheap. The `needs_rebind` flag
+/// marks blocks that must fall back to the legacy tree-walker because
+/// `bind`/`use`/`make object!` mutated their bindings after compilation
+/// (per M23/M27).
+///
+/// **M30.1.B:** added `symbols` and `freevars_table` side tables so `Instr`
+/// can be `Copy` (no `Vec`/`Symbol` payloads inline). Populated at compile
+/// time; never mutated post-compile.
 #[derive(Clone, Debug)]
 pub struct CompiledBlock {
     pub instrs: Rc<[Instr]>,
     pub pool: Rc<[Value]>,
+    /// M30.1.B: symbol table for `LoadDynamic`/`SetDynamic`/`MarkRefine`.
+    /// Indexed by the `u32` carried by those instr variants. Populated by
+    /// the compiler when it emits a dynamic-binding instr.
+    pub symbols: Vec<Symbol>,
+    /// M30.1.B: freevar-list table for `MakeFunc`. Indexed by the `freevars_idx`
+    /// carried by `MakeFunc`. Each entry is the `Vec<Symbol>` freevar capture
+    /// list for one `MakeFunc` emission.
+    pub freevars_table: Vec<Vec<Symbol>>,
     pub n_locals: usize,
     pub freevars: Vec<Symbol>,
     pub source_span: Span,
@@ -88,8 +136,8 @@ pub struct Frame {
 }
 
 /// Format a `CompiledBlock` for debugging: one instr per line, with pool
-/// values inlined for readability. Used by later-milestone disassembler tests
-/// and the `--disasm` CLI flag (M31).
+/// values and symbol-table entries inlined for readability. Used by later-
+/// milestone disassembler tests and the `--disasm` CLI flag (M31).
 pub fn disasm(block: &CompiledBlock) -> String {
     use std::fmt::Write;
     let mut out = String::new();
@@ -101,14 +149,26 @@ pub fn disasm(block: &CompiledBlock) -> String {
                 let v = pool.get(*idx as usize).map(|v| format!("{v:?}")).unwrap_or_else(|| "<bad pool idx>".into());
                 let _ = writeln!(out, "Const({idx})  ; {v}");
             }
+            Instr::ConstInt(n) => {
+                let _ = writeln!(out, "ConstInt({n})");
+            }
+            Instr::ConstNone => {
+                let _ = writeln!(out, "ConstNone");
+            }
+            Instr::ConstBool(b) => {
+                let _ = writeln!(out, "ConstBool({b})");
+            }
             Instr::LoadLocal(d, s) => {
                 let _ = writeln!(out, "LoadLocal({d}, {s})");
             }
             Instr::LoadGlobal(s) => {
                 let _ = writeln!(out, "LoadGlobal({s})");
             }
-            Instr::LoadDynamic(sym) => {
-                let _ = writeln!(out, "LoadDynamic({:?})", sym.as_str());
+            Instr::LoadDynamic(idx) => {
+                let sym = block.symbols.get(*idx as usize)
+                    .map(|s| format!("{:?}", s.as_str()))
+                    .unwrap_or_else(|| "<bad sym idx>".into());
+                let _ = writeln!(out, "LoadDynamic({idx})  ; {sym}");
             }
             Instr::SetLocal(d, s) => {
                 let _ = writeln!(out, "SetLocal({d}, {s})");
@@ -116,8 +176,11 @@ pub fn disasm(block: &CompiledBlock) -> String {
             Instr::SetGlobal(s) => {
                 let _ = writeln!(out, "SetGlobal({s})");
             }
-            Instr::SetDynamic(sym) => {
-                let _ = writeln!(out, "SetDynamic({:?})", sym.as_str());
+            Instr::SetDynamic(idx) => {
+                let sym = block.symbols.get(*idx as usize)
+                    .map(|s| format!("{:?}", s.as_str()))
+                    .unwrap_or_else(|| "<bad sym idx>".into());
+                let _ = writeln!(out, "SetDynamic({idx})  ; {sym}");
             }
             Instr::Call(n, a) => {
                 let _ = writeln!(out, "Call({n}, {a})");
@@ -143,9 +206,14 @@ pub fn disasm(block: &CompiledBlock) -> String {
             Instr::Return => {
                 let _ = writeln!(out, "Return");
             }
-            Instr::MakeFunc(s, b, fv) => {
-                let names: Vec<String> = fv.iter().map(|f| format!("{:?}", f.as_str())).collect();
-                let _ = writeln!(out, "MakeFunc({s}, {b}, [{}])", names.join(", "));
+            Instr::MakeFunc(s, b, fv_idx) => {
+                let fv = block.freevars_table.get(*fv_idx as usize)
+                    .map(|v| {
+                        let names: Vec<String> = v.iter().map(|f| format!("{:?}", f.as_str())).collect();
+                        names.join(", ")
+                    })
+                    .unwrap_or_else(|| "<bad fv idx>".into());
+                let _ = writeln!(out, "MakeFunc({s}, {b}, [{fv}])");
             }
             Instr::EnterBlock => {
                 let _ = writeln!(out, "EnterBlock");
@@ -159,8 +227,11 @@ pub fn disasm(block: &CompiledBlock) -> String {
             Instr::SetPath => {
                 let _ = writeln!(out, "SetPath");
             }
-            Instr::MarkRefine(sym) => {
-                let _ = writeln!(out, "MarkRefine({:?})", sym.as_str());
+            Instr::MarkRefine(idx) => {
+                let sym = block.symbols.get(*idx as usize)
+                    .map(|s| format!("{:?}", s.as_str()))
+                    .unwrap_or_else(|| "<bad sym idx>".into());
+                let _ = writeln!(out, "MarkRefine({idx})  ; {sym}");
             }
             Instr::EndRefine => {
                 let _ = writeln!(out, "EndRefine");
@@ -182,12 +253,18 @@ mod tests {
     fn instr_debug_roundtrip() {
         let instrs: Vec<Instr> = vec![
             Instr::Const(0),
+            Instr::ConstInt(42),
+            Instr::ConstNone,
+            Instr::ConstBool(true),
             Instr::LoadLocal(0, 1),
             Instr::Call(2, 2),
             Instr::Return,
         ];
         let s = format!("{instrs:?}");
         assert!(s.contains("Const(0)"));
+        assert!(s.contains("ConstInt(42)"));
+        assert!(s.contains("ConstNone"));
+        assert!(s.contains("ConstBool(true)"));
         assert!(s.contains("LoadLocal(0, 1)"));
         assert!(s.contains("Call(2, 2)"));
         assert!(s.contains("Return"));
@@ -201,6 +278,8 @@ mod tests {
         let block = CompiledBlock {
             instrs: Rc::new([Instr::Const(0), Instr::Return]),
             pool,
+            symbols: Vec::new(),
+            freevars_table: Vec::new(),
             n_locals: 0,
             freevars: Vec::new(),
             source_span: Span::new(0, 0),
@@ -223,6 +302,8 @@ mod tests {
         let block = CompiledBlock {
             instrs: Rc::new([Instr::Const(0), Instr::Return]),
             pool,
+            symbols: Vec::new(),
+            freevars_table: Vec::new(),
             n_locals: 0,
             freevars: Vec::new(),
             source_span: Span::new(0, 0),
@@ -232,5 +313,14 @@ mod tests {
         let clone = block.clone();
         assert!(Rc::ptr_eq(&block.instrs, &clone.instrs));
         assert!(Rc::ptr_eq(&block.pool, &clone.pool));
+    }
+
+    /// M30.1.B: `Instr` is `Copy` (no `Vec`/`Symbol` payloads inline). This
+    /// test confirms the enum is `Copy` — if a future variant adds a non-Copy
+    /// payload, this fails to compile.
+    #[test]
+    fn instr_is_copy() {
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<Instr>();
     }
 }

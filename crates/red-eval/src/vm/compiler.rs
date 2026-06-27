@@ -211,6 +211,14 @@ struct Compiler<'a> {
     /// Slot of the enclosing `func` being defined (for recursive self-call
     /// detection — set by `compile_make_func`, read by `compile_word`).
     func_arities: FuncArityTable,
+    /// M30.1.B: side table for `LoadDynamic`/`SetDynamic`/`MarkRefine`.
+    /// Symbols are interned here by `intern_symbol`; the instr carries the
+    /// index instead of the `Symbol` itself, so `Instr` can be `Copy`.
+    symbols: Vec<Symbol>,
+    /// M30.1.B: side table for `MakeFunc`. Each entry is one func's freevar
+    /// capture list. The instr carries the index instead of the `Vec<Symbol>`,
+    /// so `Instr` can be `Copy`.
+    freevars_table: Vec<Vec<Symbol>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +279,8 @@ pub(crate) fn compile_block_reduce(
         pool: ConstantPool::new(),
         natives,
         func_arities,
+        symbols: Vec::new(),
+        freevars_table: Vec::new(),
     };
     let data = block.data.borrow();
     let n = data.len();
@@ -286,6 +296,8 @@ pub(crate) fn compile_block_reduce(
     Ok(CompiledBlock {
         instrs: Rc::from(compiler.instrs.as_slice()),
         pool: compiler.pool.into_rc(),
+        symbols: compiler.symbols,
+        freevars_table: compiler.freevars_table,
         n_locals: scope_locals_count(scope),
         freevars: analysis.freevars,
         source_span: span,
@@ -333,6 +345,8 @@ fn compile_block_inner(
         pool: ConstantPool::new(),
         natives,
         func_arities,
+        symbols: Vec::new(),
+        freevars_table: Vec::new(),
     };
 
     let data = block.data.borrow();
@@ -365,6 +379,8 @@ fn compile_block_inner(
     Ok(CompiledBlock {
         instrs: Rc::from(compiler.instrs.as_slice()),
         pool: compiler.pool.into_rc(),
+        symbols: compiler.symbols,
+        freevars_table: compiler.freevars_table,
         n_locals: scope_locals_count(scope),
         freevars: analysis.freevars,
         source_span: span,
@@ -379,6 +395,8 @@ fn stub_block(block: &Series, analysis: AnalysisResult) -> CompiledBlock {
     CompiledBlock {
         instrs: Rc::from([Instr::Halt]),
         pool: Rc::from([]),
+        symbols: Vec::new(),
+        freevars_table: Vec::new(),
         n_locals: 0,
         freevars: analysis.freevars,
         source_span: block_source_span(block),
@@ -398,6 +416,33 @@ impl<'a> Compiler<'a> {
 
     fn push_const(&mut self, v: Value) -> u32 {
         self.pool.push(v)
+    }
+
+    /// M30.1.B: intern a `Symbol` into the block's symbol table and return
+    /// its index. Used by `LoadDynamic`/`SetDynamic`/`MarkRefine` emission so
+    /// the `Instr` variant carries a `u32` index (keeping `Instr: Copy`)
+    /// instead of an `Rc<str>` clone (which would refcount per dispatch).
+    fn intern_symbol(&mut self, sym: Symbol) -> u32 {
+        // Linear scan — symbol tables are small (typically < 20 entries per
+        // block; the user context's word count plus a few natives). A
+        // `HashMap` would add allocation overhead without measurable win.
+        if let Some(pos) = self.symbols.iter().position(|s| *s == sym) {
+            return pos as u32;
+        }
+        let idx = self.symbols.len() as u32;
+        self.symbols.push(sym);
+        idx
+    }
+
+    /// M30.1.B: intern a freevar capture list (`Vec<Symbol>`) into the
+    /// block's freevars table and return its index. Used by `MakeFunc`
+    /// emission so the instr carries a `u32` index (keeping `Instr: Copy`)
+    /// instead of the `Vec<Symbol>` inline (which bloated the enum to ~40
+    /// bytes and forced a clone per dispatch iteration).
+    fn intern_freevars(&mut self, fv: Vec<Symbol>) -> u32 {
+        let idx = self.freevars_table.len() as u32;
+        self.freevars_table.push(fv);
+        idx
     }
 
     /// Detect an infix native at `data[i]` (unbound `Word`/`GetWord` whose
@@ -511,11 +556,18 @@ fn compile_prefix(
     *i += 1; // consume the prefix value itself
 
     match cur {
-        // Data / literals: push as `Const`.
-        Value::None
-        | Value::Logic(_)
-        | Value::Integer { .. }
-        | Value::Float { .. }
+        // Data / literals: push as `Const` (or the M30 small-value fast paths
+        // `ConstInt`/`ConstNone`/`ConstBool` for the common kinds).
+        Value::None => {
+            c.emit(Instr::ConstNone);
+        }
+        Value::Logic(b) => {
+            c.emit(Instr::ConstBool(*b));
+        }
+        Value::Integer { n, .. } => {
+            c.emit(Instr::ConstInt(*n));
+        }
+        Value::Float { .. }
         | Value::String { .. }
         | Value::String8(_)
         | Value::LitWord { .. }
@@ -702,7 +754,8 @@ fn compile_word(
         // Unbound non-native word in operator position: load as dynamic and
         // let the VM/runtime resolve it (M25 falls back to walker-style
         // dispatch). For M24 we emit `LoadDynamic` with no args.
-        c.emit(Instr::LoadDynamic(sym.clone()));
+        let idx = c.intern_symbol(sym.clone());
+        c.emit(Instr::LoadDynamic(idx));
         return Ok(());
     }
 
@@ -849,8 +902,8 @@ fn compile_if(
     c.emit(Instr::Jump(0)); // placeholder — patched below
     // False branch: `if` with a false condition returns `none`.
     let none_target = c.instrs.len() as u32;
-    let none_idx = c.push_const(Value::None);
-    c.emit(Instr::Const(none_idx));
+    // M30: use `ConstNone` fast path instead of pool+`Const`.
+    c.emit(Instr::ConstNone);
     // Patch JumpIfFalse to land at the `none` push.
     c.instrs[jump_idx] = Instr::JumpIfFalse(none_target);
     // Patch the Jump to land after the `none` push.
@@ -1151,7 +1204,8 @@ fn collect_args(
             }
         }
         if active {
-            c.emit(Instr::MarkRefine(ref_name.clone()));
+            let idx = c.intern_symbol(ref_name.clone());
+            c.emit(Instr::MarkRefine(idx));
             for _ in 0..ref_args_spec.len() {
                 if *i >= data.len() {
                     return Err(CompileError {
@@ -1280,7 +1334,8 @@ fn compile_make_func(
     // Push spec + body into the pool.
     let spec_idx = c.push_const(spec_val);
     let body_idx = c.push_const(body_val);
-    c.emit(Instr::MakeFunc(spec_idx, body_idx, body_analysis.freevars));
+    let fv_idx = c.intern_freevars(body_analysis.freevars);
+    c.emit(Instr::MakeFunc(spec_idx, body_idx, fv_idx));
 
     // Record the func's arity in the table so subsequent `CallUser`s to this
     // slot know how many args to collect. The slot is the *enclosing SetWord's*
@@ -1304,7 +1359,10 @@ fn emit_load(c: &mut Compiler, binding: &Binding, _span: Span, sym: &Symbol) -> 
     match binding {
         Binding::Lexical(d, s) => c.emit(Instr::LoadLocal(*d as u32, *s as u32)),
         Binding::Local(_ctx, s) => c.emit(Instr::LoadGlobal(*s as u32)),
-        Binding::Unbound => c.emit(Instr::LoadDynamic(sym.clone())),
+        Binding::Unbound => {
+            let idx = c.intern_symbol(sym.clone());
+            c.emit(Instr::LoadDynamic(idx));
+        }
         Binding::Func(s) => c.emit(Instr::LoadLocal(0, *s as u32)), // defensive
     }
     Ok(())
@@ -1323,7 +1381,10 @@ fn emit_store(
     match binding {
         Binding::Lexical(d, s) => c.emit(Instr::SetLocal(*d as u32, *s as u32)),
         Binding::Local(_ctx, s) => c.emit(Instr::SetGlobal(*s as u32)),
-        Binding::Unbound => c.emit(Instr::SetDynamic(sym.clone())),
+        Binding::Unbound => {
+            let idx = c.intern_symbol(sym.clone());
+            c.emit(Instr::SetDynamic(idx));
+        }
         Binding::Func(s) => c.emit(Instr::SetLocal(0, *s as u32)), // defensive
     }
     Ok(())
@@ -1567,7 +1628,12 @@ mod tests {
 
     // --- Plan-required tests (plan3.md:307-318) --------------------------
 
-    /// `5` -> `[Const(0), Return]`, pool=[5]. (plan3.md:307)
+    /// `5` -> `[ConstInt(5), Return]`. (plan3.md:307)
+    ///
+    /// M30: integer literals now emit `ConstInt(n)` (small-value fast path)
+    /// instead of `Const(idx)` + a pool entry, skipping the pool indirection
+    /// on the hot `Const` arm. The pool stays empty for an all-integer
+    /// literal block.
     #[test]
     fn compile_literal() {
         let (body, ctx_rc, registry) = parse_bind_and_registry("5");
@@ -1576,18 +1642,19 @@ mod tests {
         assert!(!block.needs_rebind);
         assert_instrs(
             block.instrs.as_ref(),
-            &[Instr::Const(0), Instr::Return],
+            &[Instr::ConstInt(5), Instr::Return],
             "compile `5`",
         );
-        assert_eq!(block.pool.len(), 1);
-        assert!(matches!(block.pool[0], Value::Integer { n: 5, .. }));
+        assert_eq!(block.pool.len(), 0);
     }
 
-    /// `foo: 5 foo` -> `[Const(0), SetGlobal(slot), Pop, LoadGlobal(slot), Return]`.
+    /// `foo: 5 foo` -> `[ConstInt(5), SetGlobal(slot), Pop, LoadGlobal(slot), Return]`.
     /// (plan3.md:308 — originally expected no `Pop`, but M25 adds `Pop` after
     /// non-last expressions to keep the VM stack disciplined. The SetWord is
     /// not the last expression, so its pushed-back value is popped before the
     /// `foo` load. The walker's `last = ...` overwrite is the equivalent.)
+    ///
+    /// M30: the `5` literal now emits `ConstInt(5)` (no pool entry).
     #[test]
     fn compile_setword_then_load() {
         let (body, ctx_rc, registry) = parse_bind_and_registry("foo: 5 foo");
@@ -1604,7 +1671,7 @@ mod tests {
         assert_instrs(
             block.instrs.as_ref(),
             &[
-                Instr::Const(0),
+                Instr::ConstInt(5),
                 Instr::SetGlobal(foo_slot as u32),
                 Instr::Pop,
                 Instr::LoadGlobal(foo_slot as u32),
@@ -1612,10 +1679,12 @@ mod tests {
             ],
             "compile `foo: 5 foo`",
         );
-        assert!(matches!(block.pool[0], Value::Integer { n: 5, .. }));
+        assert_eq!(block.pool.len(), 0);
     }
 
-    /// `1 + 2` -> `[Const(0), Const(1), Call(+, 2), Return]`. (plan3.md:310)
+    /// `1 + 2` -> `[ConstInt(1), ConstInt(2), Call(+, 2), Return]`. (plan3.md:310)
+    ///
+    /// M30: both operands are `ConstInt` (no pool entries).
     #[test]
     fn compile_infix_call() {
         let (body, ctx_rc, registry) = parse_bind_and_registry("1 + 2");
@@ -1627,21 +1696,23 @@ mod tests {
         assert_instrs(
             block.instrs.as_ref(),
             &[
-                Instr::Const(0),
-                Instr::Const(1),
+                Instr::ConstInt(1),
+                Instr::ConstInt(2),
                 Instr::Call(plus_idx, 2),
                 Instr::Return,
             ],
             "compile `1 + 2`",
         );
-        assert!(matches!(block.pool[0], Value::Integer { n: 1, .. }));
-        assert!(matches!(block.pool[1], Value::Integer { n: 2, .. }));
+        assert_eq!(block.pool.len(), 0);
     }
 
-    /// `if true [42]` -> `[LoadGlobal(true_slot), JumpIfFalse(L1), Const(0), L1: Return]`.
+    /// `if true [42]` -> `[LoadGlobal(true_slot), JumpIfFalse(4), ConstInt(42), Jump(5), ConstNone, Return]`.
     /// (plan3.md:312 expected `Const(true)`, but `true` is a context-stored constant
     /// via `install_constants`, so the compiler emits `LoadGlobal` — matching the
     /// walker, which resolves `true` as a word bound to the user context.)
+    ///
+    /// M30: `42` is now `ConstInt(42)` and the false-branch `none` is now
+    /// `ConstNone` (both small-value fast paths, no pool entries).
     #[test]
     fn compile_if_true() {
         let (body, ctx_rc, registry) = parse_bind_and_registry("if true [42]");
@@ -1653,59 +1724,58 @@ mod tests {
             .get(&Symbol::new("true"))
             .copied()
             .expect("`true` should be bound");
-        // M29 instr layout (with `none` push for the false branch):
+        // M30 instr layout (with `ConstNone` for the false branch):
         //   0: LoadGlobal(true_slot)  ; load `true` constant
         //   1: JumpIfFalse(4)         ; L_none = index 4
-        //   2: Const(0)               ; 42 (then-block)
+        //   2: ConstInt(42)           ; 42 (then-block)
         //   3: Jump(5)                ; skip the `none` push → L_end
-        //   4: Const(1)               ; none (false branch) — L_none
+        //   4: ConstNone              ; none (false branch) — L_none
         //   5: Return                 ; L_end
         assert_instrs(
             block.instrs.as_ref(),
             &[
                 Instr::LoadGlobal(true_slot as u32),
                 Instr::JumpIfFalse(4),
-                Instr::Const(0),
+                Instr::ConstInt(42),
                 Instr::Jump(5),
-                Instr::Const(1),
+                Instr::ConstNone,
                 Instr::Return,
             ],
             "compile `if true [42]`",
         );
-        assert!(matches!(block.pool[0], Value::Integer { n: 42, .. }));
-        assert!(matches!(block.pool[1], Value::None));
+        assert_eq!(block.pool.len(), 0);
     }
 
     /// `if 1 [42]` exercises the pure-Const(cond) path (literal cond, not a
     /// context-stored constant like `true`). Verifies the plan3.md:312
     /// instr shape with the M29 `none` push for the false branch.
+    ///
+    /// M30: `1`/`42` are `ConstInt`, `none` is `ConstNone`.
     #[test]
     fn compile_if_literal_cond() {
         let (body, ctx_rc, registry) = parse_bind_and_registry("if 1 [42]");
         let mut scope = Scope::root(&ctx_rc);
         let block = compile_block(&body, &mut scope, &registry).expect("compile");
-        // M29 layout:
-        //   0: Const(0)    ; 1 (cond)
+        // M30 layout:
+        //   0: ConstInt(1)    ; 1 (cond)
         //   1: JumpIfFalse(4)  ; L_none = index 4
-        //   2: Const(1)    ; 42 (then-block)
+        //   2: ConstInt(42)    ; 42 (then-block)
         //   3: Jump(5)     ; skip `none` → L_end
-        //   4: Const(2)    ; none (false branch)
+        //   4: ConstNone   ; none (false branch)
         //   5: Return      ; L_end
         assert_instrs(
             block.instrs.as_ref(),
             &[
-                Instr::Const(0),
+                Instr::ConstInt(1),
                 Instr::JumpIfFalse(4),
-                Instr::Const(1),
+                Instr::ConstInt(42),
                 Instr::Jump(5),
-                Instr::Const(2),
+                Instr::ConstNone,
                 Instr::Return,
             ],
             "compile `if 1 [42]`",
         );
-        assert!(matches!(block.pool[0], Value::Integer { n: 1, .. }));
-        assert!(matches!(block.pool[1], Value::Integer { n: 42, .. }));
-        assert!(matches!(block.pool[2], Value::None));
+        assert_eq!(block.pool.len(), 0);
     }
 
     /// `func [x][x * x]` emits `MakeFunc` with freevars=[]. (plan3.md:314)
@@ -1721,10 +1791,12 @@ mod tests {
             .find(|i| matches!(i, Instr::MakeFunc(_, _, _)))
             .expect("MakeFunc should be emitted");
         match makefunc {
-            Instr::MakeFunc(_spec_idx, _body_idx, freevars) => {
+            Instr::MakeFunc(_spec_idx, _body_idx, fv_idx) => {
+                // M30.1.B: `fv_idx` is an index into `block.freevars_table`.
+                let fv = &block.freevars_table[*fv_idx as usize];
                 assert!(
-                    freevars.is_empty(),
-                    "square should have no freevars, got {freevars:?}"
+                    fv.is_empty(),
+                    "square should have no freevars, got {fv:?}"
                 );
             }
             _ => unreachable!(),
@@ -1765,6 +1837,8 @@ mod tests {
             pool: ConstantPool::new(),
             natives: &registry,
             func_arities: FuncArityTable::default(),
+            symbols: Vec::new(),
+            freevars_table: Vec::new(),
         };
         c.func_arities.record(0, fact_slot, 1); // fact is global arity-1
         let body_data = func_body.data.borrow();
@@ -1812,11 +1886,16 @@ mod tests {
         let (body, ctx_rc, registry) = parse_bind_and_registry("foo");
         let mut scope = Scope::root(&ctx_rc);
         let block = compile_block(&body, &mut scope, &registry).expect("compile");
+        // M30.1.B: `LoadDynamic` now carries a `u32` symbol-table index
+        // instead of the `Symbol` itself. `foo` is the first symbol interned
+        // into the block's `symbols` table → index 0.
         assert_instrs(
             block.instrs.as_ref(),
-            &[Instr::LoadDynamic(Symbol::new("foo")), Instr::Return],
+            &[Instr::LoadDynamic(0), Instr::Return],
             "compile `foo`",
         );
+        assert_eq!(block.symbols.len(), 1);
+        assert_eq!(block.symbols[0].as_str(), "foo");
     }
 
     /// `use [x][x: 1 x]` → `needs_rebind == true`, instrs `[Halt]`.
@@ -1840,10 +1919,11 @@ mod tests {
             .iter()
             .find(|i| matches!(i, Instr::MakeFunc(_, _, _)))
             .expect("MakeFunc should be emitted for does");
-        if let Instr::MakeFunc(spec_idx, _body_idx, freevars) = makefunc {
+        if let Instr::MakeFunc(spec_idx, _body_idx, fv_idx) = makefunc {
+            let fv = &block.freevars_table[*fv_idx as usize];
             assert!(
-                freevars.is_empty(),
-                "does body should have no freevars, got {freevars:?}"
+                fv.is_empty(),
+                "does body should have no freevars, got {fv:?}"
             );
             // The does spec is an empty block — pool[spec_idx] is `Block([])`.
             let spec_val = &block.pool[*spec_idx as usize];
