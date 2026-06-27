@@ -91,42 +91,42 @@ VM-evaluated block. This breaks the documented parity contract
 Low-risk removals that shrink the public surface and remove stale docs. Each
 item is independently shippable.
 
-- [ ] **Delete `crates/red-eval/src/vm/frame.rs`** *(low)*
+- [x] **Delete `crates/red-eval/src/vm/frame.rs`** *(low)*
       One-line stub (`//! VM call-frame management (M25). Stub — real code
       lands in M25.`). `Frame` actually lives in
       `crates/red-core/src/vm_ir.rs:146`. Drop `pub mod frame;` from
       `crates/red-eval/src/vm/mod.rs:13`.
-- [ ] **Delete `crates/red-eval/src/vm/ir.rs`** *(low)*
+- [x] **Delete `crates/red-eval/src/vm/ir.rs`** *(low)*
       Five-line pure re-export shim. No workspace consumer imports
       `red_eval::vm::{CompiledBlock, Frame, Instr, disasm}` — internal code
       uses `red_core::vm_ir::*` directly (`vm.rs:36`, `compiler.rs:41`). Drop
       `pub mod ir;` and `pub use ir::{...};` from `crates/red-eval/src/vm/mod.rs:12,19`.
-- [ ] **Delete `crates/red-eval/src/context.rs`** *(low)*
+- [x] **Delete `crates/red-eval/src/context.rs`** *(low)*
       Eleven-line pure re-export shim. `lib.rs:30-32` re-exports from
       `context::{...}` while `lib.rs:44-47` re-exports other names directly
       from `red_core`. Inline the `context::{...}` re-export into a single
       `pub use red_core::{...};` block in `crates/red-eval/src/lib.rs`, drop
       `pub mod context;` from `lib.rs:15`, delete the file.
-- [ ] **Update stale `vm/mod.rs` module doc** *(low)*
+- [x] **Update stale `vm/mod.rs` module doc** *(low)*
       `crates/red-eval/src/vm/mod.rs:1-10` says "M22 (this milestone) ships
       only the type foundation… real code lands in M24/M25" and "Nothing under
       `vm/` is wired into `interp.rs` yet — the tree-walker remains the sole
       evaluator until M29." Both stale post-M29. Rewrite to reflect that the
       VM is the default evaluator and `vm/` is wired in via `interp.rs:66`.
-- [ ] **Derive CLI version from `CARGO_PKG_VERSION`** *(low)*
+- [x] **Derive CLI version from `CARGO_PKG_VERSION`** *(low)*
       `crates/red-cli/src/main.rs:14` hard-codes
       `const VERSION: &str = "red 0.2.0";` and `cli.rs:46` hard-codes the test
       expectation. Replace with
       `const VERSION: &str = concat!("red ", env!("CARGO_PKG_VERSION"));` and
       update the test to match. Prevents Cargo.toml/main.rs/test drift across
       the v0.2.x / v0.4 bumps.
-- [ ] **Rename `interp_legacy.rs` → `interp_walker.rs`** *(medium — touches imports)*
+- [x] **Rename `interp_legacy.rs` → `interp_walker.rs`** *(medium — touches imports)*
       The module name is misleading: it's the live walker fallback, not
       removable dead code. `interp.rs:30-41` re-exports its public surface;
       `natives.rs:30` and `vm.rs:40` import from it. Rename the file, update
       `lib.rs:17`, `interp.rs`, `natives.rs:30`, `vm.rs:40`, and any other
       `use crate::interp_legacy` sites. Behavior unchanged.
-- [ ] `cargo test --workspace` green; `cargo clippy --workspace --all-targets`
+- [x] `cargo test --workspace` green; `cargo clippy --workspace --all-targets`
       shows no new warnings.
 
 ## Milestone 33 — Lint remediation & API surface

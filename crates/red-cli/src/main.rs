@@ -11,7 +11,7 @@ mod repl;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-const VERSION: &str = "red 0.2.0";
+const VERSION: &str = concat!("red ", env!("CARGO_PKG_VERSION"));
 
 const HELP: &str = "\
 red — a Red subset clone

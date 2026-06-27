@@ -29,15 +29,15 @@ use red_eval::binding::bind_pass;
 use red_eval::{install_constants, register_natives};
 // M29: the stats-counter tests (`max_frame_depth` / `instr_count`) assert
 // walker-specific instrumentation semantics (`instr_count` is bumped in
-// `interp_legacy::eval`'s outer loop, one per expression; the VM does not
+// `interp_walker::eval`'s outer loop, one per expression; the VM does not
 // bump it — that's M30's "correlate VM instr count with walker instr count"
 // work). So these tests call the walker directly via
-// `red_eval::interp_legacy::eval` and pin `env.mode = Walk`, even though the
+// `red_eval::interp_walker::eval` and pin `env.mode = Walk`, even though the
 // build default is now `Vm`. The deterministic-stdout tests above
 // (`run_captured` via `run_source_with_output`) run under the default (VM)
 // mode, exercising the VM path — only the counter assertions need the walker.
 #[cfg(feature = "stats")]
-use red_eval::interp_legacy::eval;
+use red_eval::interp_walker::eval;
 
 fn programs_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -148,7 +148,7 @@ fn func_call_heavy_fixture_deterministic() {
 /// `stats` counters. Reuses the same lex/parse/bind/eval pipeline as
 /// `run_source_with_exit_opts` but keeps the `Env` alive.
 ///
-/// M29: pins `env.mode = Walk` and calls `interp_legacy::eval` directly,
+/// M29: pins `env.mode = Walk` and calls `interp_walker::eval` directly,
 /// because the stats counters (`max_frame_depth` / `instr_count`) are
 /// walker-specific instrumentation — the VM doesn't bump `instr_count`
 /// (M30 owns correlating VM instr count with walker instr count).

@@ -1,12 +1,12 @@
-//! Legacy tree-walking evaluator (the v0.2 `interp.rs`).
+//! Tree-walking evaluator (the v0.2 `interp`).
 //!
-//! M29 renamed this module from `interp` to `interp_legacy` and introduced a
-//! new thin `interp.rs` dispatch shim that routes `eval` calls to either this
-//! walker (`EvalMode::Walk`) or the bytecode VM (`EvalMode::Vm`) based on
-//! `env.mode`. The VM is the default since M29; this module is retained as
-//! the correctness fallback for `bind`/`use`/`do`-on-data blocks flagged
-//! `needs_rebind`, and as the `--walk` / `--features force-walk` baseline for
-//! the golden parity harness. See `interp.rs` for the dispatch entry point.
+//! M29 split the evaluator into a thin `interp.rs` dispatch shim that routes
+//! `eval` calls to either this walker (`EvalMode::Walk`) or the bytecode VM
+//! (`EvalMode::Vm`) based on `env.mode`. The VM is the default since M29;
+//! this module is retained as the correctness fallback for `bind`/`use`/
+//! `do`-on-data blocks flagged `needs_rebind`, and as the `--walk` /
+//! `--features force-walk` baseline for the golden parity harness. See
+//! `interp.rs` for the dispatch entry point.
 //!
 //! ---
 //!
@@ -1092,7 +1092,7 @@ pub(crate) fn call_user_func(
             }
         }
     }
-    env.call_stack.push(crate::context::CallFrame {
+    env.call_stack.push(crate::CallFrame {
         ctx: call_ctx,
         func: Some(Rc::clone(fd)),
     });

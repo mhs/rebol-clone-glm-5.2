@@ -43,7 +43,7 @@ fn version_flag() {
     cmd.arg("--version")
         .assert()
         .success()
-        .stdout("red 0.2.0\n");
+        .stdout(concat!("red ", env!("CARGO_PKG_VERSION"), "\n"));
 }
 
 #[test]

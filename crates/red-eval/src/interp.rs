@@ -1,12 +1,12 @@
 //! Evaluator dispatch shim (M29).
 //!
 //! This module is the public entry point for evaluation. It re-exports the
-//! full surface of [`interp_legacy`] (the v0.2 tree-walker: `run_source*`,
+//! full surface of [`interp_walker`] (the v0.2 tree-walker: `run_source*`,
 //! `run_series*`, `RunOptions`, `dispatch_block`, `eval_expression`, path
 //! helpers) and provides a top-level [`eval`] that dispatches on
 //! [`Env::mode`][red_core::Env::mode]:
 //!
-//! - `EvalMode::Walk` → [`interp_legacy::eval`] (the tree-walker).
+//! - `EvalMode::Walk` → [`interp_walker::eval`] (the tree-walker).
 //! - `EvalMode::Vm`   → compile-on-demand + `vm::run` (via [`dispatch_block`]).
 //!
 //! Since M29 the default mode is `Vm` (flipped in `Env::new_with_output`).
@@ -23,19 +23,19 @@
 //! a `Paren` inside a walker-evaluated block is walker territory.
 //!
 //! For the raw tree-walker entry (bypassing mode dispatch — used by the
-//! `bench_fixtures` stats tests and the `interp_legacy` unit tests), call
-//! [`interp_legacy::eval`] directly.
+//! `bench_fixtures` stats tests and the `interp_walker` unit tests), call
+//! [`interp_walker::eval`] directly.
 
 // Public API (re-exported by `lib.rs` to external callers — the CLI, tests):
-pub use crate::interp_legacy::{
+pub use crate::interp_walker::{
     run_series, run_series_with_exit_output, run_series_with_output, run_source,
     run_source_with_exit, run_source_with_exit_opts, run_source_with_exit_output,
     run_source_with_output, RunOptions,
 };
 // Crate-internal helpers (used by `natives.rs`, `vm/vm.rs`, etc.; not part
 // of the external `red_eval::` surface — they're `pub(crate)` in
-// `interp_legacy`):
-pub(crate) use crate::interp_legacy::{
+// `interp_walker`):
+pub(crate) use crate::interp_walker::{
     call_user_func, dispatch_block, dispatch_block_reduce, eval_expression, eval_get_path,
     resolve_compiled_block, set_path_value,
 };
@@ -44,7 +44,7 @@ use red_core::{Env, EvalError, EvalMode, Value};
 
 /// Top-level evaluator: dispatches on [`Env::mode`].
 ///
-/// - `Walk` → [`crate::interp_legacy::eval`] (the tree-walker).
+/// - `Walk` → [`crate::interp_walker::eval`] (the tree-walker).
 /// - `Vm`   → compile-on-demand + `vm::run` (delegated to [`dispatch_block`]).
 ///
 /// This is the function re-exported as `red_eval::eval` and called by the
@@ -61,7 +61,7 @@ pub fn eval(block: &Value, env: &mut Env) -> Result<Value, EvalError> {
     // common walker path (e.g. the `bench_fixtures` stats tests, which pin
     // `env.mode = Walk` and assert walker-specific instr counts).
     if env.mode == EvalMode::Walk {
-        return crate::interp_legacy::eval(block, env);
+        return crate::interp_walker::eval(block, env);
     }
     dispatch_block(block, env)
 }

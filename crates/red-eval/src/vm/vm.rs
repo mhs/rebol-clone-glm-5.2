@@ -1291,7 +1291,7 @@ impl<'env> Vm<'env> {
         // resolve. If the body later falls back to the walker (via the
         // `needs_rebind`/`MalformedSpec` path in `call_user`), it must evaluate
         // the *original* `fd.body` (with `Func` bindings intact). Mirrors
-        // `dispatch_block`'s deep-clone-before-compile (interp_legacy.rs:144).
+        // `dispatch_block`'s deep-clone-before-compile (interp_walker.rs:144).
         let compile_body = deep_clone_series(&fd.body);
         let compiled = match compile_block_for_func_body(
             &compile_body,

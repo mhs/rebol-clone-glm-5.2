@@ -1,21 +1,21 @@
-//! Bytecode VM (v0.3): compiler + stack machine, milestone-by-milestone.
+//! Bytecode VM (v0.3): compiler + stack machine.
 //!
-//! M22 (this milestone) ships only the type foundation — the IR types live
-//! in `red-core::vm_ir` (so `FuncDef.compiled` can reference them without a
-//! crate cycle), and this module re-exports them. The compiler (`compiler.rs`),
-//! runtime (`vm.rs`), frame manager (`frame.rs`), and constant pool (`pool.rs`)
-//! are stubs here; real code lands in M24/M25.
+//! Since M29 the VM is the default evaluator (`EvalMode::Vm`), wired into
+//! `interp.rs` via `dispatch_block` (compile-on-demand + `vm::run`, with a
+//! fallback to the tree-walker for `needs_rebind` / foreign-bound blocks).
+//! The CLI `--walk` flag or the `force-walk` cargo feature override to
+//! `EvalMode::Walk` for debugging and the golden parity baseline.
 //!
-//! Nothing under `vm/` is wired into `interp.rs` yet — the tree-walker
-//! remains the sole evaluator until M29 flips the default.
+//! The IR types (`CompiledBlock` / `Frame` / `Instr`) live in
+//! `red-core::vm_ir` so `FuncDef.compiled` can reference them without a
+//! crate cycle. This module holds the compiler (`compiler.rs`), the lexical
+//! analysis / scope resolution (`lex.rs`), the constant pool (`pool.rs`),
+//! and the runtime stack machine (`vm.rs`).
 
 pub mod compiler;
-pub mod frame;
-pub mod ir;
 pub mod lex;
 pub mod pool;
 pub mod vm;
 
-pub use ir::{disasm, CompiledBlock, Frame, Instr};
 pub use lex::{analyze_block, AnalysisResult, Scope};
 pub use vm::{run, run_reduce};

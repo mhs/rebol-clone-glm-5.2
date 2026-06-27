@@ -314,18 +314,18 @@ object's context).
 Every error carries the span of the offending token so the CLI can render
 `file.red:line:col: error: ...`.
 
-## Evaluator (`red-eval/src/interp.rs` + `interp_legacy.rs`)
+## Evaluator (`red-eval/src/interp.rs` + `interp_walker.rs`)
 
 Since M29 (v0.3), the evaluator is split into a thin dispatch shim
-(`interp.rs`) and the original tree-walker (`interp_legacy.rs`). The
+(`interp.rs`) and the original tree-walker (`interp_walker.rs`). The
 default mode is the bytecode VM (`EvalMode::Vm`); `--walk` on the CLI or
 the `force-walk` cargo feature forces the tree-walker. The shim's
-`eval(block, env)` checks `env.mode`: `Walk` → `interp_legacy::eval`
+`eval(block, env)` checks `env.mode`: `Walk` → `interp_walker::eval`
 directly; `Vm` → `dispatch_block` (compile-on-demand + `vm::run`, falling
 back to the walker for `needs_rebind`/foreign-bound/compile-error blocks).
 `run_series_inner_opts` calls `dispatch_block` (not `eval` directly) so the
 top-level script body honors `env.mode`. `call_user_func` (the walker's
-function-call shim) calls `interp_legacy::eval` directly — function bodies
+function-call shim) calls `interp_walker::eval` directly — function bodies
 invoked from the walker always stay on the walker (the VM uses its own
 `vm.frames`, not `env.call_stack`). In pure VM mode, the VM's `CallUser`
 handler is the function-invocation path.
@@ -580,7 +580,7 @@ candidate (deferred).
    `Rc` bump per call. Invalidated by `invalidate_native_index` (called
    by `register_natives`).
 5. **`dispatch_block` cache-before-foreign-check** (in
-   `red-eval/src/interp_legacy.rs`) — the Env-level block cache is checked
+   `red-eval/src/interp_walker.rs`) — the Env-level block cache is checked
    *before* `has_foreign_bindings` (the O(n) per-value walk). A cached
    block is by construction non-foreign (the cache only stores blocks that
    passed the check on first compile), so the recheck is skipped on hits.
@@ -653,7 +653,7 @@ holding a borrow across the match. `refresh_cache` now returns only
 ops per iteration.
 
 **E. Compile-once loop bodies with VM-internal iteration**
-(`resolve_compiled_block` in `interp_legacy.rs`; loop natives in
+(`resolve_compiled_block` in `interp_walker.rs`; loop natives in
 `natives.rs`/`series.rs`): the loop natives
 (`repeat`/`while`/`until`/`loop`/`foreach`/`forall`) previously called
 `dispatch_block` per iteration — each call paying a HashMap lookup + Rc
