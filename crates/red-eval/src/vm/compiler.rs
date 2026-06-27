@@ -34,16 +34,15 @@
 //! - Pool dedup, small-value tagging → M30 if profiling warrants.
 //! - `CallUser` global-vs-local disambiguation in the instr stream → M25.
 
-use std::collections::HashMap;
-use std::rc::Rc;
-
 use red_core::value::{Binding, FuncDef, Series, Span, Symbol, Value};
 use red_core::vm_ir::{CompiledBlock, Instr};
-use red_core::{Context, Env};
+use red_core::{CompileErrorKind, Context, Env};
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::binding::{func_form_skip, use_body_index};
 use crate::natives::extract_spec;
-use crate::vm::lex::{AnalysisResult, Scope, analyze_block};
+use crate::vm::lex::{analyze_block, AnalysisResult, Scope};
 use crate::vm::pool::ConstantPool;
 
 // Test-only per-thread counter of `compile_block_inner` invocations. M27
@@ -138,24 +137,14 @@ impl NativeRegistry {
 // ---------------------------------------------------------------------------
 
 /// Errors raised during compilation. Each carries the `Span` of the offending
-/// source value so the CLI's `render_error` can localize it (M29+).
+/// source value so the CLI's `render_error` can localize it (M29+). The
+/// `kind` enum is defined in `red-core::env` (re-exported as
+/// `red_core::CompileErrorKind`) so `EvalError::Compile` can name it without
+/// a red-eval dependency.
 #[derive(Debug)]
 pub struct CompileError {
     pub span: Span,
     pub kind: CompileErrorKind,
-}
-
-#[derive(Debug)]
-pub enum CompileErrorKind {
-    /// A `Word` in operator position (followed by args) couldn't be resolved
-    /// to a native or a known user-func — so the compiler can't determine
-    /// arity. The tree-walker would defer this to runtime; M24 surfaces it.
-    UnboundInOperatorPosition,
-    /// `func`/`does`/`function` invoked with non-block args (malformed spec
-    /// or body). The runtime native reports a clearer error; M24 bails.
-    MalformedSpec,
-    /// Too few values remaining in the block to satisfy a native/func's arity.
-    ArityMismatch,
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +208,18 @@ struct Compiler<'a> {
     /// capture list. The instr carries the index instead of the `Vec<Symbol>`,
     /// so `Instr` can be `Copy`.
     freevars_table: Vec<Vec<Symbol>>,
+    /// Slots that *might* hold a `Value::Func` at runtime but whose arity
+    /// wasn't statically recorded in `func_arities`. Populated for:
+    ///  - SetWord targets whose RHS is a `GetWord` (`g: :dbl`) or a `get
+    ///    'word` native call (`f: get 'inc`) — the resolved value is a Func
+    ///    whose arity the compiler can't see.
+    ///  - Function parameters (params are dynamically typed; a param may hold
+    ///    a Func passed by the caller, e.g. `apply-twice`'s `f`).
+    ///
+    /// When such a slot is referenced in operator position with trailing
+    /// values that could be args, `compile_word` falls back to the walker
+    /// (the VM can't statically decide arg count). Keyed by `(depth, slot)`.
+    dynamic_func_slots: HashSet<(usize, usize)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -243,20 +244,28 @@ pub fn compile_block(
     scope: &mut Scope,
     natives: &NativeRegistry,
 ) -> Result<CompiledBlock, CompileError> {
-    compile_block_inner(block, scope, natives, None)
+    compile_block_inner(block, scope, natives, None, 0)
 }
 
 /// Like `compile_block` but pre-seeds the `FuncArityTable` with the enclosing
 /// function's own slot (`self_func` = `(slot, arity)`), so recursive self-calls
 /// inside the body emit `CallUser(slot, arity)` instead of degrading to
 /// `LoadDynamic`. Used by the M25 VM's lazy func-body compilation path.
+///
+/// `param_count` is the func's positional parameter count. Those slots
+/// (0..param_count in the body's local frame) are marked as
+/// `dynamic_func_slots`: params are dynamically typed, so a param may hold
+/// a `Value::Func` passed by the caller (e.g. `apply-twice`'s `f`). When such
+/// a param is referenced in operator position with trailing args, the
+/// compiler falls back to the walker rather than emitting a plain load.
 pub(crate) fn compile_block_for_func_body(
     block: &Series,
     scope: &mut Scope,
     natives: &NativeRegistry,
     self_func: (u32, usize),
+    param_count: usize,
 ) -> Result<CompiledBlock, CompileError> {
-    compile_block_inner(block, scope, natives, Some(self_func))
+    compile_block_inner(block, scope, natives, Some(self_func), param_count)
 }
 
 /// Like `compile_block` but emits **no `Pop` between expressions** — every
@@ -281,6 +290,7 @@ pub(crate) fn compile_block_reduce(
         func_arities,
         symbols: Vec::new(),
         freevars_table: Vec::new(),
+        dynamic_func_slots: HashSet::new(),
     };
     let data = block.data.borrow();
     let n = data.len();
@@ -311,6 +321,7 @@ fn compile_block_inner(
     scope: &mut Scope,
     natives: &NativeRegistry,
     self_func: Option<(u32, usize)>,
+    param_count: usize,
 ) -> Result<CompiledBlock, CompileError> {
     #[cfg(test)]
     COMPILE_COUNT.with(|c| c.set(c.get() + 1));
@@ -340,6 +351,16 @@ fn compile_block_inner(
         // which is what the body's `Scope::child` parent represents.
         func_arities.record(0, slot as usize, arity);
     }
+    // Mark the func's param slots as dynamic-func. Params are dynamically
+    // typed: a caller may pass a `Value::Func` (e.g. `apply-twice get 'inc 5`
+    // passes the `inc` func into param `f`). When the body references such a
+    // param in operator position with trailing args (`f x`), the compiler
+    // can't statically know the arity → fall back to the walker. Slots are
+    // local to this frame, so depth 0. (Top-level blocks pass param_count=0.)
+    let mut dynamic_func_slots: HashSet<(usize, usize)> = HashSet::new();
+    for p in 0..param_count {
+        dynamic_func_slots.insert((0, p));
+    }
     let mut compiler = Compiler {
         instrs: Vec::new(),
         pool: ConstantPool::new(),
@@ -347,6 +368,7 @@ fn compile_block_inner(
         func_arities,
         symbols: Vec::new(),
         freevars_table: Vec::new(),
+        dynamic_func_slots,
     };
 
     let data = block.data.borrow();
@@ -391,7 +413,7 @@ fn compile_block_inner(
 
 /// Build a `needs_rebind` stub block: instrs `[Halt]`, pool empty, the
 /// analysis's freevars preserved (in case the walker path inspects them).
-fn stub_block(block: &Series, analysis: AnalysisResult) -> CompiledBlock {
+pub(crate) fn stub_block(block: &Series, analysis: AnalysisResult) -> CompiledBlock {
     CompiledBlock {
         instrs: Rc::from([Instr::Halt]),
         pool: Rc::from([]),
@@ -592,14 +614,11 @@ fn compile_prefix(
         //   support for user-func refinements deferred to a later milestone);
         // anything else → `GetPath` (M19 runtime resolution).
         Value::Path { parts, .. } | Value::GetPath { parts, .. } => {
-            if let Some((native_idx, fd, head_sym, leading_refs)) =
-                function_path_info(c, parts)
-            {
+            if let Some((native_idx, fd, head_sym, leading_refs)) = function_path_info(c, parts) {
                 // `*i` was already advanced past the path token by the
                 // caller; `collect_args` reads args starting at `*i`.
-                let (argc, _refs) = collect_args(
-                    c, data, i, scope, &head_sym, &fd, &leading_refs, span,
-                )?;
+                let (argc, _refs) =
+                    collect_args(c, data, i, scope, &head_sym, &fd, &leading_refs, span)?;
                 c.emit(Instr::Call(native_idx, argc as u32));
                 return Ok(());
             }
@@ -612,7 +631,17 @@ fn compile_prefix(
             // `eval_path_call` → `dispatch_call_with_refs` correctly. This is
             // a pragmatic M29 choice; a future milestone can add VM-side
             // user-func refinement dispatch.
-            if let Some(Value::Word { binding: Binding::Local(_, _), .. } | Value::Word { binding: Binding::Lexical(_, _), .. }) = parts.first() {
+            if let Some(
+                Value::Word {
+                    binding: Binding::Local(_, _),
+                    ..
+                }
+                | Value::Word {
+                    binding: Binding::Lexical(_, _),
+                    ..
+                },
+            ) = parts.first()
+            {
                 if parts.len() > 1 {
                     return Err(CompileError {
                         span,
@@ -696,6 +725,14 @@ fn compile_prefix(
             if let Some(arity) = peek_func_arity(data, *i) {
                 let (depth, slot) = slot_coords(binding);
                 c.func_arities.record(depth, slot, arity);
+            } else if rhs_might_be_func(data, *i) {
+                // RHS resolves to a Func at runtime but the compiler can't see
+                // its arity (`f: get 'inc`, `g: :dbl`). Mark the slot so a
+                // later operator-position reference falls back to the walker
+                // (which dispatches dynamically) instead of emitting a plain
+                // `LoadGlobal` that would return `#[function]`.
+                let (depth, slot) = slot_coords(binding);
+                c.dynamic_func_slots.insert((depth, slot));
             }
             // RHS is a full expression (so `x: 1 + 2` works).
             compile_expr(c, data, i, scope, /*tail*/ false)?;
@@ -769,7 +806,18 @@ fn compile_word(
             // M23 overwrites these with `Lexical` when it runs, but defensive.
             (0, *s)
         }
-        Binding::Unbound => unreachable!(),
+        // M31: was `unreachable!()`. The earlier `if let Binding::Unbound`
+        // arm above returns for unbound words that name a native, or emits
+        // `LoadDynamic` for unknown unbound words. Reaching here means a
+        // routing bug in the compiler (or a future binding variant); surface
+        // as a recoverable `CompileError` rather than panicking in release.
+        // The span is the word's own source position.
+        Binding::Unbound => {
+            return Err(CompileError {
+                span,
+                kind: CompileErrorKind::UnboundWord,
+            });
+        }
     };
     // Is the resolved slot a known user-func? If so, emit `CallUser` — the
     // walker always calls a Func when a word resolves to one (even with 0
@@ -785,6 +833,26 @@ fn compile_word(
     // (returning `#[function]` instead of the call result). (M29 fix.)
     if let Some(arity) = c.func_arities.get(depth, slot) {
         return compile_user_call(c, data, i, scope, slot, arity, depth, span);
+    }
+    // Unknown-arity bound word. If the slot is one that *might* hold a
+    // `Value::Func` at runtime — assigned via `get 'word`/`:word` (GetWord
+    // RHS) or a function parameter (params are dynamically typed) — and it's
+    // followed by a value that could be an argument, the VM can't statically
+    // decide how many trailing values to consume. Fall back to the walker by
+    // returning a `MalformedSpec` CompileError: `dispatch_block` (top-level)
+    // routes to the walker; `ensure_compiled` (func body) returns a
+    // `needs_rebind` stub and `call_user` invokes the body via the walker.
+    // Slots holding provably-non-Func values (ints, strings, etc.) aren't
+    // marked dynamic-func, so they keep the fast `LoadGlobal`/`LoadLocal`
+    // path — the fallback is scoped to genuine higher-order patterns.
+    if c.dynamic_func_slots.contains(&(depth, slot))
+        && *i < data.len()
+        && c.infix_native_at(&data[*i]).is_none()
+    {
+        return Err(CompileError {
+            span,
+            kind: CompileErrorKind::MalformedSpec,
+        });
     }
     // Value position — just load.
     emit_load(c, binding, span, sym)?;
@@ -895,13 +963,13 @@ fn compile_if(
     // and `print if false [42]` would get 0 args instead of 1. (M29 fix.)
     let jump_idx = c.instrs.len();
     c.emit(Instr::JumpIfFalse(0)); // placeholder
-    // Then-block: compile its series inline with the *same scope* (M23 already
-    // analyzed its words; literal blocks are descended by `analyze_inner`).
+                                   // Then-block: compile its series inline with the *same scope* (M23 already
+                                   // analyzed its words; literal blocks are descended by `analyze_inner`).
     compile_block_series_inline(c, &then_series, scope, tail)?;
     // Jump past the `none` push (false branch falls through to `none`).
     let skip_none_idx = c.instrs.len();
     c.emit(Instr::Jump(0)); // placeholder — patched below
-    // False branch: `if` with a false condition returns `none`.
+                            // False branch: `if` with a false condition returns `none`.
     let none_target = c.instrs.len() as u32;
     // M30: use `ConstNone` fast path instead of pool+`Const`.
     c.emit(Instr::ConstNone);
@@ -1103,7 +1171,9 @@ fn compile_user_call(
     // arity (params count); refinements on user funcs are rare in the test
     // corpus so M24 collects positional args only.
     let fd = Rc::new(FuncDef {
-        params: (0..arity).map(|n| Symbol::new(&format!("__arg{n}"))).collect(),
+        params: (0..arity)
+            .map(|n| Symbol::new(&format!("__arg{n}")))
+            .collect(),
         refinements: Vec::new(),
         locals: Vec::new(),
         freevars: Vec::new(),
@@ -1179,6 +1249,15 @@ fn collect_args(
         sym.as_str(),
         "repeat" | "foreach" | "forall" | "make" | "to" | "default"
     );
+
+    // `set 'word <func-form>`: the `set` native writes a Func value into the
+    // named slot at runtime. If the second arg is a literal `func`/`does`/
+    // `function`/`make function!` form, peek its arity now and record it for
+    // the target slot, so a later `word 5` emits `CallUser` instead of
+    // falling back to the walker. (Matches the `SetWord` RHS peek above.)
+    if sym.as_str() == "set" && arity >= 2 && !uneval_first {
+        record_set_func_arity(c, data, *i);
+    }
 
     let mut argc = 0;
     for n in 0..arity {
@@ -1333,7 +1412,19 @@ fn compile_make_func(
     }
     let body_series = match &body_val {
         Value::Block { series, .. } => series.clone(),
-        _ => unreachable!(),
+        // M31: was `unreachable!()`. The caller (`compile_make_func`) is
+        // `pub` and reachable from tests / future code paths; a non-Block
+        // body (e.g. a `does` whose argument was a `Paren` or `String`)
+        // should surface as a recoverable `CompileError` (MalformedBody)
+        // rather than a release panic. The runtime `func`/`does` natives
+        // already produce a clearer `EvalError::TypeError`; this is the
+        // compile-time bail-out equivalent.
+        _ => {
+            return Err(CompileError {
+                span: body_val.span_or_default(),
+                kind: CompileErrorKind::MalformedBody,
+            });
+        }
     };
     // Pre-collect body SetWords (mirrors `analyze_func_form`).
     collect_setwords_inline(&body_series, &mut child);
@@ -1363,7 +1454,12 @@ fn compile_make_func(
 /// - `Lexical(d, slot)` → `LoadLocal(d, slot)`
 /// - `Local(_, slot)` → `LoadGlobal(slot)` (user-ctx global)
 /// - `Unbound` → `LoadDynamic(sym)` (resolved at VM entry from `env.user_ctx`)
-fn emit_load(c: &mut Compiler, binding: &Binding, _span: Span, sym: &Symbol) -> Result<(), CompileError> {
+fn emit_load(
+    c: &mut Compiler,
+    binding: &Binding,
+    _span: Span,
+    sym: &Symbol,
+) -> Result<(), CompileError> {
     match binding {
         Binding::Lexical(d, s) => c.emit(Instr::LoadLocal(*d as u32, *s as u32)),
         Binding::Local(_ctx, s) => c.emit(Instr::LoadGlobal(*s as u32)),
@@ -1430,12 +1526,70 @@ fn peek_func_arity(data: &[Value], i: usize) -> Option<usize> {
             // The packed block is `[spec body]` — two blocks.
             if inner.len() >= 1 {
                 if let Value::Block { .. } = &inner[series.index] {
-                    return extract_spec(&inner[series.index]).ok().map(|s| s.params.len());
+                    return extract_spec(&inner[series.index])
+                        .ok()
+                        .map(|s| s.params.len());
                 }
             }
         }
     }
     None
+}
+
+/// Does the RHS starting at `data[i]` resolve to a `Value::Func` at runtime
+/// without the compiler being able to see its arity? Returns true for:
+/// - `:word` (GetWord) — fetches a Func value without invoking.
+/// - `get 'word` / `get word` — the `get` native returns a slot's value,
+///   which is frequently a Func (the canonical way to fetch a function value
+///   for higher-order use).
+///
+/// Used by the SetWord arm to mark the target slot as `dynamic_func_slots`,
+/// so a later operator-position reference (`f 10`) falls back to the walker
+/// instead of emitting a plain load that would return `#[function]`.
+///
+/// Returns false for `func`/`does`/`make function!` forms (those have their
+/// arity peeked by `peek_func_arity` and go through `CallUser`), and for
+/// everything else (the slot holds a non-Func value).
+fn rhs_might_be_func(data: &[Value], i: usize) -> bool {
+    match &data[i] {
+        Value::GetWord { .. } => true,
+        Value::Word { sym, binding, .. } => {
+            matches!(binding, Binding::Unbound)
+                && sym.as_str() == "get"
+                && data.get(i + 1).is_some_and(|arg| {
+                    matches!(
+                        arg,
+                        Value::LitWord { .. } | Value::Word { .. } | Value::GetWord { .. }
+                    )
+                })
+        }
+        _ => false,
+    }
+}
+
+/// `set 'word <func-form>`: peek the func arity of the second arg and record
+/// it for the slot named by the first arg (a LitWord). `i` points at the
+/// first arg (`'word`); the func-form is at `i + 1`. Looks up the word's
+/// global slot via `user_ctx` — `set` writes through `user_ctx.set_slot`, so
+/// the slot must already exist (the word appeared as a SetWord at parse time,
+/// per the `set` native's contract). No-op if the word isn't bound or the
+/// second arg isn't a literal func form (those cases fall back to the walker
+/// via `dynamic_func_slots`/runtime dispatch).
+fn record_set_func_arity(c: &mut Compiler, data: &[Value], i: usize) {
+    let word_sym = match &data[i] {
+        Value::LitWord { sym, .. } => sym,
+        _ => return,
+    };
+    let Some(func_arity) = peek_func_arity(data, i + 1) else {
+        return;
+    };
+    let Some(ref user_ctx) = c.natives.user_ctx else {
+        return;
+    };
+    let names = user_ctx.names.borrow();
+    if let Some(&slot) = names.get(word_sym) {
+        c.func_arities.record(0, slot, func_arity);
+    }
 }
 
 /// Extract `(depth, slot)` from a `Binding` for `FuncArityTable` keying.
@@ -1459,11 +1613,11 @@ pub(crate) fn block_source_span_pub(block: &Series) -> Span {
 
 fn block_source_span(block: &Series) -> Span {
     let data = block.data.borrow();
-    let first = data.first().map(|v| v.span_or_default()).unwrap_or_default();
-    let last = data
-        .last()
+    let first = data
+        .first()
         .map(|v| v.span_or_default())
         .unwrap_or_default();
+    let last = data.last().map(|v| v.span_or_default()).unwrap_or_default();
     if first == Span::default() && last == Span::default() {
         Span::default()
     } else {
@@ -1548,8 +1702,7 @@ fn is_object_keyword_form(data: &[Value], i: usize) -> bool {
     else {
         return false;
     };
-    matches!(sym.as_str(), "object" | "context")
-        && matches!(&data[i + 1], Value::Block { .. })
+    matches!(sym.as_str(), "object" | "context") && matches!(&data[i + 1], Value::Block { .. })
 }
 
 /// Mirror of `lex.rs`'s `collect_setwords` — pre-collect body-local SetWords
@@ -1606,8 +1759,8 @@ mod tests {
     use crate::natives::{install_constants, register_natives};
     use red_core::parser::load_source;
     use red_core::value::Value;
-    use red_core::{Context, Env};
     use red_core::vm_ir::Instr;
+    use red_core::{Context, Env};
 
     /// Build a fresh `Env` with natives + constants registered, run `bind_pass`
     /// on `src`, then return the body, the user-ctx `Rc<Context>`, and the
@@ -1802,10 +1955,7 @@ mod tests {
             Instr::MakeFunc(_spec_idx, _body_idx, fv_idx) => {
                 // M30.1.B: `fv_idx` is an index into `block.freevars_table`.
                 let fv = &block.freevars_table[*fv_idx as usize];
-                assert!(
-                    fv.is_empty(),
-                    "square should have no freevars, got {fv:?}"
-                );
+                assert!(fv.is_empty(), "square should have no freevars, got {fv:?}");
             }
             _ => unreachable!(),
         }
@@ -1833,7 +1983,10 @@ mod tests {
             .expect("fact should be bound");
         // Find the func body in the source: [fact: func [n] [body]] — index 3.
         let data = body.data.borrow();
-        let Value::Block { series: func_body, .. } = &data[3] else {
+        let Value::Block {
+            series: func_body, ..
+        } = &data[3]
+        else {
             panic!("expected func body block at index 3");
         };
         // Manually record fact's slot as a global arity-1 func (simulating
@@ -1847,6 +2000,7 @@ mod tests {
             func_arities: FuncArityTable::default(),
             symbols: Vec::new(),
             freevars_table: Vec::new(),
+            dynamic_func_slots: HashSet::new(),
         };
         c.func_arities.record(0, fact_slot, 1); // fact is global arity-1
         let body_data = func_body.data.borrow();
@@ -1861,14 +2015,13 @@ mod tests {
         c.emit(Instr::Return);
         // Assert the body's instrs contain `CallUser(fact_slot, 1)` or
         // `CallUserGlobal(fact_slot, 1)` (M30.3.4: globals emit the latter).
-        let has_calluser = c
-            .instrs
-            .iter()
-            .any(|instr| matches!(
+        let has_calluser = c.instrs.iter().any(|instr| {
+            matches!(
                 instr,
                 Instr::CallUser(slot, argc) | Instr::CallUserGlobal(slot, argc)
                 if *slot as usize == fact_slot && *argc == 1
-            ));
+            )
+        });
         assert!(
             has_calluser,
             "fact body should contain CallUser({}, 1) or CallUserGlobal, got {:?}",
@@ -1940,7 +2093,10 @@ mod tests {
             );
             // The does spec is an empty block — pool[spec_idx] is `Block([])`.
             let spec_val = &block.pool[*spec_idx as usize];
-            assert!(matches!(spec_val, Value::Block { .. }), "does spec is a block");
+            assert!(
+                matches!(spec_val, Value::Block { .. }),
+                "does spec is a block"
+            );
         }
     }
 }

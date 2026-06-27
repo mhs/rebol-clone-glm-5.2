@@ -2,4 +2,4 @@
 //! `FuncDef.compiled` (in `red-core`) can name `CompiledBlock` without a
 //! crate dependency cycle — same pattern as `Env`/`EvalError`.
 
-pub use red_core::vm_ir::{CompiledBlock, Frame, Instr, disasm};
+pub use red_core::vm_ir::{disasm, CompiledBlock, Frame, Instr};

@@ -328,8 +328,7 @@ fn is_object_keyword_form(data: &[Value], i: usize) -> bool {
     else {
         return false;
     };
-    matches!(sym.as_str(), "object" | "context")
-        && matches!(&data[i + 1], Value::Block { .. })
+    matches!(sym.as_str(), "object" | "context") && matches!(&data[i + 1], Value::Block { .. })
 }
 
 // ---------------------------------------------------------------------------
@@ -347,12 +346,7 @@ fn is_object_keyword_form(data: &[Value], i: usize) -> bool {
 ///
 /// `MakeFunc` time (M24) will copy these onto `FuncDef::freevars`; for M23
 /// we just return them via the parent `AnalysisResult`.
-fn analyze_func_form(
-    data: &[Value],
-    i: usize,
-    scope: &mut Scope,
-    result: &mut AnalysisResult,
-) {
+fn analyze_func_form(data: &[Value], i: usize, scope: &mut Scope, result: &mut AnalysisResult) {
     // Locate the body block. For `does` it's `data[i+1]`; for `func`/
     // `function` it's `data[i+2]`. We rely on `func_form_skip` having
     // already validated the shape.
@@ -431,12 +425,7 @@ fn analyze_func_form(
 /// Attach lexical bindings to a single value at `data[i]`, recursing into
 /// nested blocks/parens. Mirrors `attach_func_bindings`'s match arms
 /// (`binding.rs:462`) but writes `Binding::Lexical` instead of `Func`/`Local`.
-fn analyze_value_mut(
-    data: &mut [Value],
-    i: usize,
-    scope: &mut Scope,
-    result: &mut AnalysisResult,
-) {
+fn analyze_value_mut(data: &mut [Value], i: usize, scope: &mut Scope, result: &mut AnalysisResult) {
     match &mut data[i] {
         Value::Block { series, .. } | Value::Paren { series, .. } => {
             let child = series.clone();
@@ -456,8 +445,8 @@ fn analyze_value_mut(
         | Value::SetPath { parts, .. } => {
             // Only the head word is bound (matches `attach_func_bindings`).
             let head = parts.first_mut();
-            if let Some(Value::Word { sym, binding, .. }) | Some(Value::GetWord { sym, binding, .. }) =
-                head
+            if let Some(Value::Word { sym, binding, .. })
+            | Some(Value::GetWord { sym, binding, .. }) = head
             {
                 attach_lexical(sym, binding, scope, result);
             }
@@ -610,7 +599,10 @@ mod tests {
         // [square: func [x] [x * x]] — indices 0=setword, 1=word(func),
         // 2=spec block, 3=body block.
         let data = body.data.borrow();
-        let Value::Block { series: func_body, .. } = &data[3] else {
+        let Value::Block {
+            series: func_body, ..
+        } = &data[3]
+        else {
             panic!("expected func body block at index 3");
         };
         let x_binding = find_word_binding(func_body, "x");
@@ -639,12 +631,18 @@ mod tests {
         // Top-level: [outer: func [y] [inner: func [][y] inner]] —
         // index 3 = outer body block.
         let data = body.data.borrow();
-        let Value::Block { series: outer_body, .. } = &data[3] else {
+        let Value::Block {
+            series: outer_body, ..
+        } = &data[3]
+        else {
             panic!("expected outer body block at index 3");
         };
         let outer_data = outer_body.data.borrow();
         // outer_body = [inner: func [][y] inner] — index 3 = inner body block.
-        let Value::Block { series: inner_body, .. } = &outer_data[3] else {
+        let Value::Block {
+            series: inner_body, ..
+        } = &outer_data[3]
+        else {
             panic!("expected inner body block at outer body index 3");
         };
         let y_binding = find_word_binding(inner_body, "y");
@@ -728,9 +726,13 @@ mod tests {
         );
         let data = body.data.borrow();
         // Body: [greet: does [x: 1 x]] — does body is at index 2.
-        let Value::Block { series: does_body, .. } = &data[2] else {
+        let Value::Block {
+            series: does_body, ..
+        } = &data[2]
+        else {
             panic!("expected does body block at index 2");
-        };        let x_binding = find_word_binding(does_body, "x");
+        };
+        let x_binding = find_word_binding(does_body, "x");
         // `x` is allocated as a local SetWord at slot 0 of the does's scope,
         // then referenced as a Word — both should be Lexical(0, 0).
         assert!(

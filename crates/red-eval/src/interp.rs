@@ -28,15 +28,15 @@
 
 // Public API (re-exported by `lib.rs` to external callers — the CLI, tests):
 pub use crate::interp_legacy::{
-    run_source, run_source_with_exit, run_source_with_exit_opts, run_source_with_exit_output,
-    run_source_with_output, run_series, run_series_with_exit_output, run_series_with_output,
-    RunOptions,
+    run_series, run_series_with_exit_output, run_series_with_output, run_source,
+    run_source_with_exit, run_source_with_exit_opts, run_source_with_exit_output,
+    run_source_with_output, RunOptions,
 };
 // Crate-internal helpers (used by `natives.rs`, `vm/vm.rs`, etc.; not part
 // of the external `red_eval::` surface — they're `pub(crate)` in
 // `interp_legacy`):
 pub(crate) use crate::interp_legacy::{
-    dispatch_block, dispatch_block_reduce, eval_expression, eval_get_path,
+    call_user_func, dispatch_block, dispatch_block_reduce, eval_expression, eval_get_path,
     resolve_compiled_block, set_path_value,
 };
 

@@ -291,8 +291,8 @@ fn timed_run(src: &str, walk: bool) -> std::time::Duration {
     };
     let writer = BufferWriter::new();
     let start = Instant::now();
-    let _ = red_eval::run_source_with_exit_opts(src, Box::new(writer), &opts)
-        .expect("fixture failed");
+    let _ =
+        red_eval::run_source_with_exit_opts(src, Box::new(writer), &opts).expect("fixture failed");
     start.elapsed()
 }
 

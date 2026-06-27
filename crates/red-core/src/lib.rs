@@ -11,7 +11,7 @@ pub mod value;
 pub mod vm_ir;
 
 pub use context::Context;
-pub use env::{CallFrame, Env, EvalError, EvalMode, NativeFn, RefineArgs};
+pub use env::{CallFrame, CompileErrorKind, Env, EvalError, EvalMode, NativeFn, RefineArgs};
 pub use error::{render_error, Error};
 pub use lexer::{lex, LexError, Token, TokenKind};
 pub use parser::{load, load_source, parse_program, ParseError, Parser};

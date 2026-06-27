@@ -40,7 +40,7 @@ errors (`Span::new(0, 0)`) when a type/arity/unbound error fires inside a
 VM-evaluated block. This breaks the documented parity contract
 (`tests/parity.rs:14`) and is the single most user-visible issue.
 
-- [ ] **Thread real spans into VM-raised errors** *(high)*
+- [x] **Thread real spans into VM-raised errors** *(high)*
       Replace the 13 `Span::new(0, 0)` sites in
       `crates/red-eval/src/vm/vm.rs:288, 339, 502, 517, 570, 601, 640, 763, 803,
       807, 815, 916, 931` with a real span source. For `prepare_call` TypeError
@@ -49,27 +49,27 @@ VM-evaluated block. This breaks the documented parity contract
       per-symbol span isn't in the side table). Add a `Vm::current_span()`
       helper that returns `cached_block.source_span` for arms with no better
       source.
-- [ ] **Add `EvalError::Compile { kind, span }` variant** *(medium)*
+- [x] **Add `EvalError::Compile { kind, span }` variant** *(medium)*
       `crates/red-eval/src/vm/vm.rs:1150-1153` stringifies a `CompileError`
       into `EvalError::Native { message, .. }`, losing the structured
       `CompileErrorKind`. Add a proper variant so callers can match on it.
-- [ ] **Replace `unreachable!()` in compiler with recoverable errors** *(medium)*
+- [x] **Replace `unreachable!()` in compiler with recoverable errors** *(medium)*
       `crates/red-eval/src/vm/compiler.rs:772` (`Binding::Unbound`) and `:1336`
       (non-Block body). `compile_block` is `pub` and called by tests; a misroute
       should surface as a `CompileError`, not a release panic. Add
       `CompileErrorKind::UnboundWord` and `MalformedSpec`.
-- [ ] **Make `block_pool` OOB a real error, not silent `none`** *(medium)*
+- [x] **Make `block_pool` OOB a real error, not silent `none`** *(medium)*
       `crates/red-eval/src/vm/vm.rs:1213-1219` returns `Value::None` on a bad
       pool index — a compiler bug becomes silent wrong values. Add
       `debug_assert!` and return `Err(EvalError::Native { .. })` (or the new
       `Compile` variant) in release.
-- [ ] **Convert `math.rs` infix lookups to fallible** *(medium)*
+- [x] **Convert `math.rs` infix lookups to fallible** *(medium)*
       `crates/red-eval/src/math.rs:157, 159, 174, 176, 191, 193, 208, 210` use
       `.expect()`/`.unwrap()` for `+`/`-`/`*`/`/` native lookup. A
       registration-order bug panics with an opaque message. Extract
       `fn infix_lookup(env, sym) -> Result<NativeFn, EvalError>` and use from
       all four. Standardizes the mixed `expect`/`unwrap` style in the same file.
-- [ ] **Document & statically assert the `unsafe` slot-access invariants** *(medium)*
+- [x] **Document & statically assert the `unsafe` slot-access invariants** *(medium)*
       `crates/red-core/src/context.rs:86-93` (`slot_value_unchecked`) and
       `:107-116` (`set_slot_unchecked`) are sound only if the compiler's `Scope`
       analysis is correct. Add a
@@ -78,11 +78,11 @@ VM-evaluated block. This breaks the documented parity contract
       invalid bit patterns" assumption. Optionally add a
       `#[cfg(debug_assertions)]` frame-chain walker that verifies every
       `LoadLocal`/`SetLocal` target exists.
-- [ ] **Guard the "ran off instr stream" fallthrough** *(low)*
+- [x] **Guard the "ran off instr stream" fallthrough** *(low)*
       `crates/red-eval/src/vm/vm.rs:260-264` silently returns top-of-stack or
       `none` if `pc >= instrs.len()`. Add `debug_assert!(pc < instrs.len())` and
       return an `EvalError` in release.
-- [ ] `cargo test --workspace` green; `cargo test --workspace --features
+- [x] `cargo test --workspace` green; `cargo test --workspace --features
       force-walk` green; `cargo clippy --workspace --all-targets` shows no new
       warnings.
 

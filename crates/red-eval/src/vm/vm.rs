@@ -29,17 +29,17 @@
 //! `needs_rebind` flag. For M25's test cases (no `do`/`reduce`/loop native
 //! invocation in VM mode), the walker recursion path is unused.
 
-use std::mem::MaybeUninit;
+use std::mem::{align_of, size_of, MaybeUninit};
 use std::rc::Rc;
 
 use red_core::value::{FuncDef, Span, Symbol, Value};
 use red_core::vm_ir::{CompiledBlock, Frame, Instr};
-use red_core::{Context, Env, EvalError, RefineArgs};
+use red_core::{CompileErrorKind, Context, Env, EvalError, RefineArgs};
 
-use crate::binding::bind_function_body;
-use crate::interp::{eval_get_path, set_path_value};
+use crate::binding::{bind_function_body, deep_clone_series};
+use crate::interp::{call_user_func, eval_get_path, set_path_value};
 use crate::natives::extract_spec;
-use crate::vm::compiler::{NativeRegistry, compile_block_for_func_body};
+use crate::vm::compiler::{compile_block_for_func_body, stub_block, NativeRegistry};
 use crate::vm::lex::Scope;
 
 /// M30.1.A: capacity of the stack-allocated native-args fast path. Natives
@@ -48,6 +48,27 @@ use crate::vm::lex::Scope;
 /// registry (the highest-arity fixed native is `make`/`to` at ~3 args;
 /// variadic natives collect via `LoadDynamic`, not via argc).
 const INLINE_ARGS_CAP: usize = 8;
+
+/// M31: static assertion backing the `unsafe` `from_raw_parts` cast in
+/// `call_native`. The cast reinterprets `[MaybeUninit<Value>; INLINE_ARGS_CAP]`
+/// as `[Value; argc]`; this is sound only if `Value` and `MaybeUninit<Value>`
+/// have identical layout (no padding differences, no niche-invalid bit
+/// patterns the compiler could exploit). `MaybeUninit<T>` guarantees the
+/// same size/alignment as `T` by definition, but the equality check here
+/// makes the assumption explicit and fails compilation if a future `Value`
+/// variant or `#[repr(...)]` change breaks it.
+///
+/// See `Context::slot_value_unchecked`/`set_slot_unchecked` in
+/// `crates/red-core/src/context.rs` for the matching "no invalid bit
+/// patterns" invariant on the slot-access fast path.
+const _: () = assert!(
+    size_of::<Value>() == size_of::<MaybeUninit<Value>>(),
+    "Value and MaybeUninit<Value> must have identical size for the from_raw_parts cast"
+);
+const _: () = assert!(
+    align_of::<Value>() == align_of::<MaybeUninit<Value>>(),
+    "Value and MaybeUninit<Value> must have identical alignment for the from_raw_parts cast"
+);
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -248,6 +269,26 @@ impl<'env> Vm<'env> {
         frame_idx
     }
 
+    /// M31: best-effort source span for an error raised at the current
+    /// dispatch point. Returns the active `CompiledBlock`'s `source_span`
+    /// (computed by `block_source_span` at compile time — the first/last
+    /// value's span, or `Span::default()` for a synthetic block). Used by
+    /// VM arms that have no per-value span to attribute the error to (e.g.
+    /// `LoadDynamic` UnboundWord, `ConstInt` synthetic push, native-index
+    /// invariant failures, `Halt`/`EndRefine` misroutes).
+    ///
+    /// Falls back to `Span::default()` if no block is cached (shouldn't happen
+    /// mid-dispatch — `refresh_cache` runs at the top of each loop iteration —
+    /// but defensive against a future caller that invokes an error-raising
+    /// helper outside the dispatch loop).
+    #[inline]
+    fn current_span(&self) -> Span {
+        self.cached_block
+            .as_ref()
+            .map(|b| b.source_span)
+            .unwrap_or_default()
+    }
+
     fn run_loop(&mut self) -> Result<Value, EvalError> {
         loop {
             // M30.2.D: no Rc<[Instr]> clone here — `refresh_cache` populates
@@ -258,9 +299,24 @@ impl<'env> Vm<'env> {
             let pc = self.frames[frame_idx].pc;
             let instrs = self.cached_instrs.as_ref().expect("cache invariant");
             if pc >= instrs.len() {
-                // Fell off the end without `Return`/`Halt` — treat as
-                // implicit return of top-of-stack (defensive).
-                return Ok(self.stack.pop().unwrap_or(Value::None));
+                // M31: was a silent "implicit return of top-of-stack". A
+                // well-formed `CompiledBlock` always ends with `Return`/
+                // `Halt`, so reaching here is a compiler or VM routing bug.
+                // `debug_assert!` catches it in debug; release builds
+                // surface a recoverable `EvalError::Compile` (VmInvariant)
+                // rather than silently returning a possibly-wrong value.
+                debug_assert!(
+                    pc < instrs.len(),
+                    "VM ran off instr stream: pc={pc} len={}",
+                    instrs.len()
+                );
+                return Err(EvalError::Compile {
+                    kind: CompileErrorKind::VmInvariant(format!(
+                        "ran off instr stream: pc={pc} len={}",
+                        instrs.len()
+                    )),
+                    span: self.current_span(),
+                });
             }
             // M30.1.B: `Instr` is `Copy` (16 bytes), so this is a bitwise
             // copy — no `Rc` refcount ops, no borrow-extension across the match.
@@ -276,16 +332,18 @@ impl<'env> Vm<'env> {
                     // lookup still clones the `Value` (unavoidable — the
                     // stack owns its values).
                     let block = self.cached_block.as_ref().expect("cache invariant");
-                    let v = block_pool(block, i as usize);
+                    let v = block_pool(block, i as usize)?;
                     self.stack.push(v);
                 }
                 Instr::ConstInt(n) => {
                     // M30 fast path: skip pool indirection for `Integer`.
                     // Constructs the `Value` inline (no `Rc`, no clone) —
                     // the dominant literal kind in `fib`/`sum_loop`/loops.
+                    // M31: thread `current_span()` so integer-arg type
+                    // errors localize to the literal's block (not zero).
                     self.stack.push(Value::Integer {
                         n,
-                        span: Span::new(0, 0),
+                        span: self.current_span(),
                     });
                 }
                 Instr::ConstNone => {
@@ -309,11 +367,7 @@ impl<'env> Vm<'env> {
                         locals.len()
                     );
                     // SAFETY: compiler-proven slot index.
-                    let v = unsafe {
-                        locals
-                            .get_unchecked(slot as usize)
-                            .clone()
-                    };
+                    let v = unsafe { locals.get_unchecked(slot as usize).clone() };
                     self.stack.push(v);
                 }
                 Instr::LoadGlobal(slot) => {
@@ -325,8 +379,12 @@ impl<'env> Vm<'env> {
                 }
                 Instr::LoadDynamic(sym_idx) => {
                     // M30.1.B: look up the symbol from the block's side table.
-                    let sym = self.cached_block.as_ref().expect("cache invariant")
-                        .symbols.get(sym_idx as usize)
+                    let sym = self
+                        .cached_block
+                        .as_ref()
+                        .expect("cache invariant")
+                        .symbols
+                        .get(sym_idx as usize)
                         .cloned()
                         .unwrap_or_else(|| Symbol::new(""));
                     let v = if let Some(val) = self.env.user_ctx.get(&sym) {
@@ -334,9 +392,13 @@ impl<'env> Vm<'env> {
                     } else if let Some(fd) = self.env.natives.get(&sym) {
                         Value::Func(Rc::clone(fd))
                     } else {
+                        // M31: use the block's `source_span` as the
+                        // fallback (the per-symbol span isn't in the side
+                        // table). Better than zero for locating which block
+                        // the unbound word came from.
                         return Err(EvalError::UnboundWord {
                             sym,
-                            span: Span::new(0, 0),
+                            span: self.current_span(),
                         });
                     };
                     self.stack.push(v);
@@ -357,13 +419,19 @@ impl<'env> Vm<'env> {
                     // M30: unchecked global slot write. The compiler only
                     // emits `SetGlobal(slot)` for words bound by the binding
                     // pass, which allocates the slot.
-                    self.env.user_ctx.set_slot_unchecked(slot as usize, val.clone());
+                    self.env
+                        .user_ctx
+                        .set_slot_unchecked(slot as usize, val.clone());
                     self.stack.push(val);
                 }
                 Instr::SetDynamic(sym_idx) => {
                     // M30.1.B: look up the symbol from the block's side table.
-                    let sym = self.cached_block.as_ref().expect("cache invariant")
-                        .symbols.get(sym_idx as usize)
+                    let sym = self
+                        .cached_block
+                        .as_ref()
+                        .expect("cache invariant")
+                        .symbols
+                        .get(sym_idx as usize)
                         .cloned()
                         .unwrap_or_else(|| Symbol::new(""));
                     let val = self.stack.pop().unwrap_or(Value::None);
@@ -436,9 +504,10 @@ impl<'env> Vm<'env> {
                 Instr::MakeFunc(spec_idx, body_idx, fv_idx) => {
                     // M30.1.B: freevar list is looked up from the side table.
                     let block = self.cached_block.as_ref().expect("cache invariant").clone();
-                    let spec_val = block_pool(&block, spec_idx as usize);
-                    let body_val = block_pool(&block, body_idx as usize);
-                    let freevars = block.freevars_table
+                    let spec_val = block_pool(&block, spec_idx as usize)?;
+                    let body_val = block_pool(&block, body_idx as usize)?;
+                    let freevars = block
+                        .freevars_table
                         .get(fv_idx as usize)
                         .cloned()
                         .unwrap_or_default();
@@ -487,20 +556,21 @@ impl<'env> Vm<'env> {
                 }
                 Instr::MarkRefine(sym_idx) => {
                     // M30.1.B: look up the symbol from the block's side table.
-                    let sym = self.cached_block.as_ref().expect("cache invariant")
-                        .symbols.get(sym_idx as usize)
+                    let sym = self
+                        .cached_block
+                        .as_ref()
+                        .expect("cache invariant")
+                        .symbols
+                        .get(sym_idx as usize)
                         .cloned()
                         .unwrap_or_else(|| Symbol::new(""));
                     self.ref_marks.push((sym, self.stack.len()));
                 }
                 Instr::EndRefine => {
-                    let (sym, height) = self
-                        .ref_marks
-                        .pop()
-                        .ok_or_else(|| EvalError::Native {
-                            message: "EndRefine without MarkRefine".into(),
-                            span: Span::new(0, 0),
-                        })?;
+                    let (sym, height) = self.ref_marks.pop().ok_or_else(|| EvalError::Compile {
+                        kind: CompileErrorKind::VmInvariant("EndRefine without MarkRefine".into()),
+                        span: self.current_span(),
+                    })?;
                     let args: Vec<Value> = self.stack[height..].to_vec();
                     self.stack.truncate(height);
                     self.pending_refs.push((sym, args));
@@ -511,10 +581,11 @@ impl<'env> Vm<'env> {
                     // returns needs_rebind only for `use`/object forms, which
                     // the test cases don't use). Surface as an error so a
                     // misroute is visible rather than silently returning None.
-                    return Err(EvalError::Native {
-                        message: "VM reached Halt (block needs_rebind — use walker)"
-                            .into(),
-                        span: Span::new(0, 0),
+                    return Err(EvalError::Compile {
+                        kind: CompileErrorKind::VmInvariant(
+                            "VM reached Halt (block needs_rebind — use walker)".into(),
+                        ),
+                        span: self.current_span(),
                     });
                 }
             }
@@ -535,7 +606,24 @@ impl<'env> Vm<'env> {
             let pc = self.frames[frame_idx].pc;
             let instrs = self.cached_instrs.as_ref().expect("cache invariant");
             if pc >= instrs.len() {
-                return Ok(self.collect_reduce_stack());
+                // M31: a well-formed reduce-mode `CompiledBlock` always
+                // ends with `Return` (which calls `collect_reduce_stack`
+                // itself). Reaching here is a compiler bug; surface it
+                // rather than silently collecting the stack (which could
+                // mask a real bug as "wrong reduce results"). The
+                // `debug_assert!` catches it in debug builds.
+                debug_assert!(
+                    pc < instrs.len(),
+                    "VM (reduce) ran off instr stream: pc={pc} len={}",
+                    instrs.len()
+                );
+                return Err(EvalError::Compile {
+                    kind: CompileErrorKind::VmInvariant(format!(
+                        "ran off instr stream (reduce): pc={pc} len={}",
+                        instrs.len()
+                    )),
+                    span: self.current_span(),
+                });
             }
             // M30.1.B: `Instr` is `Copy` — bitwise copy, no clone.
             let instr = instrs[pc];
@@ -564,10 +652,11 @@ impl<'env> Vm<'env> {
                     self.stack.push(result);
                 }
                 Instr::Halt => {
-                    return Err(EvalError::Native {
-                        message: "VM reached Halt (block needs_rebind — use walker)"
-                            .into(),
-                        span: Span::new(0, 0),
+                    return Err(EvalError::Compile {
+                        kind: CompileErrorKind::VmInvariant(
+                            "VM reached Halt (block needs_rebind — use walker)".into(),
+                        ),
+                        span: self.current_span(),
                     });
                 }
                 _ => {
@@ -592,13 +681,13 @@ impl<'env> Vm<'env> {
         match instr {
             Instr::Const(i) => {
                 let block = self.cached_block.as_ref().expect("cache invariant").clone();
-                let v = block_pool(&block, i as usize);
+                let v = block_pool(&block, i as usize)?;
                 self.stack.push(v);
             }
             Instr::ConstInt(n) => {
                 self.stack.push(Value::Integer {
                     n,
-                    span: Span::new(0, 0),
+                    span: self.current_span(),
                 });
             }
             Instr::ConstNone => {
@@ -626,8 +715,12 @@ impl<'env> Vm<'env> {
             }
             Instr::LoadDynamic(sym_idx) => {
                 // M30.1.B: look up the symbol from the block's side table.
-                let sym = self.cached_block.as_ref().expect("cache invariant")
-                    .symbols.get(sym_idx as usize)
+                let sym = self
+                    .cached_block
+                    .as_ref()
+                    .expect("cache invariant")
+                    .symbols
+                    .get(sym_idx as usize)
                     .cloned()
                     .unwrap_or_else(|| Symbol::new(""));
                 let v = if let Some(val) = self.env.user_ctx.get(&sym) {
@@ -637,7 +730,7 @@ impl<'env> Vm<'env> {
                 } else {
                     return Err(EvalError::UnboundWord {
                         sym,
-                        span: Span::new(0, 0),
+                        span: self.current_span(),
                     });
                 };
                 self.stack.push(v);
@@ -654,13 +747,19 @@ impl<'env> Vm<'env> {
             }
             Instr::SetGlobal(slot) => {
                 let val = self.stack.pop().unwrap_or(Value::None);
-                self.env.user_ctx.set_slot_unchecked(slot as usize, val.clone());
+                self.env
+                    .user_ctx
+                    .set_slot_unchecked(slot as usize, val.clone());
                 self.stack.push(val);
             }
             Instr::SetDynamic(sym_idx) => {
                 // M30.1.B: look up the symbol from the block's side table.
-                let sym = self.cached_block.as_ref().expect("cache invariant")
-                    .symbols.get(sym_idx as usize)
+                let sym = self
+                    .cached_block
+                    .as_ref()
+                    .expect("cache invariant")
+                    .symbols
+                    .get(sym_idx as usize)
                     .cloned()
                     .unwrap_or_else(|| Symbol::new(""));
                 let val = self.stack.pop().unwrap_or(Value::None);
@@ -699,10 +798,11 @@ impl<'env> Vm<'env> {
             }
             Instr::MakeFunc(spec_idx, body_idx, fv_idx) => {
                 let block = self.cached_block.as_ref().expect("cache invariant").clone();
-                let spec_val = block_pool(&block, spec_idx as usize);
-                let body_val = block_pool(&block, body_idx as usize);
+                let spec_val = block_pool(&block, spec_idx as usize)?;
+                let body_val = block_pool(&block, body_idx as usize)?;
                 // M30.1.B: freevar list is looked up from the side table.
-                let freevars = block.freevars_table
+                let freevars = block
+                    .freevars_table
                     .get(fv_idx as usize)
                     .cloned()
                     .unwrap_or_default();
@@ -748,20 +848,21 @@ impl<'env> Vm<'env> {
             }
             Instr::MarkRefine(sym_idx) => {
                 // M30.1.B: look up the symbol from the block's side table.
-                let sym = self.cached_block.as_ref().expect("cache invariant")
-                    .symbols.get(sym_idx as usize)
+                let sym = self
+                    .cached_block
+                    .as_ref()
+                    .expect("cache invariant")
+                    .symbols
+                    .get(sym_idx as usize)
                     .cloned()
                     .unwrap_or_else(|| Symbol::new(""));
                 self.ref_marks.push((sym, self.stack.len()));
             }
             Instr::EndRefine => {
-                let (sym, height) = self
-                    .ref_marks
-                    .pop()
-                    .ok_or_else(|| EvalError::Native {
-                        message: "EndRefine without MarkRefine".into(),
-                        span: Span::new(0, 0),
-                    })?;
+                let (sym, height) = self.ref_marks.pop().ok_or_else(|| EvalError::Compile {
+                    kind: CompileErrorKind::VmInvariant("EndRefine without MarkRefine".into()),
+                    span: self.current_span(),
+                })?;
                 let args: Vec<Value> = self.stack[height..].to_vec();
                 self.stack.truncate(height);
                 self.pending_refs.push((sym, args));
@@ -786,25 +887,22 @@ impl<'env> Vm<'env> {
     /// (not `&mut Vm`), so they cannot touch the caller's `Vm.stack`; the
     /// copy is safe because re-entrant natives (`if`/`loop`/etc.) create a
     /// fresh `Vm` via `dispatch_block`, leaving the caller's stack untouched.
-    fn call_native(
-        &mut self,
-        native_idx: usize,
-        argc: usize,
-    ) -> Result<(), EvalError> {
+    fn call_native(&mut self, native_idx: usize, argc: usize) -> Result<(), EvalError> {
         // M30.3.6: borrow the `Rc<FuncDef>` instead of cloning it. We only
         // need `fd.native` (a `fn` pointer — `Copy`), so extract it before
         // the mutable `self.env` borrow below. Saves 1 Rc bump + decrement
         // per native call (the `+` in `fib`'s body fires this ~1.4M times).
+        let span = self.current_span();
         let fd = self
             .natives_by_idx
             .get(native_idx)
-            .ok_or_else(|| EvalError::Native {
-                message: format!("VM: bad native index {native_idx}"),
-                span: Span::new(0, 0),
+            .ok_or_else(|| EvalError::Compile {
+                kind: CompileErrorKind::VmInvariant(format!("bad native index {native_idx}")),
+                span,
             })?;
-        let f = fd.native.ok_or_else(|| EvalError::Native {
-            message: format!("VM: native {native_idx} has no handler"),
-            span: Span::new(0, 0),
+        let f = fd.native.ok_or_else(|| EvalError::Compile {
+            kind: CompileErrorKind::VmInvariant(format!("native {native_idx} has no handler")),
+            span,
         })?;
         let len = self.stack.len();
         if argc > len {
@@ -812,7 +910,7 @@ impl<'env> Vm<'env> {
                 native: Symbol::new("<native>"),
                 expected: argc,
                 got: len,
-                span: Span::new(0, 0),
+                span,
             });
         }
         let start = len - argc;
@@ -834,9 +932,8 @@ impl<'env> Vm<'env> {
                 buf[i].write(v.clone());
             }
             // SAFETY: we initialized buf[0..argc] above.
-            let args: &[Value] = unsafe {
-                std::slice::from_raw_parts(buf.as_ptr() as *const Value, argc)
-            };
+            let args: &[Value] =
+                unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const Value, argc) };
             f(args, &refs, self.env)
         } else {
             // Fall back to heap allocation for very high-arity natives
@@ -894,12 +991,7 @@ impl<'env> Vm<'env> {
         // straight to `user_ctx.slot_value_unchecked`. For `fib 30`, this
         // fires on every recursive call (~2.7M times).
         let func_val = if !is_global {
-            if let Some(local) = self
-                .frames
-                .last()
-                .and_then(|f| f.locals.get(slot))
-                .cloned()
-            {
+            if let Some(local) = self.frames.last().and_then(|f| f.locals.get(slot)).cloned() {
                 local
             } else {
                 self.env.user_ctx.slot_value(slot)
@@ -907,13 +999,22 @@ impl<'env> Vm<'env> {
         } else {
             self.env.user_ctx.slot_value_unchecked(slot)
         };
+        // M31: capture the func value's span before `match` consumes it —
+        // used as the fallback for the Arity error below (the call site
+        // span). `span_or_default()` returns `Span::default()` for synthetic
+        // Func values (which carry no span); `current_span()` is a worse
+        // fallback there since it points at the *body* block, not the call.
+        let call_span = func_val.span_or_default();
         let fd = match func_val {
             Value::Func(fd) => fd,
             other => {
+                // M31: use the offending value's span (the non-Func value
+                // stored in the slot), falling back to the current block's
+                // span if it's synthetic (no source position).
                 return Err(EvalError::TypeError {
                     expected: "function!",
                     found: crate::natives::type_name(&other),
-                    span: Span::new(0, 0),
+                    span: call_span,
                 });
             }
         };
@@ -928,7 +1029,7 @@ impl<'env> Vm<'env> {
                 native: Symbol::new("<user-func>"),
                 expected: argc,
                 got: len,
-                span: Span::new(0, 0),
+                span: call_span,
             });
         }
         let start = len - argc;
@@ -971,6 +1072,17 @@ impl<'env> Vm<'env> {
     /// `v` onto the caller's stack.
     fn call_user(&mut self, slot: usize, argc: usize) -> Result<(), EvalError> {
         let (fd, compiled, locals) = self.prepare_call(slot, argc, false)?;
+        // Walker fallback: if the body couldn't be compiled to bytecode
+        // (e.g. it contains a higher-order pattern the compiler can't
+        // statically resolve, like a func-valued param called in operator
+        // position), `ensure_compiled` returns a `needs_rebind` stub.
+        // Invoke the func through the tree-walker instead of pushing a VM
+        // frame — the walker's `dispatch_call` handles dynamic func
+        // dispatch correctly. Args were already popped into `locals` by
+        // `prepare_call`; repack them as the walker's arg vec.
+        if compiled.needs_rebind {
+            return self.invoke_via_walker(fd, locals);
+        }
         self.frames.push(Frame {
             func: Some(Rc::clone(&fd)),
             locals,
@@ -990,6 +1102,9 @@ impl<'env> Vm<'env> {
     /// Skips the `frames.last().and_then(...)` local-slot check in `prepare_call`.
     fn call_user_global(&mut self, slot: usize, argc: usize) -> Result<(), EvalError> {
         let (fd, compiled, locals) = self.prepare_call(slot, argc, true)?;
+        if compiled.needs_rebind {
+            return self.invoke_via_walker(fd, locals);
+        }
         self.frames.push(Frame {
             func: Some(Rc::clone(&fd)),
             locals,
@@ -1022,6 +1137,13 @@ impl<'env> Vm<'env> {
     /// func bodies.)
     fn tail_call(&mut self, slot: usize, argc: usize) -> Result<(), EvalError> {
         let (fd, compiled, locals) = self.prepare_call(slot, argc, false)?;
+        // Walker fallback for tail calls: same rationale as `call_user`.
+        // We can't reuse the current VM frame (the walker manages its own
+        // CallFrame), so invoke through the walker and push the result.
+        // The current frame stays; its `Return` will surface the result.
+        if compiled.needs_rebind {
+            return self.invoke_via_walker(fd, locals);
+        }
         let frame_idx = self.frames.len() - 1;
         let depth = self.frames[frame_idx].depth;
         // Guard: don't overwrite the root script frame. (Defensive — the
@@ -1032,7 +1154,7 @@ impl<'env> Vm<'env> {
                 func: Some(Rc::clone(&fd)),
                 locals,
                 depth: depth + 1,
-                block: compiled,  // M30.3.1: Rc move (was (*compiled).clone())
+                block: compiled, // M30.3.1: Rc move (was (*compiled).clone())
                 pc: 0,
             });
             self.frame_gen = self.frame_gen.wrapping_add(1);
@@ -1080,10 +1202,32 @@ impl<'env> Vm<'env> {
             existing.clear();
             existing.extend_from_slice(&locals);
         }
-        self.frames[frame_idx].block = compiled;  // M30.3.1: Rc move (was (*compiled).clone())
+        self.frames[frame_idx].block = compiled; // M30.3.1: Rc move (was (*compiled).clone())
         self.frames[frame_idx].pc = 0;
         self.frame_gen = self.frame_gen.wrapping_add(1);
         // No stats bump: a reused frame doesn't increase call-stack depth.
+        Ok(())
+    }
+
+    /// Walker fallback for user-func invocation. Used by `call_user`/
+    /// `call_user_global`/`tail_call` when the body's compiled block is a
+    /// `needs_rebind` stub — i.e. the compiler couldn't lower it to bytecode
+    /// (e.g. a higher-order pattern like a func-valued param called in
+    /// operator position, which the VM can't statically resolve).
+    ///
+    /// `locals` holds the args in `[0..argc]` (laid out by `prepare_call`);
+    /// we repack them into a `Vec` for the walker's `call_user_func`, which
+    /// sets up its own `CallFrame`, evaluates the body via the tree-walker,
+    /// and catches `EvalError::Return`. The result is pushed onto the VM
+    /// operand stack so the caller's `CallUser` sees it like a normal call.
+    /// Refinements aren't supported on this path (user-func refinement
+    /// dispatch already falls back to the walker at the compiler level —
+    /// see `compile_user_call`'s `MalformedSpec` return).
+    fn invoke_via_walker(&mut self, fd: Rc<FuncDef>, locals: Vec<Value>) -> Result<(), EvalError> {
+        let argc = fd.params.len();
+        let args: Vec<Value> = locals.into_iter().take(argc).collect();
+        let result = call_user_func(&fd, args, &RefineArgs::empty(), self.env)?;
+        self.stack.push(result);
         Ok(())
     }
 
@@ -1141,16 +1285,44 @@ impl<'env> Vm<'env> {
         for local in &fd.locals {
             child.slot_index_pub(local.clone());
         }
-        let compiled = compile_block_for_func_body(
-            &fd.body,
+        // Deep-clone the body before compiling. `analyze_block` (inside
+        // `compile_block_for_func_body`) mutates bindings in place, converting
+        // `Binding::Func` → `Binding::Lexical` — which the tree-walker can't
+        // resolve. If the body later falls back to the walker (via the
+        // `needs_rebind`/`MalformedSpec` path in `call_user`), it must evaluate
+        // the *original* `fd.body` (with `Func` bindings intact). Mirrors
+        // `dispatch_block`'s deep-clone-before-compile (interp_legacy.rs:144).
+        let compile_body = deep_clone_series(&fd.body);
+        let compiled = match compile_block_for_func_body(
+            &compile_body,
             &mut child,
             &registry,
             (slot as u32, argc),
-        )
-        .map_err(|e| EvalError::Native {
-            message: format!("VM: compile error: {:?}", e.kind),
-            span: e.span,
-        })?;
+            fd.params.len(),
+        ) {
+            Ok(c) => c,
+            // `MalformedSpec`/`ArityMismatch` are the compiler's "defer to the
+            // walker" signals (set by `compile_word` for higher-order patterns
+            // it can't statically resolve, and by the user-func-refinement /
+            // path-refinement fallbacks). Return a `needs_rebind` stub so
+            // `call_user` routes the body through `invoke_via_walker` instead
+            // of erroring. Other compile errors (`VmInvariant`, `UnboundWord`)
+            // are genuine bugs/corruption — surface them as hard errors.
+            Err(e)
+                if matches!(
+                    e.kind,
+                    CompileErrorKind::MalformedSpec | CompileErrorKind::ArityMismatch
+                ) =>
+            {
+                stub_block(&fd.body, crate::vm::lex::AnalysisResult::default())
+            }
+            Err(e) => {
+                return Err(EvalError::Compile {
+                    kind: e.kind,
+                    span: e.span,
+                })
+            }
+        };
         let compiled = Rc::new(compiled);
         self.env.func_cache.insert(key, compiled.clone());
         Ok(compiled)
@@ -1210,12 +1382,31 @@ impl<'env> Vm<'env> {
 // ---------------------------------------------------------------------------
 
 /// Read a pool value by index. Clones (as all `Value` access does).
-fn block_pool(block: &CompiledBlock, idx: usize) -> Value {
-    block
-        .pool
-        .get(idx)
-        .cloned()
-        .unwrap_or(Value::None)
+///
+/// M31: was `unwrap_or(Value::None)` — a compiler bug producing a bad pool
+/// index silently returned `none`, corrupting results. Now returns an
+/// `EvalError::Compile` (VmInvariant) in release and asserts in debug.
+/// The span is the block's `source_span` (the per-pool-entry span isn't
+/// tracked; this localizes to the offending block).
+fn block_pool(block: &CompiledBlock, idx: usize) -> Result<Value, EvalError> {
+    match block.pool.get(idx) {
+        Some(v) => Ok(v.clone()),
+        None => {
+            debug_assert!(
+                false,
+                "block_pool OOB: idx={} len={}",
+                idx,
+                block.pool.len()
+            );
+            Err(EvalError::Compile {
+                kind: CompileErrorKind::VmInvariant(format!(
+                    "pool index {idx} out of bounds (len {})",
+                    block.pool.len()
+                )),
+                span: block.source_span,
+            })
+        }
+    }
 }
 
 /// Truthiness test matching the walker's `is_truthy` (Red semantics: `false`
@@ -1233,7 +1424,7 @@ mod tests {
     use super::*;
     use crate::binding::bind_pass;
     use crate::natives::{install_constants, register_natives};
-    use crate::vm::compiler::{NativeRegistry, compile_block};
+    use crate::vm::compiler::{compile_block, NativeRegistry};
     use crate::vm::lex::Scope;
     use red_core::parser::load_source;
     use red_core::printer::mold_to_string;
@@ -1341,7 +1532,11 @@ mod tests {
     #[test]
     fn vm_runs_square() {
         let v = run_vm("square: func [x][x * x] square 5");
-        assert!(matches!(v, Value::Integer { n: 25, .. }), "got {}", mold_to_string(&v));
+        assert!(
+            matches!(v, Value::Integer { n: 25, .. }),
+            "got {}",
+            mold_to_string(&v)
+        );
     }
 
     /// VM runs recursive `fact 5` -> `Integer(120)`. (plan3.md:466)
@@ -1351,7 +1546,11 @@ mod tests {
     #[test]
     fn vm_runs_fact() {
         let v = run_vm("fact: func [n][either n <= 1 [1][n * fact n - 1]] fact 5");
-        assert!(matches!(v, Value::Integer { n: 120, .. }), "got {}", mold_to_string(&v));
+        assert!(
+            matches!(v, Value::Integer { n: 120, .. }),
+            "got {}",
+            mold_to_string(&v)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1419,7 +1618,11 @@ mod tests {
     #[test]
     fn vm_do_bind() {
         let v = run_vm("x: 0 do bind [x: 5] 'x x");
-        assert!(matches!(v, Value::Integer { n: 5, .. }), "got {}", mold_to_string(&v));
+        assert!(
+            matches!(v, Value::Integer { n: 5, .. }),
+            "got {}",
+            mold_to_string(&v)
+        );
     }
 
     /// `reduce [1 + 1 2 + 2]` -> `[2 4]` via VM. The `reduce` native calls
@@ -1554,9 +1757,8 @@ mod tests {
     /// mode. (plan3.md:756)
     #[test]
     fn vm_repeat_one_million_no_overflow() {
-        let (block, mut env, buf) = compile_for_vm_captured(
-            "repeat i 1000000 [ if i > 999999 [print i] ]",
-        );
+        let (block, mut env, buf) =
+            compile_for_vm_captured("repeat i 1000000 [ if i > 999999 [print i] ]");
         let v = run(block, &mut env).expect("VM run failed");
         assert!(matches!(v, Value::None), "got {}", mold_to_string(&v));
         assert_eq!(

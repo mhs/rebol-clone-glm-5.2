@@ -18,6 +18,58 @@ use crate::context::Context;
 use crate::value::{FuncDef, Series, Span, Symbol, Value};
 use crate::vm_ir::CompiledBlock;
 
+/// Bytecode compiler / VM-invariant failure kinds. Surfaced via
+/// [`EvalError::Compile`]. Lives in `red-core` (alongside `EvalError`) so
+/// `red-core::EvalError` can name it without depending on `red-eval`.
+/// `red-eval::vm::compiler::CompileError` re-uses this enum directly.
+///
+/// M31 (plan4): added `UnboundWord` and `MalformedSpec` (non-Block body) to
+/// replace `unreachable!()` in `compiler.rs`.
+#[derive(Clone, Debug)]
+pub enum CompileErrorKind {
+    /// A `Word` in operator position (followed by args) couldn't be resolved
+    /// to a native or a known user-func — so the compiler can't determine
+    /// arity. The tree-walker would defer this to runtime; M24 surfaces it.
+    UnboundInOperatorPosition,
+    /// `func`/`does`/`function` invoked with non-block args (malformed spec
+    /// or body). The runtime native reports a clearer error; M24 bails.
+    MalformedSpec,
+    /// Too few values remaining in the block to satisfy a native/func's arity.
+    ArityMismatch,
+    /// M31: a `Word` reached the compiler with `Binding::Unbound` and no
+    /// native/user-func match (replaces `unreachable!()` at `compiler.rs:772`).
+    /// Distinct from `UnboundInOperatorPosition`: this fires for any unbound
+    /// word (value position included), where the plan4 call site is
+    /// `emit_load`'s `Binding::Unbound` arm.
+    UnboundWord,
+    /// M31: a `MakeFunc` body was not a `Block!` (replaces `unreachable!()`
+    /// at `compiler.rs:1336`). The runtime `func` native already reports a
+    /// clearer error; this surfaces a compile-time bail-out instead of a
+    /// release panic.
+    MalformedBody,
+    /// M31: VM dispatch reached an instruction stream invariant violation
+    /// (e.g. pool index OOB, bad native index, EndRefine without MarkRefine,
+    /// ran off the instr stream). Used by `EvalError::Compile` for VM
+    /// invariant failures that previously panicked or silently returned
+    /// `none`.
+    VmInvariant(String),
+}
+
+impl fmt::Display for CompileErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CompileErrorKind::UnboundInOperatorPosition => {
+                write!(f, "unbound word in operator position")
+            }
+            CompileErrorKind::MalformedSpec => write!(f, "malformed function spec"),
+            CompileErrorKind::ArityMismatch => write!(f, "arity mismatch"),
+            CompileErrorKind::UnboundWord => write!(f, "unbound word"),
+            CompileErrorKind::MalformedBody => write!(f, "malformed function body"),
+            CompileErrorKind::VmInvariant(msg) => write!(f, "VM invariant violated: {msg}"),
+        }
+    }
+}
+
 /// Refinement arguments handed to a native at call time. Built by
 /// `dispatch_call` from the call site (path refinements and/or inline
 /// `/ref` flags), this is the refinement-facing counterpart to `args`.
@@ -312,6 +364,15 @@ pub enum EvalError {
     Quit(i32),
     /// Generic native-reported error with a message.
     Native { message: String, span: Span },
+    /// M31: bytecode compiler or VM dispatch invariant violated. Carries the
+    /// structured `CompileErrorKind` (so callers can match on it) and the
+    /// offending span. Replaces the prior `EvalError::Native { message:
+    /// format!("VM: ..."), .. }` ad-hoc sites in `vm.rs`, and the
+    /// `unreachable!()` panics in `compiler.rs`. The span may be
+    /// `Span::default()` (zero) for sites with no source position (e.g. a
+    /// pool index OOB in a synthetic block); `render_error` omits the
+    /// `file:line:col:` prefix in that case.
+    Compile { kind: CompileErrorKind, span: Span },
 }
 
 impl fmt::Display for EvalError {
@@ -348,6 +409,7 @@ impl fmt::Display for EvalError {
             }
             EvalError::Quit(code) => write!(f, "quit with exit code {code}"),
             EvalError::Native { message, .. } => write!(f, "{message}"),
+            EvalError::Compile { kind, .. } => write!(f, "compile error: {kind}"),
         }
     }
 }
@@ -362,7 +424,8 @@ impl EvalError {
             EvalError::UnboundWord { span, .. }
             | EvalError::TypeError { span, .. }
             | EvalError::Arity { span, .. }
-            | EvalError::Native { span, .. } => Some(*span),
+            | EvalError::Native { span, .. }
+            | EvalError::Compile { span, .. } => Some(*span),
             EvalError::Return(_)
             | EvalError::Break(_)
             | EvalError::Continue

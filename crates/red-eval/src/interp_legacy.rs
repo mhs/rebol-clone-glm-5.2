@@ -165,10 +165,7 @@ pub(crate) fn dispatch_block(block: &Value, env: &mut Env) -> Result<Value, Eval
 /// into `env.block_cache`, and returns it. Subsequent calls hit the cache
 /// (the cache key is `(Rc::as_ptr(&series.data), series.index)`, stable
 /// across `Rc` clones of the same series).
-pub(crate) fn resolve_compiled_block(
-    block: &Value,
-    env: &mut Env,
-) -> Option<Rc<CompiledBlock>> {
+pub(crate) fn resolve_compiled_block(block: &Value, env: &mut Env) -> Option<Rc<CompiledBlock>> {
     if env.mode == EvalMode::Walk {
         return None;
     }
@@ -212,9 +209,7 @@ pub(crate) fn dispatch_block_reduce(block: &Value, env: &mut Env) -> Result<Valu
         Value::Block { series, .. } | Value::Paren { series, .. } => series.clone(),
         _ => return Ok(block.clone()),
     };
-    if env.mode == EvalMode::Walk
-        || has_foreign_bindings(&series, &env.user_ctx)
-    {
+    if env.mode == EvalMode::Walk || has_foreign_bindings(&series, &env.user_ctx) {
         return reduce_walker(&series, env);
     }
     // M27: Env-level block cache (same identity key + M29 safety fix as
@@ -690,7 +685,11 @@ fn pick_path_index(current: &Value, n: i64, path_span: Span) -> Result<Value, Ev
 /// value *without* invoking any function encountered. Same as `walk_data_path`
 /// except the head is resolved as a `GetWord` (reads the slot / fetches the
 /// native Func without dispatching).
-pub(crate) fn eval_get_path(parts: &[Value], path_span: Span, env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn eval_get_path(
+    parts: &[Value],
+    path_span: Span,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
     if parts.is_empty() {
         return Err(EvalError::Native {
             message: "empty get-path".into(),
@@ -1059,8 +1058,8 @@ fn collect_call_args(
 /// error propagates.
 ///
 /// Slot layout (established by `bind_function_body`):
-///   `[param_0 .. param_{n-1}] [ref_0_flag] [ref_0_arg_0 ..] [ref_1_flag] ...`
-fn call_user_func(
+///   `[param_0 ... param_{n-1}] [ref_0_flag] [ref_0_arg_0 ..] [ref_1_flag] ...`
+pub(crate) fn call_user_func(
     fd: &Rc<FuncDef>,
     args: Vec<Value>,
     refs: &RefineArgs,

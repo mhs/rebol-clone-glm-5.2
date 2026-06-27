@@ -162,7 +162,10 @@ pub fn disasm(block: &CompiledBlock) -> String {
         let _ = write!(out, "{i:4}: ");
         match instr {
             Instr::Const(idx) => {
-                let v = pool.get(*idx as usize).map(|v| format!("{v:?}")).unwrap_or_else(|| "<bad pool idx>".into());
+                let v = pool
+                    .get(*idx as usize)
+                    .map(|v| format!("{v:?}"))
+                    .unwrap_or_else(|| "<bad pool idx>".into());
                 let _ = writeln!(out, "Const({idx})  ; {v}");
             }
             Instr::ConstInt(n) => {
@@ -181,7 +184,9 @@ pub fn disasm(block: &CompiledBlock) -> String {
                 let _ = writeln!(out, "LoadGlobal({s})");
             }
             Instr::LoadDynamic(idx) => {
-                let sym = block.symbols.get(*idx as usize)
+                let sym = block
+                    .symbols
+                    .get(*idx as usize)
                     .map(|s| format!("{:?}", s.as_str()))
                     .unwrap_or_else(|| "<bad sym idx>".into());
                 let _ = writeln!(out, "LoadDynamic({idx})  ; {sym}");
@@ -193,7 +198,9 @@ pub fn disasm(block: &CompiledBlock) -> String {
                 let _ = writeln!(out, "SetGlobal({s})");
             }
             Instr::SetDynamic(idx) => {
-                let sym = block.symbols.get(*idx as usize)
+                let sym = block
+                    .symbols
+                    .get(*idx as usize)
                     .map(|s| format!("{:?}", s.as_str()))
                     .unwrap_or_else(|| "<bad sym idx>".into());
                 let _ = writeln!(out, "SetDynamic({idx})  ; {sym}");
@@ -226,9 +233,12 @@ pub fn disasm(block: &CompiledBlock) -> String {
                 let _ = writeln!(out, "Return");
             }
             Instr::MakeFunc(s, b, fv_idx) => {
-                let fv = block.freevars_table.get(*fv_idx as usize)
+                let fv = block
+                    .freevars_table
+                    .get(*fv_idx as usize)
                     .map(|v| {
-                        let names: Vec<String> = v.iter().map(|f| format!("{:?}", f.as_str())).collect();
+                        let names: Vec<String> =
+                            v.iter().map(|f| format!("{:?}", f.as_str())).collect();
                         names.join(", ")
                     })
                     .unwrap_or_else(|| "<bad fv idx>".into());
@@ -247,7 +257,9 @@ pub fn disasm(block: &CompiledBlock) -> String {
                 let _ = writeln!(out, "SetPath");
             }
             Instr::MarkRefine(idx) => {
-                let sym = block.symbols.get(*idx as usize)
+                let sym = block
+                    .symbols
+                    .get(*idx as usize)
                     .map(|s| format!("{:?}", s.as_str()))
                     .unwrap_or_else(|| "<bad sym idx>".into());
                 let _ = writeln!(out, "MarkRefine({idx})  ; {sym}");

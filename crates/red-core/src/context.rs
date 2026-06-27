@@ -82,7 +82,16 @@ impl Context {
     /// bugs in debug builds; release builds skip the bounds check.
     ///
     /// # Safety
-    /// `idx` must be < `self.slots.borrow().len()`.
+    /// `idx` must be < `self.slots.borrow().len()`. The compiler's `Scope`
+    /// analysis proves this for every `LoadLocal`/`LoadGlobal`/`SetLocal`/
+    /// `SetGlobal` emission. Additionally, the slot must have been
+    /// initialized with a valid `Value` (no invalid bit patterns) —
+    /// `Context` only ever stores values produced by `Value` constructors
+    /// or by `RefCell::borrow_mut()` writes of other valid `Value`s, so
+    /// this invariant holds by construction. See the static assertion in
+    /// `crates/red-eval/src/vm/vm.rs` (`const _: () = assert!(size_of::<
+    /// Value>() == size_of::<MaybeUninit<Value>>());`) backing the
+    /// `from_raw_parts` cast in `call_native`.
     pub fn slot_value_unchecked(&self, idx: usize) -> Value {
         let slots = self.slots.borrow();
         debug_assert!(idx < slots.len(), "slot_value_unchecked OOB: {idx}");
@@ -103,7 +112,10 @@ impl Context {
     /// compiler-proven slot indices.
     ///
     /// # Safety
-    /// `idx` must be < `self.slots.borrow().len()`.
+    /// `idx` must be < `self.slots.borrow().len()`. The compiler's `Scope`
+    /// analysis proves this for every `SetLocal`/`SetGlobal` emission. See
+    /// `slot_value_unchecked` for the full "no invalid bit patterns"
+    /// invariant discussion.
     pub fn set_slot_unchecked(&self, idx: usize, val: Value) {
         let slots = self.slots.borrow();
         debug_assert!(idx < slots.len(), "set_slot_unchecked OOB: {idx}");

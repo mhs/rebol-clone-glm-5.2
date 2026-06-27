@@ -28,9 +28,7 @@ use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion
 use red_core::printer::mold_to_string;
 use red_core::{Context, Env, Series, Span, Symbol, Value};
 use red_eval::binding::bind_pass;
-use red_eval::{
-    eval, install_constants, register_natives, RunOptions,
-};
+use red_eval::{eval, install_constants, register_natives, RunOptions};
 
 // ---------------------------------------------------------------------------
 // Fixture discovery

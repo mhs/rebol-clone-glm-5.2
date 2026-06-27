@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{golden_fixtures, read_source, read_expected, BufferWriter};
+use common::{golden_fixtures, read_expected, read_source, BufferWriter};
 use red_eval::{render_error, run_source_with_exit_opts, RunOptions};
 use std::rc::Rc;
 

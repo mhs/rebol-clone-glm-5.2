@@ -22,7 +22,7 @@
 use std::cell::Cell;
 
 use red_core::value::{FuncDef, Symbol, Value};
-use red_core::{Env, EvalError, RefineArgs};
+use red_core::{CompileErrorKind, Env, EvalError, NativeFn, RefineArgs};
 
 use crate::natives::{arity_err, type_name};
 
@@ -145,18 +145,36 @@ fn negate_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<V
 // add / subtract / multiply / divide (prefix word aliases for + - * /)
 // ---------------------------------------------------------------------------
 
+/// M31: look up an infix native (`+`/`-`/`*`/`/`) by symbol, returning the
+/// `NativeFn`. Was four near-identical `.expect()`/`.unwrap()` sites — a
+/// registration-order bug (the infix native missing from `env.natives` when
+/// the prefix alias is invoked) panicked with an opaque message. Now returns
+/// a recoverable `EvalError::Compile` (VmInvariant) with the offending arg's
+/// span, so a misregistration surfaces as a located error rather than a
+/// release panic. Standardizes the mixed `expect`/`unwrap` style.
+fn infix_lookup(env: &Env, sym: &str, span: red_core::value::Span) -> Result<NativeFn, EvalError> {
+    let fd = env
+        .natives
+        .get(&Symbol::new(sym))
+        .ok_or_else(|| EvalError::Compile {
+            kind: CompileErrorKind::VmInvariant(format!(
+                "{sym:?} native not registered before math prefix alias"
+            )),
+            span,
+        })?;
+    fd.native.ok_or_else(|| EvalError::Compile {
+        kind: CompileErrorKind::VmInvariant(format!("{sym:?} native has no handler function")),
+        span,
+    })
+}
+
 fn add_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "add", 2, args.len()));
     }
     // Delegate to the infix `+` so string concatenation + numeric promotion
     // stay in one place.
-    let plus = env
-        .natives
-        .get(&Symbol::new("+"))
-        .expect("`+` native registered before math")
-        .native
-        .expect("`+` is a native");
+    let plus = infix_lookup(env, "+", args[0].span_or_default())?;
     plus(
         &[args[0].clone(), args[1].clone()],
         &RefineArgs::empty(),
@@ -168,12 +186,7 @@ fn subtract_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<
     if args.len() != 2 {
         return Err(arity_err(args, "subtract", 2, args.len()));
     }
-    let f = env
-        .natives
-        .get(&Symbol::new("-"))
-        .expect("`-` native")
-        .native
-        .unwrap();
+    let f = infix_lookup(env, "-", args[0].span_or_default())?;
     f(
         &[args[0].clone(), args[1].clone()],
         &RefineArgs::empty(),
@@ -185,12 +198,7 @@ fn multiply_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<
     if args.len() != 2 {
         return Err(arity_err(args, "multiply", 2, args.len()));
     }
-    let f = env
-        .natives
-        .get(&Symbol::new("*"))
-        .expect("`*` native")
-        .native
-        .unwrap();
+    let f = infix_lookup(env, "*", args[0].span_or_default())?;
     f(
         &[args[0].clone(), args[1].clone()],
         &RefineArgs::empty(),
@@ -202,12 +210,7 @@ fn divide_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Va
     if args.len() != 2 {
         return Err(arity_err(args, "divide", 2, args.len()));
     }
-    let f = env
-        .natives
-        .get(&Symbol::new("/"))
-        .expect("`/` native")
-        .native
-        .unwrap();
+    let f = infix_lookup(env, "/", args[0].span_or_default())?;
     f(
         &[args[0].clone(), args[1].clone()],
         &RefineArgs::empty(),
