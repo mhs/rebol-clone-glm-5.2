@@ -14,11 +14,6 @@ stats = []
 # (`cargo test --workspace --features force-walk`) and for debugging VM
 # divergences. Off in normal builds (the VM is the default since M29).
 force-walk = []
-# v0.4 JIT: adds `call_count`/`jit_fn` fields to `FuncDef` so the VM can
-# detect hot functions and compile them to native code via Cranelift. The
-# actual JIT compiler lives in `red-eval/src/vm/jit.rs` (behind red-eval's
-# `jit` feature). This feature only adds the fields to the data model.
-jit = []
 
 [dev-dependencies]
 proptest = "1"

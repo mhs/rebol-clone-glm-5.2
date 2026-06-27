@@ -350,7 +350,7 @@ pub fn register_string_natives(env: &mut Env) {
                 native: Some(f),
                 variadic: false,
                 infix: false,
-                                ..Default::default()
+                ..Default::default()
             }),
         );
     };
@@ -377,7 +377,7 @@ pub fn register_string_natives(env: &mut Env) {
                     native: Some(f),
                     variadic: false,
                     infix: false,
-                                        ..Default::default()
+                    ..Default::default()
                 }),
             );
         };

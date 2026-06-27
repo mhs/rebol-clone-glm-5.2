@@ -918,7 +918,7 @@ fn function_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<
         native: None,
         variadic: false,
         infix: false,
-                ..Default::default()
+        ..Default::default()
     };
     crate::binding::bind_function_body(&mut fd, &env.user_ctx);
     Ok(Value::Func(Rc::new(fd)))
@@ -1019,7 +1019,7 @@ pub(crate) fn func_native(
         native: None,
         variadic: false,
         infix: false,
-                ..Default::default()
+        ..Default::default()
     };
     crate::binding::bind_function_body(&mut fd, &env.user_ctx);
     Ok(Value::Func(Rc::new(fd)))
@@ -1041,7 +1041,7 @@ fn does_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
         native: None,
         variadic: false,
         infix: false,
-                ..Default::default()
+        ..Default::default()
     };
     crate::binding::bind_function_body(&mut fd, &env.user_ctx);
     Ok(Value::Func(Rc::new(fd)))
@@ -1476,7 +1476,7 @@ fn fixed_native(f: NativeFn, arity: usize) -> Rc<FuncDef> {
         native: Some(f),
         variadic: false,
         infix: false,
-                ..Default::default()
+        ..Default::default()
     })
 }
 
@@ -1489,7 +1489,7 @@ fn infix_native(f: NativeFn, arity: usize) -> Rc<FuncDef> {
         native: Some(f),
         variadic: false,
         infix: true,
-                ..Default::default()
+        ..Default::default()
     })
 }
 
@@ -1501,7 +1501,7 @@ fn variadic_native(f: NativeFn) -> Rc<FuncDef> {
         native: Some(f),
         variadic: true,
         infix: false,
-                ..Default::default()
+        ..Default::default()
     })
 }
 
@@ -1531,7 +1531,7 @@ fn reg_refined(env: &mut Env, name: &str, f: NativeFn, arity: usize, refines: &[
             native: Some(f),
             variadic: false,
             infix: false,
-                        ..Default::default()
+            ..Default::default()
         }),
     );
 }

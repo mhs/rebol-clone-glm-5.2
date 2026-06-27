@@ -161,22 +161,6 @@ pub struct FuncDef {
     pub native: Option<NativeFn>,
     pub variadic: bool,
     pub infix: bool,
-    /// v0.4 JIT: call count for hot-function detection. Incremented by
-    /// `call_user_global` on each call. When it crosses the JIT threshold
-    /// (defined in `vm::jit`), the func body is compiled to native code via
-    /// Cranelift. Only present under the `jit` feature; absent otherwise.
-    #[cfg(feature = "jit")]
-    pub call_count: u32,
-    /// v0.4 JIT: native code pointer for the JIT-compiled version of this
-    /// func body. `None` until the call count crosses the threshold and
-    /// `jit::compile_func` runs. The pointer is an `extern "C" fn(*mut Env,
-    /// i64) -> i64` — Integer-only specialization. `call_user_global` checks
-    /// this field and, if `Some`, calls the native fn directly (after
-    /// verifying all args are `Integer`). Falls back to the bytecode
-    /// interpreter for non-Integer args or unsupported instrs. Only present
-    /// under the `jit` feature.
-    #[cfg(feature = "jit")]
-    pub jit_fn: Option<usize>,
 }
 
 impl FuncDef {

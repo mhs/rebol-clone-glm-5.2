@@ -161,118 +161,6 @@ pub fn run_reduce(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalErro
 /// iterations = 100M refcount ops). Invalidated by `invalidate_native_index`
 /// when `env.natives` is mutated (at `register_natives` time, before any VM
 /// run).
-
-/// v0.4 JIT: re-enter the bytecode interpreter for a non-self user-func call
-/// from JIT'd code. The trampoline `jit_vm_call_user` calls this with the
-/// slot index and i64 args. Reads the func from the global slot, pushes a
-/// frame, runs the body via `vm::run`, and returns the result as a `Value`.
-#[cfg(feature = "jit")]
-pub fn jit_reenter_interpreter(
-    env: &mut Env,
-    slot: usize,
-    argc: usize,
-    args: &[i64],
-) -> Result<Value, EvalError> {
-    let func_val = env.user_ctx.slot_value_unchecked(slot);
-    let fd = match func_val {
-        Value::Func(fd) => fd,
-        _ => return Ok(Value::None),
-    };
-    let compiled = ensure_compiled_static(env, &fd, slot, argc)?;
-    // Build locals from args.
-    let n_locals = compiled.n_locals.max(fd.params.len());
-    let mut locals = env.vm_locals_pool.pop().unwrap_or_default();
-    locals.clear();
-    locals.resize(n_locals, Value::None);
-    for (i, &n) in args.iter().enumerate() {
-        if i < locals.len() {
-            locals[i] = Value::integer(n);
-        }
-    }
-    let frame = red_core::vm_ir::Frame {
-        func: Some(Rc::clone(&fd)),
-        locals,
-        depth: 1,
-        block: compiled,
-        pc: 0,
-    };
-    // Run the callee via a fresh Vm (same pool-drain pattern as `run`).
-    let natives_by_idx = build_natives_by_idx(env);
-    let frames_pool = std::mem::take(&mut env.vm_frames_pool);
-    let stack_pool = std::mem::take(&mut env.vm_stack_pool);
-    let mut vm = Vm {
-        env,
-        frames: frames_pool,
-        stack: stack_pool,
-        natives_by_idx,
-        ref_marks: Vec::new(),
-        pending_refs: Vec::new(),
-        cached_block: None,
-        cached_instrs: None,
-        cached_frame_gen: 0,
-        frame_gen: 0,
-    };
-    vm.frames.clear();
-    vm.stack.clear();
-    vm.frames.push(frame);
-    vm.frame_gen = vm.frame_gen.wrapping_add(1);
-    let result = vm.run_loop();
-    let mut f = std::mem::take(&mut vm.frames);
-    let mut s = std::mem::take(&mut vm.stack);
-    f.clear();
-    s.clear();
-    drop(vm);
-    env.vm_frames_pool = f;
-    env.vm_stack_pool = s;
-    result
-}
-
-/// v0.4 JIT: standalone `ensure_compiled` that doesn't need a `Vm` context.
-/// Used by `jit_reenter_interpreter`.
-#[cfg(feature = "jit")]
-fn ensure_compiled_static(
-    env: &mut Env,
-    fd: &Rc<FuncDef>,
-    slot: usize,
-    argc: usize,
-) -> Result<Rc<CompiledBlock>, EvalError> {
-    if let Some(c) = &fd.compiled {
-        return Ok(c.clone());
-    }
-    let key = Rc::as_ptr(fd) as usize;
-    if let Some(c) = env.func_cache.get(&key).cloned() {
-        return Ok(c);
-    }
-    let registry = crate::vm::compiler::NativeRegistry::from_env(env);
-    let parent_scope = crate::vm::lex::Scope::root(&env.user_ctx);
-    let mut child = crate::vm::lex::Scope::child(&parent_scope);
-    for p in &fd.params {
-        child.slot_index_pub(p.clone());
-    }
-    for (ref_name, ref_args) in &fd.refinements {
-        child.slot_index_pub(ref_name.clone());
-        for arg in ref_args {
-            child.slot_index_pub(arg.clone());
-        }
-    }
-    for local in &fd.locals {
-        child.slot_index_pub(local.clone());
-    }
-    let compiled = crate::vm::compiler::compile_block_for_func_body(
-        &fd.body,
-        &mut child,
-        &registry,
-        (slot as u32, argc),
-    )
-    .map_err(|e| EvalError::Native {
-        message: format!("JIT reenter: compile error: {:?}", e.kind),
-        span: e.span,
-    })?;
-    let compiled = Rc::new(compiled);
-    env.func_cache.insert(key, compiled.clone());
-    Ok(compiled)
-}
-
 fn build_natives_by_idx(env: &mut Env) -> Rc<Vec<Rc<FuncDef>>> {
     if let Some(cached) = &env.natives_by_idx {
         // One Rc bump — no `Vec` alloc, no per-native `Rc::clone`.
@@ -1083,105 +971,6 @@ impl<'env> Vm<'env> {
     /// `v` onto the caller's stack.
     fn call_user(&mut self, slot: usize, argc: usize) -> Result<(), EvalError> {
         let (fd, compiled, locals) = self.prepare_call(slot, argc, false)?;
-        self.push_call_frame(fd, compiled, locals);
-        Ok(())
-    }
-
-    /// M30.3.4: like `call_user` but the func is known to be in a global slot.
-    /// Skips the `frames.last().and_then(...)` local-slot check in `prepare_call`.
-    #[cfg(not(feature = "jit"))]
-    fn call_user_global(&mut self, slot: usize, argc: usize) -> Result<(), EvalError> {
-        let (fd, compiled, locals) = self.prepare_call(slot, argc, true)?;
-        self.push_call_frame(fd, compiled, locals);
-        Ok(())
-    }
-
-    /// v0.4 JIT: like `call_user_global` but with a JIT fast path. If the
-    /// func has been JIT-compiled (`jit_fn: Some`) and all args are `Integer`,
-    /// calls the native fn directly — no frame push, no `Rc` ops, no `Value`
-    /// clones. Falls back to the interpreter for non-Integer args or funcs
-    /// that haven't been JIT'd yet. Also handles call-counting for hot-function
-    /// detection.
-    #[cfg(feature = "jit")]
-    fn call_user_global(&mut self, slot: usize, argc: usize) -> Result<(), EvalError> {
-        // Peek at the func value without full prepare_call.
-        let func_val = self.env.user_ctx.slot_value_unchecked(slot);
-        let fd = match &func_val {
-            Value::Func(fd) => Rc::clone(fd),
-            _ => {
-                // Not a function — fall back to prepare_call which will error.
-                let (fd, compiled, locals) = self.prepare_call(slot, argc, true)?;
-                self.push_call_frame(fd, compiled, locals);
-                return Ok(());
-            }
-        };
-
-        // Increment call count and maybe trigger JIT compilation.
-        let should_jit = fd.jit_fn.is_none() && fd.call_count >= crate::vm::jit::JIT_THRESHOLD;
-        if should_jit {
-            // Try to JIT-compile the func. If it fails (unsupported instrs),
-            // set call_count to u32::MAX so we never try again.
-            let compiled = self.ensure_compiled(&fd, slot, argc)?;
-            match crate::vm::jit::try_compile(&fd, &compiled, slot, self.env) {
-                Ok(jit_fn) => {
-                    // Store the JIT'd fn pointer. We need &mut FuncDef but
-                    // only have Rc<FuncDef>. Use unsafe to mutate through the
-                    // Rc — safe because we're single-threaded and the FuncDef
-                    // is only mutated here (no other &mut references exist).
-                    let fd_mut: *mut FuncDef = Rc::as_ptr(&fd) as *mut FuncDef;
-                    unsafe {
-                        (*fd_mut).jit_fn = Some(jit_fn as usize);
-                    }
-                }
-                Err(_) => {
-                    let fd_mut: *mut FuncDef = Rc::as_ptr(&fd) as *mut FuncDef;
-                    unsafe {
-                        (*fd_mut).call_count = u32::MAX;
-                    }
-                }
-            }
-        }
-
-        // Bump call count (only if not already at MAX).
-        if fd.call_count < u32::MAX {
-            let fd_mut: *mut FuncDef = Rc::as_ptr(&fd) as *mut FuncDef;
-            unsafe {
-                (*fd_mut).call_count += 1;
-            }
-        }
-
-        // JIT fast path: if the func has a JIT'd fn pointer and all args are Integer.
-        if let Some(jit_fn_usize) = fd.jit_fn {
-            if argc == 1 {
-                // Check the arg on the stack is an Integer.
-                let len = self.stack.len();
-                if len >= 1 {
-                    if let Value::Integer { n, .. } = &self.stack[len - 1] {
-                        let n = *n;
-                        // Pop the arg.
-                        self.stack.truncate(len - 1);
-                        // Call the JIT'd function.
-                        let jit_fn: crate::vm::jit::JitFn =
-                            unsafe { std::mem::transmute(jit_fn_usize) };
-                        let env_ptr: *mut Env = self.env;
-                        let result = unsafe { jit_fn(env_ptr, n) };
-                        self.stack.push(Value::integer(result));
-                        return Ok(());
-                    }
-                }
-            }
-        }
-
-        // Interpreter fallback.
-        let (fd, compiled, locals) = self.prepare_call(slot, argc, true)?;
-        self.push_call_frame(fd, compiled, locals);
-        Ok(())
-    }
-
-    /// Push a call frame (shared by `call_user`, the JIT fallback path, and
-    /// the non-JIT `call_user_global`).
-    #[allow(dead_code)]
-    fn push_call_frame(&mut self, fd: Rc<FuncDef>, compiled: Rc<CompiledBlock>, locals: Vec<Value>) {
         self.frames.push(Frame {
             func: Some(Rc::clone(&fd)),
             locals,
@@ -1194,6 +983,26 @@ impl<'env> Vm<'env> {
         {
             self.env.record_frame_push();
         }
+        Ok(())
+    }
+
+    /// M30.3.4: like `call_user` but the func is known to be in a global slot.
+    /// Skips the `frames.last().and_then(...)` local-slot check in `prepare_call`.
+    fn call_user_global(&mut self, slot: usize, argc: usize) -> Result<(), EvalError> {
+        let (fd, compiled, locals) = self.prepare_call(slot, argc, true)?;
+        self.frames.push(Frame {
+            func: Some(Rc::clone(&fd)),
+            locals,
+            depth: self.frames.last().map(|f| f.depth + 1).unwrap_or(1),
+            block: compiled,
+            pc: 0,
+        });
+        self.frame_gen = self.frame_gen.wrapping_add(1);
+        #[cfg(feature = "stats")]
+        {
+            self.env.record_frame_push();
+        }
+        Ok(())
     }
 
     /// M28: tail-call. Like `call_user`, but instead of pushing a new frame,
@@ -1390,8 +1199,7 @@ impl<'env> Vm<'env> {
             native: None,
             variadic: false,
             infix: false,
-            ..Default::default()
-                    };
+        };
         bind_function_body(&mut fd, &self.env.user_ctx);
         Ok(fd)
     }
