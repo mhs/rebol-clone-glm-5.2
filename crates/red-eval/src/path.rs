@@ -50,15 +50,15 @@ fn path_from_parts(parts: Vec<Value>, variant: PathVariant) -> Value {
     match variant {
         PathVariant::Path => Value::Path {
             parts,
-            span: Span::new(0, 0),
+            span: Span::default(),
         },
         PathVariant::GetPath => Value::GetPath {
             parts,
-            span: Span::new(0, 0),
+            span: Span::default(),
         },
         PathVariant::LitPath => Value::LitPath {
             parts,
-            span: Span::new(0, 0),
+            span: Span::default(),
         },
     }
 }

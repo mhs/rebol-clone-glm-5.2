@@ -31,10 +31,7 @@ pub(crate) fn get_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> R
             .iter()
             .map(|w| get_one(w, env, w.span_or_default()))
             .collect::<Result<_, _>>()?;
-        return Ok(Value::Block {
-            series: Series::new(results),
-            span: Span::new(0, 0),
-        });
+        return Ok(Value::block(Series::new(results)));
     }
     get_one(&args[0], env, args[0].span_or_default())
 }
@@ -245,10 +242,7 @@ pub(crate) fn use_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> R
     crate::binding::attach_use_bindings(&rebound, &child_rc, &env.user_ctx);
 
     let saved = std::mem::replace(&mut env.user_ctx, child_rc);
-    let block = Value::Block {
-        series: rebound,
-        span: Span::new(0, 0),
-    };
+    let block = Value::block(rebound);
     // `use`'s rebound block carries `Binding::Local(child_rc, _)` for the
     // declared locals — foreign w.r.t. `env.user_ctx`. `dispatch_block`
     // detects that via `has_foreign_bindings` and routes to the walker,
@@ -302,10 +296,7 @@ pub(crate) fn bind_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> 
         Value::Block { series, .. } => {
             let rebound = crate::binding::deep_clone_series(series);
             crate::binding::rebind_to_context(&rebound, &env.user_ctx, &all_names);
-            Ok(Value::Block {
-                series: rebound,
-                span: Span::new(0, 0),
-            })
+            Ok(Value::block(rebound))
         }
         // Function form (M27): clone the FuncDef, deep-clone its body, rebind
         // body words, invalidate the original's VM cache entry. Returns a new

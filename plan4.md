@@ -250,7 +250,7 @@ until M31–M35 land; treat as opt-in.
 
 Lowest priority; bundle into a single cleanup commit at the end.
 
-- [ ] **Standardize "no span" idiom** *(low)*
+- [x] **Standardize "no span" idiom** *(low)*
       Replace `Span::new(0, 0)` with `Span::default()` at the
       error-construction sites that remain after M31 (e.g.
       `crates/red-core/src/value.rs:368` constructors,
@@ -258,17 +258,17 @@ Lowest priority; bundle into a single cleanup commit at the end.
       wrappers, `crates/red-eval/src/interp.rs:89, 112` inline `Value::Block`
       constructions). Use `Value::block(series)` shorthand instead of inline
       `Value::Block { series, span: Span::new(0,0) }`.
-- [ ] **Use `Value::block(series)` shorthand consistently** *(low)*
+- [x] **Use `Value::block(series)` shorthand consistently** *(low)*
       `crates/red-eval/src/interp_legacy.rs:1104-1107`, `:1378-1381`,
       `crates/red-eval/src/interp.rs:89-92`, `:112-115` construct `Value::Block`
       inline. Use the existing `Value::block` constructor (`value.rs:422-428`).
-- [ ] **Add a compile-time assertion for `INLINE_ARGS_CAP`** *(low)*
+- [x] **Add a compile-time assertion for `INLINE_ARGS_CAP`** *(low)*
       `crates/red-eval/src/vm/vm.rs:50` — `const INLINE_ARGS_CAP: usize = 8;`.
       Add a `const _: () = { ... };` or a test iterating `env.natives`
       asserting no native exceeds the cap, so a future higher-arity native
       trips a build/test failure rather than silently falling back to heap
       allocation.
-- [ ] **Document the `Rc::as_ptr` ABA mitigation** *(low)*
+- [x] **Document the `Rc::as_ptr` ABA mitigation** *(low)*
       `crates/red-core/src/env.rs:121, 129` and
       `crates/red-eval/src/interp_legacy.rs:98-107`. The M29 `source_span`
       secondary check is documented in-line but not in `architecture.md`. Add

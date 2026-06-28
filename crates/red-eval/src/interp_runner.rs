@@ -13,7 +13,7 @@
 
 use red_core::lexer;
 use red_core::parser::parse_program;
-use red_core::value::{Series, Span, Symbol, Value};
+use red_core::value::{Series, Symbol, Value};
 use red_core::{Context, Env, Error, EvalError, EvalMode};
 
 use crate::binding::bind_pass;
@@ -158,10 +158,7 @@ fn run_series_inner_opts(
             }
         }
     }
-    let block = Value::Block {
-        series: body,
-        span: Span::new(0, 0),
-    };
+    let block = Value::block(body);
     // Dispatch on `env.mode`: `Walk` → tree-walker (`eval`), `Vm` →
     // compile-on-demand + `vm::run`. `dispatch_block` catches
     // `EvalError::Quit` via the VM's own `run` wrapper (vm.rs catches

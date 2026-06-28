@@ -365,7 +365,7 @@ impl Value {
         Value::Word {
             sym: Symbol::new(s),
             binding: Binding::Unbound,
-            span: Span::new(0, 0),
+            span: Span::default(),
         }
     }
 
@@ -374,7 +374,7 @@ impl Value {
         Value::SetWord {
             sym: Symbol::new(s),
             binding: Binding::Unbound,
-            span: Span::new(0, 0),
+            span: Span::default(),
         }
     }
 
@@ -383,7 +383,7 @@ impl Value {
         Value::GetWord {
             sym: Symbol::new(s),
             binding: Binding::Unbound,
-            span: Span::new(0, 0),
+            span: Span::default(),
         }
     }
 
@@ -391,7 +391,7 @@ impl Value {
     pub fn lit_word(s: &str) -> Self {
         Value::LitWord {
             sym: Symbol::new(s),
-            span: Span::new(0, 0),
+            span: Span::default(),
         }
     }
 
@@ -399,7 +399,7 @@ impl Value {
     pub fn integer(n: i64) -> Self {
         Value::Integer {
             n,
-            span: Span::new(0, 0),
+            span: Span::default(),
         }
     }
 
@@ -407,7 +407,7 @@ impl Value {
     pub fn float(f: f64) -> Self {
         Value::Float {
             f,
-            span: Span::new(0, 0),
+            span: Span::default(),
         }
     }
 
@@ -415,7 +415,7 @@ impl Value {
     pub fn string(s: impl Into<Rc<str>>) -> Self {
         Value::String {
             s: s.into(),
-            span: Span::new(0, 0),
+            span: Span::default(),
         }
     }
 
@@ -423,7 +423,7 @@ impl Value {
     pub fn block(series: Series) -> Self {
         Value::Block {
             series,
-            span: Span::new(0, 0),
+            span: Span::default(),
         }
     }
 
@@ -431,7 +431,7 @@ impl Value {
     pub fn paren(series: Series) -> Self {
         Value::Paren {
             series,
-            span: Span::new(0, 0),
+            span: Span::default(),
         }
     }
 
@@ -440,7 +440,7 @@ impl Value {
     pub fn path(parts: Vec<Value>) -> Self {
         Value::Path {
             parts,
-            span: Span::new(0, 0),
+            span: Span::default(),
         }
     }
 
@@ -448,7 +448,7 @@ impl Value {
     pub fn get_path(parts: Vec<Value>) -> Self {
         Value::GetPath {
             parts,
-            span: Span::new(0, 0),
+            span: Span::default(),
         }
     }
 
@@ -456,7 +456,7 @@ impl Value {
     pub fn lit_path(parts: Vec<Value>) -> Self {
         Value::LitPath {
             parts,
-            span: Span::new(0, 0),
+            span: Span::default(),
         }
     }
 
@@ -464,7 +464,7 @@ impl Value {
     pub fn set_path(parts: Vec<Value>) -> Self {
         Value::SetPath {
             parts,
-            span: Span::new(0, 0),
+            span: Span::default(),
         }
     }
 
@@ -472,7 +472,7 @@ impl Value {
     pub fn refinement(s: &str) -> Self {
         Value::Refinement {
             sym: Symbol::new(s),
-            span: Span::new(0, 0),
+            span: Span::default(),
         }
     }
 
@@ -480,7 +480,7 @@ impl Value {
     pub fn file(s: impl Into<Rc<str>>) -> Self {
         Value::File {
             path: s.into(),
-            span: Span::new(0, 0),
+            span: Span::default(),
         }
     }
 
@@ -488,7 +488,7 @@ impl Value {
     pub fn url(s: impl Into<Rc<str>>) -> Self {
         Value::Url {
             url: s.into(),
-            span: Span::new(0, 0),
+            span: Span::default(),
         }
     }
 
@@ -898,7 +898,7 @@ mod tests {
             freevars_table: Rc::from(&Vec::<Vec<Symbol>>::new()[..]),
             n_locals: 0,
             freevars: Vec::new(),
-            source_span: Span::new(0, 0),
+            source_span: Span::default(),
             needs_rebind: false,
             arity: 0,
         }

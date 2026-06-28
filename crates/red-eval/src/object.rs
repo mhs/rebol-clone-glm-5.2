@@ -110,10 +110,7 @@ pub fn make_object(spec: &Value, env: &mut Env) -> Result<Value, EvalError> {
     // Evaluate the spec: SetWords write values, `does`/`func` create methods
     // (their bodies bind field refs to Local(obj_ctx, idx) via
     // `bind_function_body` which reads `env.user_ctx`).
-    let spec_block = Value::Block {
-        series: spec_series,
-        span: Span::new(0, 0),
-    };
+    let spec_block = Value::block(spec_series);
     let result = eval(&spec_block, env);
 
     // Restore caller's user_ctx.
@@ -227,13 +224,10 @@ fn words_of_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result
         .map(|s| Value::Word {
             sym: s,
             binding: Binding::Unbound,
-            span: Span::new(0, 0),
+            span: Span::default(),
         })
         .collect();
-    Ok(Value::Block {
-        series: Series::new(words),
-        span: Span::new(0, 0),
-    })
+    Ok(Value::block(Series::new(words)))
 }
 
 /// `values-of object` — block of the object's slot values.
@@ -263,10 +257,7 @@ fn values_of_native(
         .filter(|s| s.as_str() != "self")
         .filter_map(|s| borrow.ctx.get(&s))
         .collect();
-    Ok(Value::Block {
-        series: Series::new(values),
-        span: Span::new(0, 0),
-    })
+    Ok(Value::block(Series::new(values)))
 }
 
 /// `reflect object 'words` / `'values` — alias dispatch for words/values.

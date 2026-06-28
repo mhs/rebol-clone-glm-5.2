@@ -1505,6 +1505,29 @@ mod tests {
         run(block, &mut env).expect("VM run failed")
     }
 
+    /// M37: every registered native's fixed arity fits within
+    /// `INLINE_ARGS_CAP`, so `call_native` takes the stack-allocated
+    /// `[MaybeUninit<Value>; INLINE_ARGS_CAP]` fast path (no heap
+    /// allocation). A future higher-arity native would silently fall back to
+    /// `to_vec()`; this test trips in that case, forcing a deliberate cap
+    /// bump rather than an unnoticed regression. Variadic natives collect
+    /// args via `LoadDynamic`, not via `argc`, so they're exempt.
+    #[test]
+    fn all_natives_fit_inline_args_cap() {
+        let ctx = Context::new();
+        let mut env = Env::new_with_output(Rc::new(ctx), Box::new(std::io::sink()));
+        register_natives(&mut env);
+        for fd in env.natives.values() {
+            assert!(
+                fd.variadic || fd.params.len() <= INLINE_ARGS_CAP,
+                "native {:?} has fixed arity {} > INLINE_ARGS_CAP {}",
+                fd.params,
+                fd.params.len(),
+                INLINE_ARGS_CAP
+            );
+        }
+    }
+
     /// VM runs `5` -> `Integer(5)`. (plan3.md:461)
     #[test]
     fn vm_runs_literal() {

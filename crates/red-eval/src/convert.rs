@@ -192,21 +192,21 @@ fn mk_word(kind: WordKind, sym: Symbol) -> Value {
         WordKind::Word => Value::Word {
             sym,
             binding: red_core::value::Binding::Unbound,
-            span: Span::new(0, 0),
+            span: Span::default(),
         },
         WordKind::SetWord => Value::SetWord {
             sym,
             binding: red_core::value::Binding::Unbound,
-            span: Span::new(0, 0),
+            span: Span::default(),
         },
         WordKind::GetWord => Value::GetWord {
             sym,
             binding: red_core::value::Binding::Unbound,
-            span: Span::new(0, 0),
+            span: Span::default(),
         },
         WordKind::LitWord => Value::LitWord {
             sym,
-            span: Span::new(0, 0),
+            span: Span::default(),
         },
     }
 }

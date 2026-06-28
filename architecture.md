@@ -770,6 +770,29 @@ main levers:
   need surfaced).
 - **Sharing & mutation**: `Rc<RefCell<...>>` for `Series` data and Context
   slots. No GC, no borrowing across the eval loop.
+- **VM cache identity (ABA mitigation)**: the VM's two compiled-block
+  caches key on `Rc::as_ptr` (the raw allocation address): `func_cache`
+  by `Rc::as_ptr(fd) as usize` for function bodies (M27), `block_cache`
+  by `(Rc::as_ptr(&series.data) as usize, series.index)` for `do`-ed /
+  loop-body blocks (M27). Address-keyed caches are fast (no `Rc::clone`
+  or hashing on lookup) but carry an ABA risk: if the `Rc` is dropped and
+  the allocator reuses the address for a new allocation, the cache would
+  return a stale `CompiledBlock`. This was the root cause of the M29
+  object-inheritance bug (two `make object!` spec blocks got the same
+  `Rc::as_ptr` after the first was dropped, so the second ran the first's
+  compiled form with wrong slot indices). Mitigations:
+  - `block_cache` does a secondary `source_span` equality check on hit
+    (in `interp_walker.rs:resolve_compiled_block`); two distinct source
+    blocks almost always differ in span, so address reuse is caught and
+    the block is recompiled. Cheap O(1) structural check.
+  - `func_cache` is safe without a secondary check: a `Value::Func(fd)`
+    stored in `user_ctx` holds the `Rc<FuncDef>` alive for the func's
+    lifetime, so the address can't be reused while the func is
+    reachable.
+  - `bind`/`use` deep-clone the `Series` (a fresh `Rc` allocation →
+    different identity → cache miss, recompile), so re-binding
+    invalidates implicitly; `user_ctx` slots are append-only so cached
+    `LoadGlobal(slot)` indices stay valid.
 - **Single-threaded**: no `Send`/`Sync` requirements; `Env` is `!Send`.
 - **No precedence parsing**: Red is prefix/eager, so the parser has no
   expression grammar — every value is one token (or one bracketed group).

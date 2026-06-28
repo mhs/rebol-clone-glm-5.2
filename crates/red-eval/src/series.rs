@@ -597,7 +597,7 @@ fn copy(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eval
         data[series.index.min(data.len())..end].to_vec()
     };
     let fresh = Series::new(cloned);
-    Ok(mk_series(fresh, Span::new(0, 0), is_paren))
+    Ok(mk_series(fresh, Span::default(), is_paren))
 }
 
 // ---------------------------------------------------------------------------

@@ -1361,10 +1361,7 @@ fn compile_make_func(
             });
         }
         body_val = data[*i].clone();
-        spec_val = Value::Block {
-            series: Series::empty(),
-            span: Span::new(0, 0),
-        };
+        spec_val = Value::block(Series::empty());
     } else {
         if *i + 1 >= data.len() {
             return Err(CompileError {

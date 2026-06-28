@@ -1098,10 +1098,7 @@ pub(crate) fn call_user_func(
     {
         env.record_frame_push();
     }
-    let body_block = Value::Block {
-        series: fd.body.clone(),
-        span: Span::new(0, 0),
-    };
+    let body_block = Value::block(fd.body.clone());
     // M29: call the walker's own `eval` directly (NOT `interp::eval` which
     // dispatches on `env.mode`). In VM mode, the top-level body may fall
     // back to the walker (compile error or `needs_rebind`). When the walker

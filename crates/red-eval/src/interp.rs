@@ -86,10 +86,7 @@ mod tests {
         crate::natives::register_natives(&mut env);
         // Default mode is Vm (no force-walk feature).
         assert_eq!(env.mode, EvalMode::Vm);
-        let block = Value::Block {
-            series: body,
-            span: red_core::Span::new(0, 0),
-        };
+        let block = Value::block(body);
         let result = eval(&block, &mut env).expect("eval failed");
         match result {
             Value::Integer { n, .. } => assert_eq!(n, 3),
@@ -109,10 +106,7 @@ mod tests {
         let mut env = Env::new_with_output(ctx_rc, Box::new(std::io::sink()));
         crate::natives::register_natives(&mut env);
         assert_eq!(env.mode, EvalMode::Walk);
-        let block = Value::Block {
-            series: body,
-            span: red_core::Span::new(0, 0),
-        };
+        let block = Value::block(body);
         let result = eval(&block, &mut env).expect("eval failed");
         match result {
             Value::Integer { n, .. } => assert_eq!(n, 3),
