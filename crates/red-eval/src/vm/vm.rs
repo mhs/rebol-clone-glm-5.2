@@ -105,7 +105,6 @@ pub fn run(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
         pending_refs: Vec::new(),
         cached_block: None,
         cached_instrs: None,
-        cached_spans: None,
         cached_frame_gen: 0,
         frame_gen: 0,
     };
@@ -156,7 +155,6 @@ pub fn run_reduce(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalErro
         pending_refs: Vec::new(),
         cached_block: None,
         cached_instrs: None,
-        cached_spans: None,
         cached_frame_gen: 0,
         frame_gen: 0,
     };
@@ -238,12 +236,6 @@ struct Vm<'env> {
     cached_block: Option<Rc<CompiledBlock>>,
     /// Cached clone of the current top frame's `instrs` slice.
     cached_instrs: Option<Rc<[Instr]>>,
-    /// M31: cached clone of the current top frame's per-instr `spans` slice
-    /// (parallel to `cached_instrs`). Refreshed alongside `cached_instrs` in
-    /// `refresh_cache`. Indexed by `pc` to attribute VM-raised errors to the
-    /// offending instr's source position (replacing the block-level
-    /// `current_span()` fallback).
-    cached_spans: Option<Rc<[Span]>>,
     /// `frame_gen` value at the time the cache was last refreshed.
     cached_frame_gen: u64,
     /// Bumped on every frame push/pop/overwrite. Wrapping is safe — the
@@ -275,11 +267,8 @@ impl<'env> Vm<'env> {
             // M30.3.1: `block` is `Rc<CompiledBlock>` — one Rc bump (was 4 + Vec alloc).
             let block = Rc::clone(&self.frames[frame_idx].block);
             let instrs = block.instrs.clone();
-            // M31: cache the per-instr spans slice too (parallel to `instrs`).
-            let spans = block.spans.clone();
             self.cached_block = Some(block);
             self.cached_instrs = Some(instrs);
-            self.cached_spans = Some(spans);
             self.cached_frame_gen = self.frame_gen;
         }
         frame_idx
@@ -305,19 +294,28 @@ impl<'env> Vm<'env> {
             .unwrap_or_default()
     }
 
-    /// M31: per-instr span at `pc`. The dispatch loops call this with the
-    /// current `pc` (before the pre-dispatch advance) to attribute errors to
-    /// the offending instr. Falls back to `current_span()` (block-level) if
-    /// the spans table is missing or `pc` is OOB (shouldn't happen for
-    /// well-formed blocks — the compiler always emits one span per instr).
-    #[inline]
+    /// M31: per-instr span at `pc`. Looks up `cached_block.spans[pc]`
+    /// (the per-instr span table populated by the compiler). Falls back to
+    /// `current_span()` (block-level) if the spans table is missing or `pc`
+    /// is OOB. Cold path — only called on error.
+    #[inline(never)]
     fn span_at(&self, pc: usize) -> Span {
-        if let Some(spans) = self.cached_spans.as_ref() {
-            if let Some(s) = spans.get(pc) {
+        if let Some(block) = &self.cached_block {
+            if let Some(s) = block.spans.get(pc) {
                 return *s;
             }
         }
         self.current_span()
+    }
+
+    /// M31: span of the instr that just executed (at `pc - 1` of the current
+    /// frame, since `pc` was advanced before dispatch). Cold path — only
+    /// called on error. Avoids paying the per-instr `span_at` cost on the hot
+    /// path (the error arms are rare relative to successful instr dispatch).
+    #[inline(never)]
+    fn err_span(&self, frame_idx: usize) -> Span {
+        let pc = self.frames[frame_idx].pc;
+        self.span_at(pc.saturating_sub(1))
     }
 
     fn run_loop(&mut self) -> Result<Value, EvalError> {
@@ -352,18 +350,11 @@ impl<'env> Vm<'env> {
             // M30.1.B: `Instr` is `Copy` (16 bytes), so this is a bitwise
             // copy — no `Rc` refcount ops, no borrow-extension across the match.
             let instr = instrs[pc];
-            // M31: capture the per-instr span before advancing `pc` so error
-            // arms attribute to the offending instr, not the next one.
-            let instr_span = self.span_at(pc);
             // Advance pc before dispatch (jump instrs overwrite it).
             self.frames[frame_idx].pc = pc + 1;
-
             // M31: per-instr trace. Gated by `trace_out.is_some()` so the
             // hot path pays only one `Option::is_some` branch per instr
-            // when tracing is off. Format: `pc={pc} {instr:?}` (one line).
-            // The write is best-effort — a write failure clears tracing
-            // rather than propagating an error (tracing is a debug aid,
-            // not semantically load-bearing).
+            // when tracing is off.
             if let Some(trace) = self.env.trace_out.as_mut() {
                 use std::io::Write;
                 let _ = writeln!(trace, "pc={pc} {instr:?}");
@@ -371,24 +362,14 @@ impl<'env> Vm<'env> {
 
             match instr {
                 Instr::Const(i) => {
-                    // M30: `ConstInt`/`ConstNone`/`ConstBool` are the
-                    // small-value fast paths; `Const` handles the rest
-                    // (Float/String/Block/etc.) via the pool. The pool
-                    // lookup still clones the `Value` (unavoidable — the
-                    // stack owns its values).
                     let block = self.cached_block.as_ref().expect("cache invariant");
-                    let v = block_pool(block, i as usize, instr_span)?;
+                    let v = block_pool(block, i as usize, self.err_span(frame_idx))?;
                     self.stack.push(v);
                 }
                 Instr::ConstInt(n) => {
-                    // M30 fast path: skip pool indirection for `Integer`.
-                    // Constructs the `Value` inline (no `Rc`, no clone) —
-                    // the dominant literal kind in `fib`/`sum_loop`/loops.
-                    // M31: thread `instr_span` so integer-arg type
-                    // errors localize to the literal's source position.
                     self.stack.push(Value::Integer {
                         n,
-                        span: instr_span,
+                        span: self.err_span(frame_idx),
                     });
                 }
                 Instr::ConstNone => {
@@ -441,7 +422,7 @@ impl<'env> Vm<'env> {
                         // position) rather than the block-level fallback.
                         return Err(EvalError::UnboundWord {
                             sym,
-                            span: instr_span,
+                            span: self.err_span(frame_idx),
                         });
                     };
                     self.stack.push(v);
@@ -547,8 +528,8 @@ impl<'env> Vm<'env> {
                 Instr::MakeFunc(spec_idx, body_idx, fv_idx) => {
                     // M30.1.B: freevar list is looked up from the side table.
                     let block = self.cached_block.as_ref().expect("cache invariant").clone();
-                    let spec_val = block_pool(&block, spec_idx as usize, instr_span)?;
-                    let body_val = block_pool(&block, body_idx as usize, instr_span)?;
+                    let spec_val = block_pool(&block, spec_idx as usize, self.err_span(frame_idx))?;
+                    let body_val = block_pool(&block, body_idx as usize, self.err_span(frame_idx))?;
                     let freevars = block
                         .freevars_table
                         .get(fv_idx as usize)
@@ -612,7 +593,7 @@ impl<'env> Vm<'env> {
                 Instr::EndRefine => {
                     let (sym, height) = self.ref_marks.pop().ok_or_else(|| EvalError::Compile {
                         kind: CompileErrorKind::VmInvariant("EndRefine without MarkRefine".into()),
-                        span: instr_span,
+                        span: self.err_span(frame_idx),
                     })?;
                     let args: Vec<Value> = self.stack[height..].to_vec();
                     self.stack.truncate(height);
@@ -628,7 +609,7 @@ impl<'env> Vm<'env> {
                         kind: CompileErrorKind::VmInvariant(
                             "VM reached Halt (block needs_rebind — use walker)".into(),
                         ),
-                        span: instr_span,
+                        span: self.err_span(frame_idx),
                     });
                 }
             }
@@ -670,7 +651,6 @@ impl<'env> Vm<'env> {
             }
             // M30.1.B: `Instr` is `Copy` — bitwise copy, no clone.
             let instr = instrs[pc];
-            let instr_span = self.span_at(pc);
             self.frames[frame_idx].pc = pc + 1;
             // M31: per-instr trace (same as `run_loop`).
             if let Some(trace) = self.env.trace_out.as_mut() {
@@ -705,12 +685,12 @@ impl<'env> Vm<'env> {
                         kind: CompileErrorKind::VmInvariant(
                             "VM reached Halt (block needs_rebind — use walker)".into(),
                         ),
-                        span: instr_span,
+                        span: self.err_span(frame_idx),
                     });
                 }
                 _ => {
                     // Delegate all other instrs to the shared `dispatch_instr`.
-                    self.dispatch_instr(instr, frame_idx, instr_span)?;
+                    self.dispatch_instr(instr, frame_idx)?;
                 }
             }
         }
@@ -725,24 +705,20 @@ impl<'env> Vm<'env> {
 
     /// Dispatch a single instr (shared core between `run_loop` and
     /// `run_loop_reduce`). Extracted so reduce mode can reuse every arm
-    /// except `Return`/`Halt`. `instr_span` is the per-instr source span
-    /// (M31) captured by the caller before the pre-dispatch `pc` advance.
-    fn dispatch_instr(
-        &mut self,
-        instr: Instr,
-        frame_idx: usize,
-        instr_span: Span,
-    ) -> Result<(), EvalError> {
+    /// except `Return`/`Halt`. Per-instr span is computed lazily via
+    /// `self.err_span(frame_idx)` on error (cold path) — avoids the per-instr
+    /// `span_at` cost on the hot path.
+    fn dispatch_instr(&mut self, instr: Instr, frame_idx: usize) -> Result<(), EvalError> {
         match instr {
             Instr::Const(i) => {
                 let block = self.cached_block.as_ref().expect("cache invariant").clone();
-                let v = block_pool(&block, i as usize, instr_span)?;
+                let v = block_pool(&block, i as usize, self.err_span(frame_idx))?;
                 self.stack.push(v);
             }
             Instr::ConstInt(n) => {
                 self.stack.push(Value::Integer {
                     n,
-                    span: instr_span,
+                    span: self.err_span(frame_idx),
                 });
             }
             Instr::ConstNone => {
@@ -785,7 +761,7 @@ impl<'env> Vm<'env> {
                 } else {
                     return Err(EvalError::UnboundWord {
                         sym,
-                        span: instr_span,
+                        span: self.err_span(frame_idx),
                     });
                 };
                 self.stack.push(v);
@@ -853,8 +829,8 @@ impl<'env> Vm<'env> {
             }
             Instr::MakeFunc(spec_idx, body_idx, fv_idx) => {
                 let block = self.cached_block.as_ref().expect("cache invariant").clone();
-                let spec_val = block_pool(&block, spec_idx as usize, instr_span)?;
-                let body_val = block_pool(&block, body_idx as usize, instr_span)?;
+                let spec_val = block_pool(&block, spec_idx as usize, self.err_span(frame_idx))?;
+                let body_val = block_pool(&block, body_idx as usize, self.err_span(frame_idx))?;
                 // M30.1.B: freevar list is looked up from the side table.
                 let freevars = block
                     .freevars_table
@@ -916,7 +892,7 @@ impl<'env> Vm<'env> {
             Instr::EndRefine => {
                 let (sym, height) = self.ref_marks.pop().ok_or_else(|| EvalError::Compile {
                     kind: CompileErrorKind::VmInvariant("EndRefine without MarkRefine".into()),
-                    span: instr_span,
+                    span: self.err_span(frame_idx),
                 })?;
                 let args: Vec<Value> = self.stack[height..].to_vec();
                 self.stack.truncate(height);
@@ -947,12 +923,11 @@ impl<'env> Vm<'env> {
         // need `fd.native` (a `fn` pointer — `Copy`), so extract it before
         // the mutable `self.env` borrow below. Saves 1 Rc bump + decrement
         // per native call (the `+` in `fib`'s body fires this ~1.4M times).
-        // M31: `span_at(pc)` is computed by the caller and threaded through
-        // `call_native`'s frame via `self.cached_spans` — but `call_native`
-        // is called from the dispatch `match`, which already captured
-        // `instr_span`. We re-derive it here from the current frame's pc
-        // (already advanced by 1, so we read pc-1).
-        let span = self.span_at(self.frames[self.frames.len() - 1].pc.saturating_sub(1));
+        // M31: compute the per-instr span lazily (cold path — only for
+        // error attribution). `call_native` is called from the dispatch
+        // `match`; the offending instr is at `pc - 1` (pc was advanced).
+        let frame_idx = self.frames.len() - 1;
+        let span = self.err_span(frame_idx);
         let fd = self
             .natives_by_idx
             .get(native_idx)
