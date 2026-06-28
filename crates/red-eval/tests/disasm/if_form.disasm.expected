@@ -1,0 +1,5 @@
+JumpIfFalse
+ConstInt(42)
+ConstNone
+Jump(
+Return

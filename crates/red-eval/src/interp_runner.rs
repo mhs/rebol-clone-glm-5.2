@@ -18,6 +18,8 @@ use red_core::{Context, Env, Error, EvalError, EvalMode};
 
 use crate::binding::bind_pass;
 use crate::interp::dispatch_block;
+use crate::vm::compiler::{compile_block, NativeRegistry};
+use crate::vm::lex::Scope;
 
 /// End-to-end: lex → parse → bind → eval. Handles both bare bodies and
 /// `Red [...] <body>` programs (the header is discarded for the POC).
@@ -55,14 +57,16 @@ pub fn run_source_with_exit_output(
 
 /// CLI run options: `allow_shell` mirrors `Env::allow_shell` (off by default
 /// per the M20 sandbox policy), `args` populates `system/options/args` for
-/// script access to trailing CLI args, and `walk` forces the tree-walker
+/// script access to trailing CLI args, `walk` forces the tree-walker
 /// (`EvalMode::Walk`) instead of the default bytecode VM — set by the CLI's
-/// `--walk` flag (M29) for debugging and parity comparison.
+/// `--walk` flag (M29) for debugging and parity comparison, and `trace`
+/// enables per-instr VM tracing to stderr (M31, `--trace` flag).
 #[derive(Clone, Debug, Default)]
 pub struct RunOptions {
     pub allow_shell: bool,
     pub args: Vec<String>,
     pub walk: bool,
+    pub trace: bool,
 }
 
 /// Like `run_source_with_exit_output` but applies CLI `RunOptions` (allow-shell
@@ -142,6 +146,11 @@ fn run_series_inner_opts(
     if opts.walk {
         env.mode = EvalMode::Walk;
     }
+    // M31: `--trace` enables per-instr VM tracing to stderr. No-op in
+    // `--walk` mode (the walker doesn't read `trace_out`; only the VM does).
+    if opts.trace {
+        env.set_trace(Box::new(std::io::stderr()));
+    }
     #[cfg(feature = "stats")]
     {
         env.reset_stats();
@@ -168,6 +177,170 @@ fn run_series_inner_opts(
         Err(EvalError::Quit(code)) => Ok((Value::None, code)),
         Err(e) => Err(Error::Eval(e)),
     }
+}
+
+/// M31: compile a source script (without running it) and return its
+/// disassembly. Used by the CLI `--disasm <file.red>` flag.
+///
+/// `func`: when `None`, disassembles the top-level script body. When
+/// `Some(name)`, scans the parsed body's top-level values for a
+/// `name: func [spec] [body]` / `name: does [body]` / `name: function [spec]
+/// [body]` form and disassembles the matched func's body (compiled with a
+/// child scope seeded from the spec, mirroring `ensure_compiled`). The scan
+/// is AST-only — no execution — so side-effecting top-level forms (`print`,
+/// file I/O) don't run. Returns an error if the named func isn't found or
+/// isn't a literal `func`/`does`/`function` form at the top level.
+///
+/// The output includes per-instr `file:line:col` annotations (from
+/// `disasm_with_spans`) when `file` is `Some`. The `src` is used to build a
+/// `LineMap` translating byte-offset spans to positions.
+pub fn disasm_source(
+    src: &str,
+    func: Option<&str>,
+    file: Option<&str>,
+) -> Result<String, Error> {
+    let tokens = lexer::lex(src)?;
+    let body = if tokens.is_empty() {
+        Series::empty()
+    } else {
+        let (_header, body) = parse_program(&tokens)?;
+        body
+    };
+    let ctx = Context::new();
+    crate::natives::install_constants(&ctx);
+    let ctx_rc = bind_pass(&body, ctx);
+    let mut env = Env::new_with_output(ctx_rc, Box::new(std::io::sink()));
+    crate::natives::register_natives(&mut env);
+    let registry = NativeRegistry::from_env(&env);
+    let (compiled, src_for_disasm) = match func {
+        None => {
+            let mut scope = Scope::root(&env.user_ctx);
+            let c = compile_block(&body, &mut scope, &registry)
+                .map_err(|e| Error::Eval(EvalError::Compile { kind: e.kind, span: e.span }))?;
+            (c, src)
+        }
+        Some(name) => {
+            let name_sym = Symbol::new(name);
+            let body_block = find_top_level_func_body(&body, &name_sym)
+                .ok_or_else(|| Error::Eval(EvalError::Native {
+                    message: format!(
+                        "disasm: no top-level `func`/`does`/`function` form named {:?}",
+                        name
+                    ),
+                    span: red_core::value::Span::default(),
+                }))?;
+            // Compile the func body with a child scope seeded from the spec
+            // (mirrors `ensure_compiled`'s lazy-compile path). The spec is
+            // parsed via `extract_spec` to get params/refinements/locals.
+            let spec_val = body_block.spec.clone();
+            let body_series = body_block.body.clone();
+            let spec = crate::natives::extract_spec(&spec_val).map_err(|e| {
+                Error::Eval(EvalError::Native {
+                    message: e.to_string(),
+                    span: spec_val.span_or_default(),
+                })
+            })?;
+            let parent = Scope::root(&env.user_ctx);
+            let mut child = Scope::child(&parent);
+            for p in &spec.params {
+                child.slot_index(p.clone());
+            }
+            for (ref_name, ref_args) in &spec.refinements {
+                child.slot_index(ref_name.clone());
+                for arg in ref_args {
+                    child.slot_index(arg.clone());
+                }
+            }
+            for local in &spec.locals {
+                child.slot_index(local.clone());
+            }
+            // Pre-collect body SetWords (mirrors `compile_make_func`).
+            crate::vm::compiler::collect_setwords_inline_pub(&body_series, &mut child);
+            // M31: use `compile_block_for_func_body` (not `compile_block`)
+            // so the func's own slot is pre-recorded for recursive
+            // `CallUser`/`CallUserGlobal` emission. Without this, a
+            // recursive `fib n - 1` inside the body would degrade to
+            // `LoadGlobal` (value load) instead of `CallUser` (call),
+            // producing wrong disasm output. The slot is looked up from
+            // `user_ctx` (the binding pass allocated it for the SetWord).
+            let self_slot = env
+                .user_ctx
+                .names
+                .borrow()
+                .get(&name_sym)
+                .copied()
+                .unwrap_or(0);
+            let c = crate::vm::compiler::compile_block_for_func_body_pub(
+                &body_series,
+                &mut child,
+                &registry,
+                (self_slot as u32, spec.params.len()),
+                spec.params.len(),
+            )
+            .map_err(|e| Error::Eval(EvalError::Compile { kind: e.kind, span: e.span }))?;
+            (c, src)
+        }
+    };
+    Ok(red_core::disasm_with_spans(&compiled, Some(src_for_disasm), file))
+}
+
+/// A located func body for `disasm_source`: the spec value, the body series,
+/// and the calling-word kind (`func`/`does`/`function`). Returned by
+/// `find_top_level_func_body`.
+struct LocatedFunc {
+    spec: Value,
+    body: Series,
+}
+
+/// M31: scan a parsed body's top-level values for
+/// `name: <func|does|function> [spec] [body]` (or `name: does [body]`) and
+/// return the spec value + body series for the named func. AST-only — no
+/// execution. Returns `None` if not found or the form isn't a literal
+/// func/does/function at the top level.
+fn find_top_level_func_body(body: &Series, name: &Symbol) -> Option<LocatedFunc> {
+    let data = body.data.borrow();
+    let n = data.len();
+    let mut i = body.index;
+    while i < n {
+        // Look for `SetWord(name)` followed by a `func`/`does`/`function` word.
+        if let Value::SetWord { sym, .. } = &data[i] {
+            if sym == name && i + 1 < n {
+                let next = &data[i + 1];
+                if let Value::Word { sym: kw, binding, .. } = next {
+                    if matches!(binding, red_core::value::Binding::Unbound) {
+                        match kw.as_str() {
+                            "func" | "function" => {
+                                if i + 3 < n
+                                    && matches!(&data[i + 2], Value::Block { .. })
+                                    && matches!(&data[i + 3], Value::Block { .. })
+                                {
+                                    let spec = data[i + 2].clone();
+                                    let body_series = match &data[i + 3] {
+                                        Value::Block { series, .. } => series.clone(),
+                                        _ => return None,
+                                    };
+                                    return Some(LocatedFunc { spec, body: body_series });
+                                }
+                            }
+                            "does" => {
+                                if i + 2 < n && matches!(&data[i + 2], Value::Block { .. }) {
+                                    let spec = Value::block(Series::empty());
+                                    let body_series = match &data[i + 2] {
+                                        Value::Block { series, .. } => series.clone(),
+                                        _ => return None,
+                                    };
+                                    return Some(LocatedFunc { spec, body: body_series });
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -405,5 +578,57 @@ mod tests {
     fn object_method_call_with_args_via_path() {
         let src = "o: make object! [add: func [x y][x + y]] o/add 3 4";
         assert_eq!(mold_to_string(&run(src)), "7");
+    }
+
+    // --- M31: disasm_source -----------------------------------------------
+
+    #[test]
+    fn disasm_source_top_level_contains_instrs_and_positions() {
+        let out = disasm_source("1 + 2", None, Some("test.red")).expect("disasm");
+        assert!(out.contains("ConstInt(1)"), "got:\n{out}");
+        assert!(out.contains("ConstInt(2)"), "got:\n{out}");
+        assert!(out.contains("Call("), "got:\n{out}");
+        assert!(out.contains("Return"), "got:\n{out}");
+        assert!(
+            out.contains("test.red:1:1"),
+            "expected position prefix; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn disasm_source_named_func_compiles_body() {
+        let src = "fib: func [n][either n < 2 [n][(fib n - 1) + fib n - 2]]";
+        let out = disasm_source(src, Some("fib"), None).expect("disasm");
+        // The func body's disasm should reference the recursive call
+        // (CallUser/CallUserGlobal) and the `<` comparison + `either` jump.
+        assert!(
+            out.contains("CallUser") || out.contains("CallUserGlobal"),
+            "expected CallUser in fib body; got:\n{out}"
+        );
+        assert!(out.contains("JumpIfFalse"), "got:\n{out}");
+    }
+
+    #[test]
+    fn disasm_source_named_does_func() {
+        let src = "noop: does [42]";
+        let out = disasm_source(src, Some("noop"), None).expect("disasm");
+        assert!(out.contains("ConstInt(42)"), "got:\n{out}");
+        assert!(out.contains("Return"), "got:\n{out}");
+    }
+
+    #[test]
+    fn disasm_source_named_func_not_found_errors() {
+        let out = disasm_source("x: 5", Some("nope"), None);
+        assert!(out.is_err(), "expected error for missing func");
+    }
+
+    #[test]
+    fn disasm_source_no_side_effects() {
+        // `print` is a native; disasm_source must NOT run it. The disasm
+        // should contain a `Call(print_idx, ...)` instr, not execute it.
+        let out = disasm_source("print 1", None, None).expect("disasm");
+        assert!(out.contains("Call("), "got:\n{out}");
+        // No stdout was captured (we used `io::sink()`), so correctness is
+        // "didn't panic / didn't error" — the print native wasn't invoked.
     }
 }

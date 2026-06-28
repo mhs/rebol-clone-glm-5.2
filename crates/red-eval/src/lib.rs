@@ -28,8 +28,8 @@ pub mod vm;
 
 pub use binding::{bind_pass, bind_pass_into};
 pub use interp::{
-    eval, run_series, run_series_with_exit_output, run_series_with_output, run_source,
-    run_source_with_exit, run_source_with_exit_opts, run_source_with_exit_output,
+    disasm_source, eval, run_series, run_series_with_exit_output, run_series_with_output,
+    run_source, run_source_with_exit, run_source_with_exit_opts, run_source_with_exit_output,
     run_source_with_output, RunOptions,
 };
 pub use natives::{install_constants, register_natives};

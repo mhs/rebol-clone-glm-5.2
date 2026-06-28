@@ -193,6 +193,20 @@ impl FuncArityTable {
 /// Compile state: the in-progress instr stream + pool + reference data.
 struct Compiler<'a> {
     instrs: Vec<Instr>,
+    /// M31: per-instr source span, parallel to `instrs`. Each entry is the
+    /// `Span` of the source value that produced the corresponding instr.
+    /// Synthesized instrs (trailing `Return`, `Jump` patch targets, the
+    /// `ConstNone` false-branch push) inherit the nearest source-value span
+    /// via `emit_with_span(.., span)` calls threaded through the compile
+    /// helpers. The compiler's `emit(instr)` convenience uses the latest
+    /// `current_span` set by `compile_prefix`/`compile_expr` from the value
+    /// being compiled.
+    spans: Vec<Span>,
+    /// The span of the source value currently being compiled. Set by
+    /// `compile_expr`/`compile_prefix` from `data[*i].span_or_default()`
+    /// before any `emit` call. Read by `emit(instr)` (which doesn't take an
+    /// explicit span). `emit_with_span` overrides this for synthesized instrs.
+    current_span: Span,
     pool: ConstantPool,
     natives: &'a NativeRegistry,
     /// Slot of the enclosing `func` being defined (for recursive self-call
@@ -283,6 +297,8 @@ pub(crate) fn compile_block_reduce(
     let func_arities = FuncArityTable::default();
     let mut compiler = Compiler {
         instrs: Vec::new(),
+        spans: Vec::new(),
+        current_span: Span::default(),
         pool: ConstantPool::new(),
         natives,
         func_arities,
@@ -299,7 +315,7 @@ pub(crate) fn compile_block_reduce(
         // `Return` pops the frame; `run_reduce` collects what remains.
     }
     drop(data);
-    compiler.emit(Instr::Return);
+    compiler.emit_with_span(Instr::Return, block_source_span(block));
     let span = block_source_span(block);
     Ok(CompiledBlock {
         instrs: Rc::from(compiler.instrs.as_slice()),
@@ -309,6 +325,7 @@ pub(crate) fn compile_block_reduce(
         n_locals: scope_locals_count(scope),
         freevars: analysis.freevars,
         source_span: span,
+        spans: Rc::from(compiler.spans.as_slice()),
         needs_rebind: false,
         arity: 0,
     })
@@ -361,6 +378,8 @@ fn compile_block_inner(
     }
     let mut compiler = Compiler {
         instrs: Vec::new(),
+        spans: Vec::new(),
+        current_span: Span::default(),
         pool: ConstantPool::new(),
         natives,
         func_arities,
@@ -393,7 +412,7 @@ fn compile_block_inner(
 
     // Block ends with `Return`: the VM pops the frame, returning top-of-stack
     // (or `None` if the stack is empty — matches the walker's `last` value).
-    compiler.emit(Instr::Return);
+    compiler.emit_with_span(Instr::Return, block_source_span(block));
 
     let span = block_source_span(block);
     Ok(CompiledBlock {
@@ -404,6 +423,7 @@ fn compile_block_inner(
         n_locals: scope_locals_count(scope),
         freevars: analysis.freevars,
         source_span: span,
+        spans: Rc::from(compiler.spans.as_slice()),
         needs_rebind: false,
         arity: 0,
     })
@@ -412,6 +432,7 @@ fn compile_block_inner(
 /// Build a `needs_rebind` stub block: instrs `[Halt]`, pool empty, the
 /// analysis's freevars preserved (in case the walker path inspects them).
 pub(crate) fn stub_block(block: &Series, analysis: AnalysisResult) -> CompiledBlock {
+    let span = block_source_span(block);
     CompiledBlock {
         instrs: Rc::from([Instr::Halt]),
         pool: Rc::from([]),
@@ -419,7 +440,8 @@ pub(crate) fn stub_block(block: &Series, analysis: AnalysisResult) -> CompiledBl
         freevars_table: Rc::from(&Vec::<Vec<Symbol>>::new()[..]),
         n_locals: 0,
         freevars: analysis.freevars,
-        source_span: block_source_span(block),
+        source_span: span,
+        spans: Rc::from(&[span][..]),
         needs_rebind: true,
         arity: 0,
     }
@@ -431,7 +453,18 @@ pub(crate) fn stub_block(block: &Series, analysis: AnalysisResult) -> CompiledBl
 
 impl<'a> Compiler<'a> {
     fn emit(&mut self, instr: Instr) {
+        self.emit_with_span(instr, self.current_span);
+    }
+
+    /// M31: emit `instr` with an explicit `span` (used by synthesized instrs
+    /// like the trailing `Return`, `Jump` patch targets, the `ConstNone`
+    /// false-branch push — these have no source value of their own, so they
+    /// inherit the span of the nearest source value that triggered them).
+    /// `emit` (above) reads `self.current_span`; this override lets callers
+    /// pass a different span without disturbing `current_span`.
+    fn emit_with_span(&mut self, instr: Instr, span: Span) {
         self.instrs.push(instr);
+        self.spans.push(span);
     }
 
     fn push_const(&mut self, v: Value) -> u32 {
@@ -543,6 +576,11 @@ fn compile_prefix(
 ) -> Result<(), CompileError> {
     let cur = &data[*i];
     let span = cur.span_or_default();
+    // M31: thread the source value's span into `emit` so per-instr spans
+    // localize to the value that produced them. Synthesized instrs emitted
+    // by helpers below (e.g. `compile_if`'s `Jump`/`ConstNone`) call
+    // `emit_with_span(.., span)` explicitly to inherit this span.
+    c.current_span = span;
     // Special forms first — they need lookahead beyond the prefix value.
     // `use`/`make object!`/`object`/`context` should never reach here
     // (`compile_block` short-circuited on `needs_rebind`), but if one slipped
@@ -1700,6 +1738,30 @@ fn is_object_keyword_form(data: &[Value], i: usize) -> bool {
     matches!(sym.as_str(), "object" | "context") && matches!(&data[i + 1], Value::Block { .. })
 }
 
+/// M31: public wrapper around `compile_block_for_func_body` for
+/// `disasm_source` (in `interp_runner.rs`), which compiles a named func's
+/// body with the func's own slot pre-recorded (so recursive calls emit
+/// `CallUser`/`CallUserGlobal` instead of degrading to `LoadGlobal`).
+pub(crate) fn compile_block_for_func_body_pub(
+    block: &Series,
+    scope: &mut Scope,
+    natives: &NativeRegistry,
+    self_func: (u32, usize),
+    param_count: usize,
+) -> Result<CompiledBlock, CompileError> {
+    compile_block_for_func_body(block, scope, natives, self_func, param_count)
+}
+
+/// M31: public wrapper around `collect_setwords_inline` for `disasm_source`
+/// (in `interp_runner.rs`), which needs to pre-collect a func body's
+/// SetWords into a child scope before compiling — mirroring what
+/// `compile_make_func` does internally. Without this, the func body's
+/// body-local SetWords wouldn't resolve to `Lexical(0, slot)` and the
+/// disassembly would show `LoadDynamic` for them.
+pub(crate) fn collect_setwords_inline_pub(series: &Series, scope: &mut Scope) {
+    collect_setwords_inline(series, scope);
+}
+
 /// Mirror of `lex.rs`'s `collect_setwords` — pre-collect body-local SetWords
 /// into a child scope so subsequent references resolve to `Lexical(0, slot)`.
 /// `lex.rs` keeps this private; we duplicate the small body here so the
@@ -1990,6 +2052,8 @@ mod tests {
         child.slot_index(Symbol::new("n"));
         let mut c = Compiler {
             instrs: Vec::new(),
+            spans: Vec::new(),
+            current_span: Span::default(),
             pool: ConstantPool::new(),
             natives: &registry,
             func_arities: FuncArityTable::default(),

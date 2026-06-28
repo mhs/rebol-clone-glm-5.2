@@ -899,6 +899,7 @@ mod tests {
             n_locals: 0,
             freevars: Vec::new(),
             source_span: Span::default(),
+            spans: Rc::from(&[][..]),
             needs_rebind: false,
             arity: 0,
         }

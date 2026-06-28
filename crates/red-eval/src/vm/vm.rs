@@ -103,34 +103,35 @@ pub fn run(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
         natives_by_idx,
         ref_marks: Vec::new(),
         pending_refs: Vec::new(),
-        cached_block: None,
-        cached_instrs: None,
-        cached_frame_gen: 0,
-        frame_gen: 0,
-    };
-    vm.frames.clear();
-    vm.stack.clear();
-    vm.frames.push(Frame {
-        func: None,
-        locals: Vec::new(),
-        depth: 0,
-        block,
-        pc: 0,
-    });
-    vm.frame_gen = vm.frame_gen.wrapping_add(1);
-    let result = vm.run_loop();
-    // M30.1.C: restore the pools. Extract the Vecs from `vm` before dropping
-    // it (the Vm borrows `env: &mut Env`, so we can't touch `env` while `vm`
-    // is alive). `std::mem::take` leaves `vm.frames`/`vm.stack` as empty
-    // Vecs (no alloc) so `vm`'s Drop is cheap.
-    let mut frames_pool = std::mem::take(&mut vm.frames);
-    let mut stack_pool = std::mem::take(&mut vm.stack);
-    frames_pool.clear();
-    stack_pool.clear();
-    drop(vm);
-    env.vm_frames_pool = frames_pool;
-    env.vm_stack_pool = stack_pool;
-    result
+            cached_block: None,
+            cached_instrs: None,
+            cached_spans: None,
+            cached_frame_gen: 0,
+            frame_gen: 0,
+        };
+        vm.frames.clear();
+        vm.stack.clear();
+        vm.frames.push(Frame {
+            func: None,
+            locals: Vec::new(),
+            depth: 0,
+            block,
+            pc: 0,
+        });
+        vm.frame_gen = vm.frame_gen.wrapping_add(1);
+        let result = vm.run_loop();
+        // M30.1.C: restore the pools. Extract the Vecs from `vm` before dropping
+        // it (the Vm borrows `env: &mut Env`, so we can't touch `env` while `vm`
+        // is alive). `std::mem::take` leaves `vm.frames`/`vm.stack` as empty
+        // Vecs (no alloc) so `vm`'s Drop is cheap.
+        let mut frames_pool = std::mem::take(&mut vm.frames);
+        let mut stack_pool = std::mem::take(&mut vm.stack);
+        frames_pool.clear();
+        stack_pool.clear();
+        drop(vm);
+        env.vm_frames_pool = frames_pool;
+        env.vm_stack_pool = stack_pool;
+        result
 }
 
 /// Run a compiled block in "reduce mode": every expression's result stays on
@@ -155,6 +156,7 @@ pub fn run_reduce(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalErro
         pending_refs: Vec::new(),
         cached_block: None,
         cached_instrs: None,
+        cached_spans: None,
         cached_frame_gen: 0,
         frame_gen: 0,
     };
@@ -236,6 +238,12 @@ struct Vm<'env> {
     cached_block: Option<Rc<CompiledBlock>>,
     /// Cached clone of the current top frame's `instrs` slice.
     cached_instrs: Option<Rc<[Instr]>>,
+    /// M31: cached clone of the current top frame's per-instr `spans` slice
+    /// (parallel to `cached_instrs`). Refreshed alongside `cached_instrs` in
+    /// `refresh_cache`. Indexed by `pc` to attribute VM-raised errors to the
+    /// offending instr's source position (replacing the block-level
+    /// `current_span()` fallback).
+    cached_spans: Option<Rc<[Span]>>,
     /// `frame_gen` value at the time the cache was last refreshed.
     cached_frame_gen: u64,
     /// Bumped on every frame push/pop/overwrite. Wrapping is safe — the
@@ -267,31 +275,49 @@ impl<'env> Vm<'env> {
             // M30.3.1: `block` is `Rc<CompiledBlock>` — one Rc bump (was 4 + Vec alloc).
             let block = Rc::clone(&self.frames[frame_idx].block);
             let instrs = block.instrs.clone();
+            // M31: cache the per-instr spans slice too (parallel to `instrs`).
+            let spans = block.spans.clone();
             self.cached_block = Some(block);
             self.cached_instrs = Some(instrs);
+            self.cached_spans = Some(spans);
             self.cached_frame_gen = self.frame_gen;
         }
         frame_idx
     }
 
-    /// M31: best-effort source span for an error raised at the current
-    /// dispatch point. Returns the active `CompiledBlock`'s `source_span`
-    /// (computed by `block_source_span` at compile time — the first/last
-    /// value's span, or `Span::default()` for a synthetic block). Used by
-    /// VM arms that have no per-value span to attribute the error to (e.g.
-    /// `LoadDynamic` UnboundWord, `ConstInt` synthetic push, native-index
+    /// M31: source span for an error raised at the current dispatch point.
+    /// Returns the per-instr span from `CompiledBlock.spans[pc]` (populated by
+    /// the compiler alongside `instrs`); falls back to the block's
+    /// `source_span` if the spans table is missing or `pc` is out of range
+    /// (e.g. a synthetic block from a test, or an error raised outside the
+    /// dispatch loop). Used by VM arms that have no per-value span to
+    /// attribute the error to (e.g. `LoadDynamic` UnboundWord, native-index
     /// invariant failures, `Halt`/`EndRefine` misroutes).
     ///
-    /// Falls back to `Span::default()` if no block is cached (shouldn't happen
-    /// mid-dispatch — `refresh_cache` runs at the top of each loop iteration —
-    /// but defensive against a future caller that invokes an error-raising
-    /// helper outside the dispatch loop).
+    /// `pc_for_span` is threaded in by the dispatch loops so the span matches
+    /// the instr being executed (not the *next* instr — `pc` was already
+    /// advanced before dispatch).
     #[inline]
     fn current_span(&self) -> Span {
         self.cached_block
             .as_ref()
             .map(|b| b.source_span)
             .unwrap_or_default()
+    }
+
+    /// M31: per-instr span at `pc`. The dispatch loops call this with the
+    /// current `pc` (before the pre-dispatch advance) to attribute errors to
+    /// the offending instr. Falls back to `current_span()` (block-level) if
+    /// the spans table is missing or `pc` is OOB (shouldn't happen for
+    /// well-formed blocks — the compiler always emits one span per instr).
+    #[inline]
+    fn span_at(&self, pc: usize) -> Span {
+        if let Some(spans) = self.cached_spans.as_ref() {
+            if let Some(s) = spans.get(pc) {
+                return *s;
+            }
+        }
+        self.current_span()
     }
 
     fn run_loop(&mut self) -> Result<Value, EvalError> {
@@ -320,14 +346,28 @@ impl<'env> Vm<'env> {
                         "ran off instr stream: pc={pc} len={}",
                         instrs.len()
                     )),
-                    span: self.current_span(),
+                    span: self.span_at(pc),
                 });
             }
             // M30.1.B: `Instr` is `Copy` (16 bytes), so this is a bitwise
             // copy — no `Rc` refcount ops, no borrow-extension across the match.
             let instr = instrs[pc];
+            // M31: capture the per-instr span before advancing `pc` so error
+            // arms attribute to the offending instr, not the next one.
+            let instr_span = self.span_at(pc);
             // Advance pc before dispatch (jump instrs overwrite it).
             self.frames[frame_idx].pc = pc + 1;
+
+            // M31: per-instr trace. Gated by `trace_out.is_some()` so the
+            // hot path pays only one `Option::is_some` branch per instr
+            // when tracing is off. Format: `pc={pc} {instr:?}` (one line).
+            // The write is best-effort — a write failure clears tracing
+            // rather than propagating an error (tracing is a debug aid,
+            // not semantically load-bearing).
+            if let Some(trace) = self.env.trace_out.as_mut() {
+                use std::io::Write;
+                let _ = writeln!(trace, "pc={pc} {instr:?}");
+            }
 
             match instr {
                 Instr::Const(i) => {
@@ -337,18 +377,18 @@ impl<'env> Vm<'env> {
                     // lookup still clones the `Value` (unavoidable — the
                     // stack owns its values).
                     let block = self.cached_block.as_ref().expect("cache invariant");
-                    let v = block_pool(block, i as usize)?;
+                    let v = block_pool(block, i as usize, instr_span)?;
                     self.stack.push(v);
                 }
                 Instr::ConstInt(n) => {
                     // M30 fast path: skip pool indirection for `Integer`.
                     // Constructs the `Value` inline (no `Rc`, no clone) —
                     // the dominant literal kind in `fib`/`sum_loop`/loops.
-                    // M31: thread `current_span()` so integer-arg type
-                    // errors localize to the literal's block (not zero).
+                    // M31: thread `instr_span` so integer-arg type
+                    // errors localize to the literal's source position.
                     self.stack.push(Value::Integer {
                         n,
-                        span: self.current_span(),
+                        span: instr_span,
                     });
                 }
                 Instr::ConstNone => {
@@ -397,13 +437,11 @@ impl<'env> Vm<'env> {
                     } else if let Some(fd) = self.env.natives.get(&sym) {
                         Value::Func(Rc::clone(fd))
                     } else {
-                        // M31: use the block's `source_span` as the
-                        // fallback (the per-symbol span isn't in the side
-                        // table). Better than zero for locating which block
-                        // the unbound word came from.
+                        // M31: use the per-instr span (the word's source
+                        // position) rather than the block-level fallback.
                         return Err(EvalError::UnboundWord {
                             sym,
-                            span: self.current_span(),
+                            span: instr_span,
                         });
                     };
                     self.stack.push(v);
@@ -509,8 +547,8 @@ impl<'env> Vm<'env> {
                 Instr::MakeFunc(spec_idx, body_idx, fv_idx) => {
                     // M30.1.B: freevar list is looked up from the side table.
                     let block = self.cached_block.as_ref().expect("cache invariant").clone();
-                    let spec_val = block_pool(&block, spec_idx as usize)?;
-                    let body_val = block_pool(&block, body_idx as usize)?;
+                    let spec_val = block_pool(&block, spec_idx as usize, instr_span)?;
+                    let body_val = block_pool(&block, body_idx as usize, instr_span)?;
                     let freevars = block
                         .freevars_table
                         .get(fv_idx as usize)
@@ -574,7 +612,7 @@ impl<'env> Vm<'env> {
                 Instr::EndRefine => {
                     let (sym, height) = self.ref_marks.pop().ok_or_else(|| EvalError::Compile {
                         kind: CompileErrorKind::VmInvariant("EndRefine without MarkRefine".into()),
-                        span: self.current_span(),
+                        span: instr_span,
                     })?;
                     let args: Vec<Value> = self.stack[height..].to_vec();
                     self.stack.truncate(height);
@@ -590,7 +628,7 @@ impl<'env> Vm<'env> {
                         kind: CompileErrorKind::VmInvariant(
                             "VM reached Halt (block needs_rebind — use walker)".into(),
                         ),
-                        span: self.current_span(),
+                        span: instr_span,
                     });
                 }
             }
@@ -627,12 +665,18 @@ impl<'env> Vm<'env> {
                         "ran off instr stream (reduce): pc={pc} len={}",
                         instrs.len()
                     )),
-                    span: self.current_span(),
+                    span: self.span_at(pc),
                 });
             }
             // M30.1.B: `Instr` is `Copy` — bitwise copy, no clone.
             let instr = instrs[pc];
+            let instr_span = self.span_at(pc);
             self.frames[frame_idx].pc = pc + 1;
+            // M31: per-instr trace (same as `run_loop`).
+            if let Some(trace) = self.env.trace_out.as_mut() {
+                use std::io::Write;
+                let _ = writeln!(trace, "pc={pc} {instr:?}");
+            }
             match instr {
                 Instr::Return => {
                     // M30.3.2: pool the popped frame's locals Vec.
@@ -661,12 +705,12 @@ impl<'env> Vm<'env> {
                         kind: CompileErrorKind::VmInvariant(
                             "VM reached Halt (block needs_rebind — use walker)".into(),
                         ),
-                        span: self.current_span(),
+                        span: instr_span,
                     });
                 }
                 _ => {
                     // Delegate all other instrs to the shared `dispatch_instr`.
-                    self.dispatch_instr(instr, frame_idx)?;
+                    self.dispatch_instr(instr, frame_idx, instr_span)?;
                 }
             }
         }
@@ -681,18 +725,24 @@ impl<'env> Vm<'env> {
 
     /// Dispatch a single instr (shared core between `run_loop` and
     /// `run_loop_reduce`). Extracted so reduce mode can reuse every arm
-    /// except `Return`/`Halt`.
-    fn dispatch_instr(&mut self, instr: Instr, frame_idx: usize) -> Result<(), EvalError> {
+    /// except `Return`/`Halt`. `instr_span` is the per-instr source span
+    /// (M31) captured by the caller before the pre-dispatch `pc` advance.
+    fn dispatch_instr(
+        &mut self,
+        instr: Instr,
+        frame_idx: usize,
+        instr_span: Span,
+    ) -> Result<(), EvalError> {
         match instr {
             Instr::Const(i) => {
                 let block = self.cached_block.as_ref().expect("cache invariant").clone();
-                let v = block_pool(&block, i as usize)?;
+                let v = block_pool(&block, i as usize, instr_span)?;
                 self.stack.push(v);
             }
             Instr::ConstInt(n) => {
                 self.stack.push(Value::Integer {
                     n,
-                    span: self.current_span(),
+                    span: instr_span,
                 });
             }
             Instr::ConstNone => {
@@ -735,7 +785,7 @@ impl<'env> Vm<'env> {
                 } else {
                     return Err(EvalError::UnboundWord {
                         sym,
-                        span: self.current_span(),
+                        span: instr_span,
                     });
                 };
                 self.stack.push(v);
@@ -803,8 +853,8 @@ impl<'env> Vm<'env> {
             }
             Instr::MakeFunc(spec_idx, body_idx, fv_idx) => {
                 let block = self.cached_block.as_ref().expect("cache invariant").clone();
-                let spec_val = block_pool(&block, spec_idx as usize)?;
-                let body_val = block_pool(&block, body_idx as usize)?;
+                let spec_val = block_pool(&block, spec_idx as usize, instr_span)?;
+                let body_val = block_pool(&block, body_idx as usize, instr_span)?;
                 // M30.1.B: freevar list is looked up from the side table.
                 let freevars = block
                     .freevars_table
@@ -866,7 +916,7 @@ impl<'env> Vm<'env> {
             Instr::EndRefine => {
                 let (sym, height) = self.ref_marks.pop().ok_or_else(|| EvalError::Compile {
                     kind: CompileErrorKind::VmInvariant("EndRefine without MarkRefine".into()),
-                    span: self.current_span(),
+                    span: instr_span,
                 })?;
                 let args: Vec<Value> = self.stack[height..].to_vec();
                 self.stack.truncate(height);
@@ -897,7 +947,12 @@ impl<'env> Vm<'env> {
         // need `fd.native` (a `fn` pointer — `Copy`), so extract it before
         // the mutable `self.env` borrow below. Saves 1 Rc bump + decrement
         // per native call (the `+` in `fib`'s body fires this ~1.4M times).
-        let span = self.current_span();
+        // M31: `span_at(pc)` is computed by the caller and threaded through
+        // `call_native`'s frame via `self.cached_spans` — but `call_native`
+        // is called from the dispatch `match`, which already captured
+        // `instr_span`. We re-derive it here from the current frame's pc
+        // (already advanced by 1, so we read pc-1).
+        let span = self.span_at(self.frames[self.frames.len() - 1].pc.saturating_sub(1));
         let fd = self
             .natives_by_idx
             .get(native_idx)
@@ -1391,9 +1446,9 @@ impl<'env> Vm<'env> {
 /// M31: was `unwrap_or(Value::None)` — a compiler bug producing a bad pool
 /// index silently returned `none`, corrupting results. Now returns an
 /// `EvalError::Compile` (VmInvariant) in release and asserts in debug.
-/// The span is the block's `source_span` (the per-pool-entry span isn't
-/// tracked; this localizes to the offending block).
-fn block_pool(block: &CompiledBlock, idx: usize) -> Result<Value, EvalError> {
+/// `span` is the per-instr span (M31) of the instr that requested the pool
+/// value, so the error localizes to the offending instr's source position.
+fn block_pool(block: &CompiledBlock, idx: usize, span: Span) -> Result<Value, EvalError> {
     match block.pool.get(idx) {
         Some(v) => Ok(v.clone()),
         None => {
@@ -1408,7 +1463,7 @@ fn block_pool(block: &CompiledBlock, idx: usize) -> Result<Value, EvalError> {
                     "pool index {idx} out of bounds (len {})",
                     block.pool.len()
                 )),
-                span: block.source_span,
+                span,
             })
         }
     }
@@ -1838,6 +1893,53 @@ mod tests {
             matches!(v, Value::Integer { n: 1000000, .. }),
             "countdown 1000000 0 should return 1000000; got {}",
             mold_to_string(&v)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M31: --trace / Env::trace_out
+    // -----------------------------------------------------------------------
+
+    /// M31: `--trace` of `1 + 2` produces >= 4 instr lines (plan3.md:1199).
+    /// Each executed VM instr emits one `pc=... {instr:?}` line to
+    /// `Env::trace_out`. `1 + 2` compiles to
+    /// `[ConstInt(1), ConstInt(2), Call(+, 2), Return]` = 4 instrs.
+    #[test]
+    fn trace_emits_one_line_per_instr() {
+        let (block, mut env) = compile_for_vm("1 + 2");
+        let trace_buf = BufferWriter::new();
+        let trace_buf_handle = trace_buf.buf.clone();
+        env.set_trace(Box::new(trace_buf));
+        let _ = run(block, &mut env).expect("VM run failed");
+        let trace = String::from_utf8_lossy(&trace_buf_handle.borrow()).into_owned();
+        let line_count = trace.lines().count();
+        assert!(
+            line_count >= 4,
+            "expected >= 4 trace lines for `1 + 2`, got {line_count}:\n{trace}"
+        );
+        // Each line starts with `pc=`.
+        for line in trace.lines() {
+            assert!(
+                line.starts_with("pc="),
+                "trace line should start with `pc=`; got: {line}"
+            );
+        }
+    }
+
+    /// M31: tracing is off by default — `Env::trace_out` is `None`, so the
+    /// VM's per-instr trace branch is skipped. No output in the trace buffer.
+    #[test]
+    fn trace_off_by_default() {
+        let (block, mut env) = compile_for_vm("1 + 2");
+        let trace_buf = BufferWriter::new();
+        let trace_buf_handle = trace_buf.buf.clone();
+        env.set_trace(Box::new(trace_buf));
+        // Clear it again — simulates the default (no `--trace` flag).
+        env.clear_trace();
+        let _ = run(block, &mut env).expect("VM run failed");
+        assert!(
+            trace_buf_handle.borrow().is_empty(),
+            "trace buffer should be empty when tracing is off"
         );
     }
 }

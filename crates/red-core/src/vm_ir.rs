@@ -128,6 +128,14 @@ pub struct CompiledBlock {
     pub n_locals: usize,
     pub freevars: Vec<Symbol>,
     pub source_span: Span,
+    /// M31: per-instr source span, parallel to `instrs`. Each entry is the
+    /// `Span` of the source value that produced the corresponding `Instr`.
+    /// Synthesized instrs (the trailing `Return`, `Jump` patch targets, the
+    /// `ConstNone` false-branch push) inherit the nearest source-value span
+    /// or fall back to `source_span`. Used by `disasm` to annotate each line
+    /// with `file:line:col`, and by the VM to localize `EvalError`s to the
+    /// offending instr rather than the whole block.
+    pub spans: Rc<[Span]>,
     pub needs_rebind: bool,
     pub arity: usize,
 }
@@ -152,14 +160,47 @@ pub struct Frame {
 }
 
 /// Format a `CompiledBlock` for debugging: one instr per line, with pool
-/// values and symbol-table entries inlined for readability. Used by later-
-/// milestone disassembler tests and the `--disasm` CLI flag (M31).
+/// values and symbol-table entries inlined for readability. Used by the
+/// `--disasm` CLI flag (M31) and disassembler tests. Equivalent to
+/// [`disasm_with_spans`] called with `src = None` and `file = None` (no
+/// source-position annotation).
 pub fn disasm(block: &CompiledBlock) -> String {
+    disasm_with_spans(block, None, None)
+}
+
+/// M31: like [`disasm`] but annotates each instr line with its source
+/// position (`file:line:col` or `line:col`), read from `block.spans` (the
+/// per-instr span table populated by the compiler). When `src` is `None`
+/// (or a span is the zero default), no position is emitted and the line is
+/// identical to [`disasm`]'s output.
+///
+/// `file`: the source file path (`Some("examples/fib.red")`) or `None` for
+/// the REPL / unnamed source. When `Some`, the path is prepended to the
+/// `line:col`. `src`: the source text the block was compiled from, used to
+/// build a `LineMap` translating byte offsets to `line:col`. Both are
+/// optional so a caller with only the `CompiledBlock` (e.g. an inline test)
+/// still gets the unannotated form.
+pub fn disasm_with_spans(
+    block: &CompiledBlock,
+    src: Option<&str>,
+    file: Option<&str>,
+) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let pool = block.pool.as_ref();
+    let line_map = src.map(crate::source::LineMap::new);
+    let spans = block.spans.as_ref();
     for (i, instr) in block.instrs.as_ref().iter().enumerate() {
-        let _ = write!(out, "{i:4}: ");
+        // M31: emit the source-position prefix (if available) before the
+        // instr text. Format: `  [file:line:col]` or `  [line:col]`. When
+        // the span is default (zero) or no `src` was provided, emit a blank
+        // prefix of the same width so the instr column stays aligned.
+        let pos_prefix = position_prefix(
+            spans.get(i).copied(),
+            line_map.as_ref(),
+            file,
+        );
+        let _ = write!(out, "{i:4}: {pos_prefix}");
         match instr {
             Instr::Const(idx) => {
                 let v = pool
@@ -275,6 +316,39 @@ pub fn disasm(block: &CompiledBlock) -> String {
     out
 }
 
+/// M31: build the `file:line:col` (or `line:col`, or blank) prefix for a
+/// disasm line. Returns a fixed-width string so the instr column stays
+/// aligned regardless of whether a position is available. When `span` is
+/// `None` or `Span::default()`, or `line_map` is `None`, returns a blank
+/// prefix of `position_prefix_width` spaces (so the line starts at the same
+/// column as an annotated line).
+fn position_prefix(
+    span: Option<crate::value::Span>,
+    line_map: Option<&crate::source::LineMap>,
+    file: Option<&str>,
+) -> String {
+    const WIDTH: usize = 24;
+    let Some(s) = span else {
+        return " ".repeat(WIDTH);
+    };
+    if s.is_default() {
+        return " ".repeat(WIDTH);
+    }
+    let Some(map) = line_map else {
+        return " ".repeat(WIDTH);
+    };
+    let (line, col) = map.line_col(s.start);
+    let pos = match file {
+        Some(path) => format!("[{path}:{line}:{col}]"),
+        None => format!("[{line}:{col}]"),
+    };
+    if pos.len() >= WIDTH {
+        format!("{pos} ")
+    } else {
+        format!("{pos:<WIDTH$}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,6 +388,7 @@ mod tests {
             n_locals: 0,
             freevars: Vec::new(),
             source_span: Span::new(0, 0),
+            spans: Rc::from(&[Span::new(0, 0), Span::new(0, 0)][..]),
             needs_rebind: false,
             arity: 0,
         };
@@ -321,6 +396,59 @@ mod tests {
         assert!(out.contains("Const(0)  ; Integer"));
         assert!(out.contains("Return"));
         assert_eq!(out.lines().count(), 2);
+    }
+
+    /// M31: `disasm_with_spans` annotates each line with `file:line:col`
+    /// when given a source string and file path. The span table is parallel
+    /// to `instrs`; a non-default span produces a position prefix.
+    #[test]
+    fn disasm_with_spans_annotates_lines() {
+        let pool: Rc<[Value]> = Rc::new([Value::integer(5)]);
+        // Two instrs with spans pointing into "x: 5" (offset 3..4 = the `5`).
+        let block = CompiledBlock {
+            instrs: Rc::new([Instr::Const(0), Instr::Return]),
+            pool,
+            symbols: Rc::from(&Vec::<Symbol>::new()[..]),
+            freevars_table: Rc::from(&Vec::<Vec<Symbol>>::new()[..]),
+            n_locals: 0,
+            freevars: Vec::new(),
+            source_span: Span::new(3, 4),
+            spans: Rc::from(&[Span::new(3, 4), Span::new(3, 4)][..]),
+            needs_rebind: false,
+            arity: 0,
+        };
+        let out = disasm_with_spans(&block, Some("x: 5"), Some("test.red"));
+        // The Const line should carry the file:line:col prefix.
+        assert!(
+            out.contains("test.red:1:4"),
+            "expected position prefix in disasm output; got:\n{out}"
+        );
+        assert!(out.contains("Const(0)  ; Integer"));
+        assert!(out.contains("Return"));
+    }
+
+    /// M31: `disasm` (the no-source wrapper) emits no position prefix —
+    /// identical to the pre-M31 format. Confirms the wrapper delegates
+    /// correctly.
+    #[test]
+    fn disasm_no_source_has_no_position_prefix() {
+        let pool: Rc<[Value]> = Rc::new([Value::integer(5)]);
+        let block = CompiledBlock {
+            instrs: Rc::new([Instr::Const(0), Instr::Return]),
+            pool,
+            symbols: Rc::from(&Vec::<Symbol>::new()[..]),
+            freevars_table: Rc::from(&Vec::<Vec<Symbol>>::new()[..]),
+            n_locals: 0,
+            freevars: Vec::new(),
+            source_span: Span::new(3, 4),
+            spans: Rc::from(&[Span::new(3, 4), Span::new(3, 4)][..]),
+            needs_rebind: false,
+            arity: 0,
+        };
+        let out = disasm(&block);
+        // No `[...]` position prefix should appear.
+        assert!(!out.contains("]  Const"), "unexpected position prefix: {out}");
+        assert!(out.contains("Const(0)  ; Integer"));
     }
 
     /// `CompiledBlock` clones cheaply: `instrs` and `pool` are `Rc`-backed, so
@@ -338,6 +466,7 @@ mod tests {
             n_locals: 0,
             freevars: Vec::new(),
             source_span: Span::new(0, 0),
+            spans: Rc::from(&[Span::new(0, 0), Span::new(0, 0)][..]),
             needs_rebind: false,
             arity: 0,
         };

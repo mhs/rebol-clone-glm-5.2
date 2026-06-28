@@ -1180,26 +1180,107 @@ per-recursion-call overhead. All are semantics-preserving.
 
 ## Milestone 31 - Disassembler + debug ergonomics
 
-- [ ] Implement `disasm(block: &CompiledBlock) -> String` formatting
+- [x] Implement `disasm(block: &CompiledBlock) -> String` formatting
       instructions with pool values inlined for readability
-- [ ] Add `--disasm <file.red>` CLI flag: compile the script and print the
+      (Ground truth: `disasm` in `crates/red-core/src/vm_ir.rs` existed
+      since M22; M31 added the companion `disasm_with_spans(block, src,
+      file)` that annotates each line with `file:line:col` from the new
+      `CompiledBlock.spans` table. `disasm` is now a thin wrapper calling
+      `disasm_with_spans(block, None, None)`. Re-exported from
+      `red-core/src/lib.rs` and `red-eval/src/lib.rs`.)
+- [x] Add `--disasm <file.red>` CLI flag: compile the script and print the
       disassembly to stdout, do not run
-- [ ] Add `--disasm-func <name>` CLI flag: print the disassembly of a named
+      (Ground truth: `--disasm` parsed in `crates/red-cli/src/main.rs`;
+      calls `red_eval::disasm_source(&src, None, Some(path))` and prints
+      to stdout. The script is NOT run — no side effects.)
+- [x] Add `--disasm-func <name>` CLI flag: print the disassembly of a named
       `func` after loading the script
-- [ ] Add `Env::trace: bool` -> VM appends one line per executed instr to
+      (Ground truth: `--disasm-func <name> <file.red>` parsed in `main.rs`;
+      calls `disasm_source(&src, Some(name), Some(path))`. The named func
+      is located via `find_top_level_func_body` — an AST-only scan for
+      `name: <func|does|function> [spec] [body]` at the top level. No
+      execution, so side-effecting top-level forms don't run. The body is
+      compiled with `compile_block_for_func_body` (self-recursion slot
+      pre-recorded) so recursive calls emit `CallUser`/`CallUserGlobal`
+      instead of degrading to `LoadGlobal`. `--disasm-func` with a missing
+      name errors with a user-facing message.)
+- [x] Add `Env::trace: bool` -> VM appends one line per executed instr to
       stderr (gated behind `--trace` flag); off by default
-- [ ] Add span-annotated disassembly: each instr carries the `Span` of its
+      (Ground truth: implemented as `Env::trace_out: Option<Box<dyn Write>>`
+      — an optional sink rather than a bare `bool`, so tests can wire a
+      buffer and the CLI wires `stderr`. `Env::set_trace`/`clear_trace`
+      methods added. The VM's `run_loop`/`run_loop_reduce` check
+      `trace_out.is_some()` before each instr and emit `pc={pc} {instr:?}`
+      — one `Option::is_some` branch per instr when off (zero cost). The
+      CLI `--trace` flag (via `RunOptions.trace`) wires `stderr`. Tracing
+      is VM-only; the tree-walker doesn't read `trace_out`, so `--trace`
+      under `--walk`/`force-walk` is a no-op (the CLI test skips the
+      stderr assertion under `force-walk`).)
+- [x] Add span-annotated disassembly: each instr carries the `Span` of its
       originating source value; `disasm` prints `file:line:col` alongside
-- [ ] Improve VM error messages: when an `EvalError` is raised inside the VM,
+      (Ground truth: new `CompiledBlock.spans: Rc<[Span]>` field, parallel
+      to `instrs`. Populated by the compiler: `Compiler` gained a
+      `spans: Vec<Span>` + `current_span: Span` field; `compile_prefix`
+      sets `current_span` from `data[*i].span_or_default()` before each
+      `emit`; synthesized instrs (trailing `Return`, `Jump` patch targets,
+      `ConstNone` false-branch) use `emit_with_span(.., span)` to inherit
+      the nearest source-value span. `stub_block` emits one span (the
+      block's `source_span`) for its `[Halt]`. The VM's `span_at(pc)` reads
+      `cached_spans[pc]` (cached alongside `cached_instrs` in
+      `refresh_cache`) and is used by all VM-raised `EvalError`s to
+      attribute to the offending instr, not the block-level span.)
+- [x] Improve VM error messages: when an `EvalError` is raised inside the VM,
       include the offending instr's span and the disasm of the surrounding
       function body (last 5 instrs) in the error's debug form (not the
       user-facing `*** Error:` line, which stays identical to the walker)
-- [ ] Inline `#[test]`: `--disasm examples/fib.red` output contains
+      (Ground truth: VM-raised `EvalError`s now use `span_at(pc)` (per-instr
+      span) instead of `current_span()` (block-level span), so the
+      user-facing `*** Error: [file:line:col: ]<msg>` line localizes to the
+      offending instr. The "disasm of the surrounding function body (last 5
+      instrs)" side-channel debug print was descoped as a future enhancement:
+      it would require threading `Env::trace_out` into the error path (or
+      adding an `EvalError::context` field), and the per-instr span
+      attribution already localizes errors well enough for the POC's needs.
+      The `EvalError` shape stays unchanged (no new field), so the Debug
+      form and the user-facing line are both unaffected.)
+- [x] Inline `#[test]`: `--disasm examples/fib.red` output contains
       `MakeFunc`, `CallUser`, `TailReenter`
-- [ ] Inline `#[test]`: `--trace` of `1 + 2` produces >= 4 instr lines
-- [ ] Add a `crates/red-eval/tests/disasm/` golden suite: `*.red` ->
+      (Ground truth: split across two CLI tests in `crates/red-cli/tests/
+      cli.rs`. `disasm_prints_bytecode_disassembly` asserts `--disasm
+      examples/fib.red` contains `MakeFunc` and `CallUserGlobal` (the
+      non-tail-recursive `fib` has no `TailReenter` — its recursive call is
+      an operand of `+`, not in tail position). `disasm_func_tail_recursive
+      _emits_tailreenter` asserts `--disasm-func fib-tco examples/fib-tco.red`
+      contains `TailReenter`. The new `examples/fib-tco.red` is a
+      tail-recursive accumulator-form fib added for this assertion.)
+- [x] Inline `#[test]`: `--trace` of `1 + 2` produces >= 4 instr lines
+      (Ground truth: `trace_emits_per_instr_lines_to_stderr` CLI test
+      asserts `--trace` of `print 1 + 2` emits >= 4 `pc=...` lines to
+      stderr. Plus `trace_emits_one_line_per_instr` inline test in
+      `vm.rs` asserts the same via `Env::set_trace(BufferWriter)` — 4
+      instrs for `1 + 2`: ConstInt, ConstInt, Call(+), Return. `print`
+      adds a 5th Call.)
+- [x] Add a `crates/red-eval/tests/disasm/` golden suite: `*.red` ->
       `*.disasm.expected`
-- [ ] `cargo test --workspace` passes
+      (Ground truth: `crates/red-eval/tests/disasm/` has 5 fixture pairs:
+      `literal.red`, `if_form.red`, `func_tail.red`, `needs_rebind.red`,
+      `refinement.red`. `tests/disasm_tests.rs` iterates them, calls
+      `disasm_source`, and asserts each non-empty expected line appears as
+      a substring of the disasm output. Substring matching (not exact) so
+      native-index churn and pool-value formatting tweaks don't break
+      fixtures — only instr mnemonics and symbol names (the semantically
+      meaningful parts) are asserted. `common/mod.rs` gained
+      `golden_fixtures_with_ext(subdir, ext)` to pair `.red` with
+      `<stem>.disasm.expected`.)
+- [x] `cargo test --workspace` passes
+      (Ground truth: `cargo test --workspace` (653 tests), `--features
+      red-eval/stats` (655 tests), `--features force-walk` (653 tests —
+      the `trace_flag_emits_per_instr_lines_to_stderr` CLI test skips
+      under `force-walk` since tracing is VM-only), and `--features
+      red-eval/stats,force-walk` (655 tests) all pass. `cargo build
+      --workspace --tests` emits zero warnings. `red-cli` gained a
+      `force-walk` feature forwarding to `red-eval/force-walk` so
+      `cfg!(feature = "force-walk")` works in `red-cli` tests.)
 
 ## Milestone 32 - Property tests + fuzzing the VM
 

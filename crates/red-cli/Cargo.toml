@@ -3,6 +3,11 @@ name = "red-cli"
 version = "0.2.0"
 edition = "2021"
 
+[features]
+# Forward to red-eval so `cfg!(feature = "force-walk")` works in red-cli tests
+# when the workspace is built with `--features force-walk`.
+force-walk = ["red-eval/force-walk"]
+
 [dependencies]
 red-eval = { path = "../red-eval" }
 rustyline = "13"

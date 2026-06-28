@@ -208,6 +208,13 @@ pub struct Env {
     /// only allocates on the first call — the ~2.7M subsequent calls reuse
     /// the pooled Vec.
     pub vm_locals_pool: Vec<Vec<Value>>,
+    /// M31: optional per-instr trace sink. When `Some`, the VM appends one
+    /// line per executed instr (`pc={pc} {instr:?}`) to this writer. The CLI
+    /// `--trace` flag wires this to `stderr`; tests wire it to a buffer.
+    /// `None` (the default) means tracing is off — zero cost (the VM checks
+    /// `is_some()` before formatting the trace line, so the hot path pays
+    /// only one `Option::is_some` branch per instr when off).
+    pub trace_out: Option<Box<dyn Write>>,
     /// High-water mark of `call_stack.len()` since the last
     /// [`Self::reset_stats`] call. Used by the v0.3 VM milestones to prove
     /// tail-call stack bounds. Only present under the `stats` cargo feature;
@@ -255,6 +262,7 @@ impl Env {
             vm_frames_pool: Vec::new(),
             vm_stack_pool: Vec::new(),
             vm_locals_pool: Vec::new(),
+            trace_out: None,
             #[cfg(feature = "stats")]
             max_frame_depth: 0,
             #[cfg(feature = "stats")]
@@ -314,6 +322,18 @@ impl Env {
     /// at startup, before any VM run).
     pub fn invalidate_native_index(&mut self) {
         self.natives_by_idx = None;
+    }
+
+    /// M31: enable per-instr VM tracing to `writer`. The VM appends one line
+    /// per executed instr (`pc={pc} {instr:?}`). Set by the CLI `--trace`
+    /// flag (which wires `stderr`) and by inline tests (which wire a buffer).
+    pub fn set_trace(&mut self, writer: Box<dyn Write>) {
+        self.trace_out = Some(writer);
+    }
+
+    /// M31: disable tracing. No-op if tracing was already off.
+    pub fn clear_trace(&mut self) {
+        self.trace_out = None;
     }
 }
 

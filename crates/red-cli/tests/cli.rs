@@ -271,6 +271,118 @@ fn multiple_recognized_flags_accumulate() {
         .stdout("1\n");
 }
 
+// --- M31: --disasm / --disasm-func / --trace ------------------------------
+
+#[test]
+fn disasm_prints_bytecode_disassembly() {
+    // `--disasm examples/fib.red` compiles the script and prints the
+    // disassembly to stdout. The script is NOT run, so no `832040` (fib 30)
+    // appears. The disasm must contain `MakeFunc` and `CallUserGlobal`.
+    let script = workspace_root().join("examples/fib.red");
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg("--disasm")
+        .arg(&script)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("MakeFunc"))
+        .stdout(predicates::str::contains("CallUserGlobal"))
+        .stdout(predicates::str::contains("Return"));
+}
+
+#[test]
+fn disasm_does_not_run_script() {
+    // `print 1` under `--disasm` must not print `1` (the script isn't run);
+    // only the disasm goes to stdout.
+    let dir = tempfile_dir();
+    let path = dir.join("noop.red");
+    fs::write(&path, "Red [] print 1").unwrap();
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg("--disasm")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Call(")) // the `print` Call instr
+        .stdout(predicates::str::contains("Return"));
+    // No `1\n` on stdout (the script wasn't run).
+}
+
+#[test]
+fn disasm_annotates_with_file_line_col() {
+    let script = workspace_root().join("examples/fib.red");
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg("--disasm")
+        .arg(&script)
+        .assert()
+        .success()
+        // The position prefix includes the file path and `line:col`.
+        .stdout(predicates::str::contains("examples/fib.red:1:"));
+}
+
+#[test]
+fn disasm_func_named_func_body() {
+    // `--disasm-func fib examples/fib.red` disassembles the `fib` func body
+    // (not the top-level script). Must contain `CallUserGlobal` (the
+    // recursive call) — non-tail-recursive `fib` has no `TailReenter`.
+    let script = workspace_root().join("examples/fib.red");
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg("--disasm-func")
+        .arg("fib")
+        .arg(&script)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("CallUserGlobal"));
+}
+
+#[test]
+fn disasm_func_tail_recursive_emits_tailreenter() {
+    // `--disasm-func fib-tco examples/fib-tco.red` disassembles the
+    // tail-recursive variant. The recursive call is in tail position, so
+    // the compiler emits `TailReenter` (self-recursion detected statically).
+    let script = workspace_root().join("examples/fib-tco.red");
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg("--disasm-func")
+        .arg("fib-tco")
+        .arg(&script)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("TailReenter"));
+}
+
+#[test]
+fn disasm_func_not_found_errors() {
+    let script = workspace_root().join("examples/fib.red");
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg("--disasm-func")
+        .arg("nonexistent")
+        .arg(&script)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("*** Error:"));
+}
+
+#[test]
+fn trace_flag_emits_per_instr_lines_to_stderr() {
+    // `--trace print 1 + 2` emits >= 4 instr lines to stderr (one per
+    // executed VM instr: ConstInt, ConstInt, Call, Call, Return).
+    // Tracing is a VM-only feature (the tree-walker doesn't read
+    // `Env::trace_out`), so this test is skipped under `force-walk` (where
+    // the default evaluator is the walker, and `--trace` is a no-op).
+    if cfg!(feature = "force-walk") {
+        return;
+    }
+    let dir = tempfile_dir();
+    let path = dir.join("trace.red");
+    fs::write(&path, "Red [] print 1 + 2").unwrap();
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg("--trace")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("3\n")
+        .stderr(predicates::str::contains("pc="))
+        .stderr(predicates::str::contains("Return"));
+}
+
 /// A scratch directory for test fixtures. Reuses `std::env::temp_dir()`; each
 /// test picks a unique name to avoid collisions.
 fn tempfile_dir() -> PathBuf {
