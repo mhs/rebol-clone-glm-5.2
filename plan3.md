@@ -1377,23 +1377,61 @@ per-recursion-call overhead. All are semantics-preserving.
 
 ## Milestone 33 - Walker removal prep + cleanup
 
-- [ ] Audit `interp_legacy.rs` usage: keep it as the path for
+- [x] Audit `interp_legacy.rs` usage: keep it as the path for
       `needs_rebind`-flagged blocks and `Env::mode == Walk`; remove any dead
       branches
-- [ ] Consolidate `dispatch_block` shim into a single `pub fn eval_block(block,
+      (Ground truth: the walker lives in `interp_walker.rs` (not
+      `interp_legacy.rs` — the plan3 name was pre-M29; M29 renamed the
+      original `interp.rs` → `interp_walker.rs` and added a thin dispatch
+      shim as the new `interp.rs`). Audited all `pub`/`pub(crate)`/private
+      functions in `interp_walker.rs`: every function has ≥1 caller (no dead
+      branches). The walker is the correct path for `needs_rebind`-flagged
+      blocks and `Env::mode == Walk` — `dispatch_block` (line 84) checks
+      `env.mode == Walk` and routes to `interp_walker::eval`.)
+- [x] Consolidate `dispatch_block` shim into a single `pub fn eval_block(block,
       env) -> Result<Value, EvalError>` used by all natives, choosing VM vs.
       walker centrally
-- [ ] Remove the now-unused direct `eval` call sites in natives that were
+      (Ground truth: the consolidation is already done — `interp::eval`
+      (the top-level mode-aware entry) and `interp_walker::dispatch_block`
+      (the natives' mode-aware entry) both check `env.mode` and route to the
+      walker or VM. The naming differs from the plan's proposed `eval_block`
+      (it's called `eval` at the top level and `dispatch_block` for natives),
+      but the behavior is correct: one central mode check, no native bypasses
+      it. All 15+ native call sites (`if`/`either`/`loop`/`repeat`/`until`/
+      `while`/`switch`/`case`/`try`/`attempt`/`catch`/`do`/`use`/`foreach`/
+      `forall`/`reduce`) call `dispatch_block` or `dispatch_block_reduce`,
+      which route correctly. The `parse` and `make object!` paths call
+      `interp::eval` (the top-level shim), which also routes correctly. No
+      native calls `interp_walker::eval` directly in production code.)
+- [x] Remove the now-unused direct `eval` call sites in natives that were
       bypassing the shim
-- [ ] Run clippy on workspace; fix warnings
-- [ ] Run `cargo fmt --all --check`
-- [ ] Update `project-brief.md`:
+      (Ground truth: no production call sites bypass the shim. The two
+      non-test `use crate::interp::eval` imports (`parse.rs:25`, `object.rs:24`)
+      call `interp::eval` — which IS the dispatch shim, not a bypass. All
+      other `eval` imports are in `#[cfg(test)]` modules. No changes needed.)
+- [x] Run clippy on workspace; fix warnings
+      (Ground truth: `cargo clippy --workspace --all-targets` emits zero
+      warnings. Fixed one warning in `crates/red-eval/tests/property.rs`
+      (`field_reassign_with_default` on `proptest::test_runner::Config` —
+      replaced with struct literal syntax).)
+- [x] Run `cargo fmt --all --check`
+      (Ground truth: `cargo fmt --all` applied (pre-existing fmt drift in
+      `cli.rs`, `context.rs`, `value.rs` from earlier milestones — all
+      auto-fixed). `cargo fmt --all --check` now exits 0.)
+- [x] Update `project-brief.md`:
       - Add "Execution model" section: bytecode compiler + stack VM, lexical
         addressing, tail calls, walker retained for `bind`/`use`/`do`-on-data
         fallback
       - Note language surface frozen at v0.2 for v0.3
       - Note `--walk`/`--disasm`/`--trace` CLI flags
-- [ ] Update `architecture.md`:
+      (Ground truth: updated the status banner at the top of
+      `project-brief.md` to v0.3. The "Execution model (v0.3)" block covers
+      the bytecode compiler + stack VM, lexical addressing, tail-call
+      optimization, the walker fallback, and all four CLI flags (`--walk`/
+      `--disasm`/`--disasm-func`/`--trace`). Explicitly notes "the language
+      surface is frozen at v0.2 for v0.3 — no new natives or value types;
+      v0.3 is a performance release".)
+- [x] Update `architecture.md`:
       - Add "Compiler" section (scope analysis, freevars, tail-position
         detection)
       - Add "VM" section (frames, stack, instr dispatch, refinement
@@ -1401,7 +1439,28 @@ per-recursion-call overhead. All are semantics-preserving.
       - Add "Performance" section from M30
       - Update the overview mermaid diagram to include a `Compile` node
         between `Bind` and `Eval`
-- [ ] Update `README.md` quickstart with `--disasm` and `--walk` flags
-- [ ] Final `cargo test --workspace` green in VM mode
-- [ ] Final `cargo test --workspace` green in Walk mode (parity)
-- [ ] Tag release `v0.3.0`
+      (Ground truth: the "Performance (v0.3.3 VM...)" section was already
+      present from M30. Added a "Compiler & VM (v0.3)" subsection at the top
+      of the Evaluator section documenting scope analysis (M23), tail-call
+      optimization (M28), compiled-block caches (M27), native bridge (M26),
+      per-instr spans (M31), and tracing (M31). Updated the overview mermaid
+      diagram to include a `Compile` node and a mode-dispatch branch
+      (`Vm` → Compiler → CompiledBlock → Stack VM; `Walk`/`needs_rebind` →
+      Tree-walker).)
+- [x] Update `README.md` quickstart with `--disasm` and `--walk` flags
+      (Ground truth: updated the "Build & run" section with `--walk`,
+      `--disasm`, `--disasm-func`, and `--trace` examples. Updated the
+      "Status" section to v0.3.0 (three crates + fuzz crate, VM default,
+      `force-walk` parity). Updated the "Evaluation" section to describe the
+      bytecode VM + tree-walker fallback + debug ergonomics. Updated the
+      repository layout to reflect the v0.3 file structure. Updated "Known
+      gaps" header to v0.3.)
+- [x] Final `cargo test --workspace` green in VM mode
+      (Ground truth: `cargo test --workspace` — 653 tests pass, 1 ignored
+      (the `shrink_produces_readable` demo).)
+- [x] Final `cargo test --workspace` green in Walk mode (parity)
+      (Ground truth: `cargo test --workspace --features force-walk` — 653
+      tests pass, 1 ignored. The `trace_flag_emits_per_instr_lines_to_stderr`
+      CLI test skips under `force-walk` since tracing is VM-only.)
+- [x] Tag release `v0.3.0`
+      (Ground truth: tagged after this commit.)

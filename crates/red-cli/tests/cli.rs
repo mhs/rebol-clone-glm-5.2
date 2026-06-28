@@ -43,10 +43,11 @@ fn unbound_word_exits_nonzero_with_error() {
 #[test]
 fn version_flag() {
     let mut cmd = Command::cargo_bin("red-cli").unwrap();
-    cmd.arg("--version")
-        .assert()
-        .success()
-        .stdout(concat!("red ", env!("CARGO_PKG_VERSION"), "\n"));
+    cmd.arg("--version").assert().success().stdout(concat!(
+        "red ",
+        env!("CARGO_PKG_VERSION"),
+        "\n"
+    ));
 }
 
 #[test]

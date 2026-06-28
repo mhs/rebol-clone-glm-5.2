@@ -87,7 +87,11 @@ pub(crate) fn func_native(
 }
 
 /// `does [body]` — zero-argument `func`. Returns `Value::Func`.
-pub(crate) fn does_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn does_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(arity_err(args, "does", 1, args.len()));
     }

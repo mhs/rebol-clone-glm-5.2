@@ -20,7 +20,11 @@ use crate::interp::dispatch_block;
 /// `Binding::Local` (e.g. the result of `in object 'word`), reads from that
 /// context; otherwise falls back to `env.user_ctx`. Also accepts a block of
 /// words, returning a block of their values (M18).
-pub(crate) fn get_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn get_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
     if args.is_empty() {
         return Err(arity_err(args, "get", 1, args.len()));
     }
@@ -83,7 +87,11 @@ fn get_one(v: &Value, env: &mut Env, span: Span) -> Result<Value, EvalError> {
 /// a `Binding::Local` (e.g. from `in object 'word`), writes to that context;
 /// otherwise writes to `env.user_ctx`. Also accepts block operands:
 /// `set [a b] [1 2]` sets each word in parallel (M18). Returns the value(s).
-pub(crate) fn set_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn set_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "set", 2, args.len()));
     }
@@ -198,7 +206,11 @@ pub(crate) fn value_predicate(
 /// (scoped to the child), so `use` provides a self-contained local scope.
 /// Outer user-context words remain visible. The locals do not persist after
 /// `use` returns. Returns the block's last value.
-pub(crate) fn use_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn use_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "use", 2, args.len()));
     }
@@ -264,7 +276,11 @@ pub(crate) fn use_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> R
 /// returning a new function whose body words are rebound to the user
 /// context. The original function's VM compiled-block cache entry is
 /// invalidated so the next call recompiles against the new bindings.
-pub(crate) fn bind_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn bind_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "bind", 2, args.len()));
     }

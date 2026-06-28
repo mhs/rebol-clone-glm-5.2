@@ -15,9 +15,15 @@ flowchart LR
   P --> V[Value tree]
   V --> B[Binding pass]
   B --> BV[Bound tree]
-  BV --> E[Evaluator]
-  E --> R[Result Value]
-  E --> OUT[stdout/stderr]
+  BV --> C{Evaluator mode}
+  C -->|Vm default| COMP[Compiler]
+  COMP --> CB[CompiledBlock]
+  CB --> VM[Stack VM]
+  VM --> R[Result Value]
+  C -->|Walk / needs_rebind| WALK[Tree-walker]
+  WALK --> R
+  VM --> OUT[stdout/stderr]
+  WALK --> OUT
 ```
 
 Crates and ownership:
@@ -315,6 +321,44 @@ Every error carries the span of the offending token so the CLI can render
 `file.red:line:col: error: ...`.
 
 ## Evaluator (`red-eval/src/interp.rs` + `interp_walker.rs` + `interp_runner.rs`)
+
+### Compiler & VM (v0.3)
+
+Since M29 (v0.3), the default evaluator is a **bytecode compiler + stack VM**.
+The compiler (`red-eval/src/vm/compiler.rs`) walks a parsed, M23-analyzed
+`Series` and emits a flat `Vec<Instr>` plus a constant pool, returning a
+`CompiledBlock`. The VM (`red-eval/src/vm/vm.rs`) is a straightforward stack
+machine: each instr pushes/pops `Value`s on the operand stack, function calls
+push `Frame`s on the call stack, and control flow mutates the frame's `pc`.
+Lexical addressing walks the frame chain — `LoadLocal(d, slot)` reads from
+`frames[len-1-d].locals[slot]`. Key features:
+
+- **Scope analysis** (M23, `vm/lex.rs`): `analyze_block` walks the parsed
+  block tracking a compile-time `Scope`, attaching `Binding::Lexical(depth,
+  slot)` to function-local words and computing `freevars` per block.
+- **Tail-call optimization** (M28): `CallUser` in tail position is rewritten
+  to `TailCall`/`TailReenter` (`patch_tail_call`); the VM reuses the current
+  frame, bounding call-stack depth for tail-recursive programs.
+- **Compiled-block caches** (M27): `env.func_cache` (keyed by `Rc::as_ptr(fd)`)
+  for function bodies, `env.block_cache` (keyed by `(Rc::as_ptr(&series.data),
+  series.index)`) for `do`-ed / loop-body blocks. Both use a secondary
+  `source_span` equality check to defeat allocator-reuse (M29 ABA fix).
+- **Native bridge** (M26): natives keep their existing `NativeFn` signature;
+  the VM assembles `&[Value]` by slicing the top `argc` stack slots and
+  `RefineArgs` by collecting `MarkRefine`/`EndRefine`-bracketed regions.
+  Natives that recurse into block evaluation call `dispatch_block`, which
+  routes to the VM (compile-on-demand) or walker (`needs_rebind`/foreign).
+- **Per-instr spans** (M31): `CompiledBlock.spans: Rc<[Span]>` (parallel to
+  `instrs`) localizes VM-raised `EvalError`s to the offending instr; `disasm`
+  prints `file:line:col` annotations.
+- **Tracing** (M31): `Env::trace_out: Option<Box<dyn Write>>` — when `Some`,
+  the VM emits `pc={pc} {instr:?}` per instr.
+
+The tree-walker (`interp_walker.rs`) is retained as the `--walk` fallback and
+the path for `needs_rebind`-flagged blocks (`use`/`make object!`/foreign-bound).
+See the "Performance" section below for the optimization tiers (M30–M30.3).
+
+### Dispatch shim
 
 Since M29 (v0.3), the evaluator is split into a thin dispatch shim
  (`interp.rs`), the original tree-walker (`interp_walker.rs`), and the

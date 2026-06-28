@@ -194,11 +194,7 @@ fn run_series_inner_opts(
 /// The output includes per-instr `file:line:col` annotations (from
 /// `disasm_with_spans`) when `file` is `Some`. The `src` is used to build a
 /// `LineMap` translating byte-offset spans to positions.
-pub fn disasm_source(
-    src: &str,
-    func: Option<&str>,
-    file: Option<&str>,
-) -> Result<String, Error> {
+pub fn disasm_source(src: &str, func: Option<&str>, file: Option<&str>) -> Result<String, Error> {
     let tokens = lexer::lex(src)?;
     let body = if tokens.is_empty() {
         Series::empty()
@@ -215,20 +211,25 @@ pub fn disasm_source(
     let (compiled, src_for_disasm) = match func {
         None => {
             let mut scope = Scope::root(&env.user_ctx);
-            let c = compile_block(&body, &mut scope, &registry)
-                .map_err(|e| Error::Eval(EvalError::Compile { kind: e.kind, span: e.span }))?;
+            let c = compile_block(&body, &mut scope, &registry).map_err(|e| {
+                Error::Eval(EvalError::Compile {
+                    kind: e.kind,
+                    span: e.span,
+                })
+            })?;
             (c, src)
         }
         Some(name) => {
             let name_sym = Symbol::new(name);
-            let body_block = find_top_level_func_body(&body, &name_sym)
-                .ok_or_else(|| Error::Eval(EvalError::Native {
+            let body_block = find_top_level_func_body(&body, &name_sym).ok_or_else(|| {
+                Error::Eval(EvalError::Native {
                     message: format!(
                         "disasm: no top-level `func`/`does`/`function` form named {:?}",
                         name
                     ),
                     span: red_core::value::Span::default(),
-                }))?;
+                })
+            })?;
             // Compile the func body with a child scope seeded from the spec
             // (mirrors `ensure_compiled`'s lazy-compile path). The spec is
             // parsed via `extract_spec` to get params/refinements/locals.
@@ -277,11 +278,20 @@ pub fn disasm_source(
                 (self_slot as u32, spec.params.len()),
                 spec.params.len(),
             )
-            .map_err(|e| Error::Eval(EvalError::Compile { kind: e.kind, span: e.span }))?;
+            .map_err(|e| {
+                Error::Eval(EvalError::Compile {
+                    kind: e.kind,
+                    span: e.span,
+                })
+            })?;
             (c, src)
         }
     };
-    Ok(red_core::disasm_with_spans(&compiled, Some(src_for_disasm), file))
+    Ok(red_core::disasm_with_spans(
+        &compiled,
+        Some(src_for_disasm),
+        file,
+    ))
 }
 
 /// A located func body for `disasm_source`: the spec value, the body series,
@@ -306,7 +316,10 @@ fn find_top_level_func_body(body: &Series, name: &Symbol) -> Option<LocatedFunc>
         if let Value::SetWord { sym, .. } = &data[i] {
             if sym == name && i + 1 < n {
                 let next = &data[i + 1];
-                if let Value::Word { sym: kw, binding, .. } = next {
+                if let Value::Word {
+                    sym: kw, binding, ..
+                } = next
+                {
                     if matches!(binding, red_core::value::Binding::Unbound) {
                         match kw.as_str() {
                             "func" | "function" => {
@@ -319,7 +332,10 @@ fn find_top_level_func_body(body: &Series, name: &Symbol) -> Option<LocatedFunc>
                                         Value::Block { series, .. } => series.clone(),
                                         _ => return None,
                                     };
-                                    return Some(LocatedFunc { spec, body: body_series });
+                                    return Some(LocatedFunc {
+                                        spec,
+                                        body: body_series,
+                                    });
                                 }
                             }
                             "does" => {
@@ -329,7 +345,10 @@ fn find_top_level_func_body(body: &Series, name: &Symbol) -> Option<LocatedFunc>
                                         Value::Block { series, .. } => series.clone(),
                                         _ => return None,
                                     };
-                                    return Some(LocatedFunc { spec, body: body_series });
+                                    return Some(LocatedFunc {
+                                        spec,
+                                        body: body_series,
+                                    });
                                 }
                             }
                             _ => {}

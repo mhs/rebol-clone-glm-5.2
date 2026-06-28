@@ -17,7 +17,11 @@ use crate::interp::{dispatch_block, dispatch_block_reduce};
 /// `load_source`, binds the resulting body against the live `env.user_ctx`
 /// (so `do "x: 5"` writes to the user context like a top-level script), then
 /// evaluates it.
-pub(crate) fn do_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn do_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
     if args.is_empty() {
         return Err(arity_err(args, "do", 1, 0));
     }
@@ -45,7 +49,11 @@ pub(crate) fn do_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Re
 /// to `do`, which binds it to the user context). Mirrors `load_source` from
 /// `red-core::parser` exposed as a runtime native. This is the string→block
 /// half of the load dialect; file loading lands in M20.
-pub(crate) fn load_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn load_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(arity_err(args, "load", 1, args.len()));
     }
@@ -67,7 +75,11 @@ pub(crate) fn load_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) ->
 
 /// `reduce block` — evaluates each expression in the block, returning a new
 /// block of the results.
-pub(crate) fn reduce(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn reduce(
+    args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
     let body = expect_block(args, 0, "reduce")?;
     dispatch_block_reduce(&body, env)
 }

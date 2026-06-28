@@ -1,14 +1,36 @@
 # Plan: Proof-of-Concept Red Clone in Rust
 
-> **Status (v0.2):** The original scope below (lexer/parser/evaluator/series/
-> binding/functions/`parse`) shipped as `v0.1.0-poc`. `plan2.md` extends it to
-> `v0.2.0` with refinements, type conversions, string natives, control-flow
-> expansion, math/bitwise, **objects**, **real paths**, and **file/shell I/O**.
-> This document has been updated to reflect the v0.2 value model, the actual
-> crate/file layout (red-core gained `env.rs`/`error.rs`/`source.rs`; red-eval
-> gained `strings.rs`/`math.rs`/`convert.rs`/`object.rs`/`path.rs`/`io.rs`),
-> and the known-gap list; `architecture.md` covers the dispatch/path/object
-> internals.
+> **Status (v0.3):** The v0.2 language surface (lexer/parser/evaluator/series/
+> binding/functions/`parse`/refinements/paths/objects/I/O) shipped as
+> `v0.2.0-poc`. `plan3.md` extends the *implementation* to `v0.3.0` with a
+> **bytecode compiler + stack VM** (the default evaluator), lexical addressing,
+> tail-call optimization, a disassembler (`--disasm`), per-instr tracing
+> (`--trace`), and property tests + fuzzing. **The language surface is frozen
+> at v0.2 for v0.3** — no new natives or value types; v0.3 is a performance
+> release. The tree-walker (`interp_walker.rs`) is retained as the `--walk`
+> fallback for `needs_rebind`-flagged blocks (`use`/`make object!`/foreign-
+> bound) and for parity comparison (`--features force-walk`). This document
+> has been updated to reflect the v0.3 execution model; `architecture.md`
+> covers the compiler/VM/dispatch/path/object internals.
+>
+> **Execution model (v0.3):**
+> - **Bytecode compiler + stack VM** (`EvalMode::Vm`, the default): blocks
+>   compile to a flat `Vec<Instr>` with a constant pool; the VM dispatches
+>   instrs with lexical addressing (`LoadLocal(depth, slot)` /
+>   `LoadGlobal(slot)`) where statically analyzable, falling back to the
+>   dynamic `Context` slot mechanism (`LoadDynamic(sym)`) for `bind`/`use`/
+>   `do`-on-data. Tail-call optimization (`TailCall`/`TailReenter`) bounds
+>   call-stack depth for tail-recursive programs. Compiled blocks are cached
+>   per-`FuncDef` and per-`Series` identity.
+> - **Tree-walking evaluator** (`interp_walker.rs`, the v0.2 default): retained
+>   as the `--walk` fallback and the path for `needs_rebind`-flagged blocks.
+>   `--features force-walk` runs the entire test suite against the walker for
+>   byte-for-byte parity with the VM.
+> - **CLI flags:** `--walk` (force tree-walker), `--disasm <file.red>` (print
+>   bytecode disassembly, no run), `--disasm-func <name> <file.red>`
+>   (disassemble a named func body), `--trace` (per-instr VM trace to stderr).
+> - **Performance:** 2–4× speedup over the walker on compute-heavy programs
+>   (deep recursion, tight loops). See `BENCHMARKS.md`.
 
 ## Goals
 - Lexer → parser → tree-walking evaluator for a small Red subset

@@ -180,11 +180,7 @@ pub fn disasm(block: &CompiledBlock) -> String {
 /// build a `LineMap` translating byte offsets to `line:col`. Both are
 /// optional so a caller with only the `CompiledBlock` (e.g. an inline test)
 /// still gets the unannotated form.
-pub fn disasm_with_spans(
-    block: &CompiledBlock,
-    src: Option<&str>,
-    file: Option<&str>,
-) -> String {
+pub fn disasm_with_spans(block: &CompiledBlock, src: Option<&str>, file: Option<&str>) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let pool = block.pool.as_ref();
@@ -195,11 +191,7 @@ pub fn disasm_with_spans(
         // instr text. Format: `  [file:line:col]` or `  [line:col]`. When
         // the span is default (zero) or no `src` was provided, emit a blank
         // prefix of the same width so the instr column stays aligned.
-        let pos_prefix = position_prefix(
-            spans.get(i).copied(),
-            line_map.as_ref(),
-            file,
-        );
+        let pos_prefix = position_prefix(spans.get(i).copied(), line_map.as_ref(), file);
         let _ = write!(out, "{i:4}: {pos_prefix}");
         match instr {
             Instr::Const(idx) => {
@@ -447,7 +439,10 @@ mod tests {
         };
         let out = disasm(&block);
         // No `[...]` position prefix should appear.
-        assert!(!out.contains("]  Const"), "unexpected position prefix: {out}");
+        assert!(
+            !out.contains("]  Const"),
+            "unexpected position prefix: {out}"
+        );
         assert!(out.contains("Const(0)  ; Integer"));
     }
 

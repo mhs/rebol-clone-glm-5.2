@@ -105,17 +105,29 @@ pub(crate) fn add(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<
 }
 
 /// `-` infix — numeric subtraction.
-pub(crate) fn subtract(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn subtract(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
     num_binop(args, "division", |a, b| Some(a - b), |a, b| a - b)
 }
 
 /// `*` infix — numeric multiplication.
-pub(crate) fn multiply(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn multiply(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
     num_binop(args, "division", |a, b| Some(a * b), |a, b| a * b)
 }
 
 /// `/` infix — numeric division. Integer division by zero → error.
-pub(crate) fn divide(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn divide(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
     num_binop(
         args,
         "division",

@@ -41,7 +41,11 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
-pub(crate) fn equal(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn equal(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
     Ok(Value::Logic(values_equal(&args[0], &args[1])))
 }
 
@@ -155,7 +159,11 @@ fn num_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalError> {
 // Logic: and, or (infix), not (prefix)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn and_op(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn and_op(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
     match (&args[0], &args[1]) {
         (Value::Logic(a), Value::Logic(b)) => Ok(Value::Logic(*a && *b)),
         (Value::Integer { n: a, .. }, Value::Integer { n: b, .. }) => Ok(Value::integer(*a & *b)),
@@ -163,7 +171,11 @@ pub(crate) fn and_op(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Resu
     }
 }
 
-pub(crate) fn or_op(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn or_op(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
     match (&args[0], &args[1]) {
         (Value::Logic(a), Value::Logic(b)) => Ok(Value::Logic(*a || *b)),
         (Value::Integer { n: a, .. }, Value::Integer { n: b, .. }) => Ok(Value::integer(*a | *b)),
@@ -171,6 +183,10 @@ pub(crate) fn or_op(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Resul
     }
 }
 
-pub(crate) fn not_op(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn not_op(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
     Ok(Value::Logic(!truthy(&args[0])))
 }

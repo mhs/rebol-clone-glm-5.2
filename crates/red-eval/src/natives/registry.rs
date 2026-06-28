@@ -14,15 +14,17 @@ use red_core::context::Context;
 use red_core::value::{FuncDef, Series, Symbol, Value};
 use red_core::{Env, NativeFn};
 
-use super::compare::{and_op, equal, greater_equal, greater_than, less_equal, less_than, not_equal, not_op, or_op};
+use super::compare::{
+    and_op, equal, greater_equal, greater_than, less_equal, less_than, not_equal, not_op, or_op,
+};
 use super::control::{
-    all_native, any_native, attempt_native, break_native, case_native, catch_native,
-    cause_error, comment_native, continue_native, default_native, either, exit_native, if_native,
-    loop_native, repeat, switch_native, throw_native, try_native, until, while_native,
+    all_native, any_native, attempt_native, break_native, case_native, catch_native, cause_error,
+    comment_native, continue_native, default_native, either, exit_native, if_native, loop_native,
+    repeat, switch_native, throw_native, try_native, until, while_native,
 };
 use super::eval::{do_native, load_native, reduce};
 use super::func::{does_native, func_native, function_native, function_predicate, return_native};
-use super::io::{print, prin, probe};
+use super::io::{prin, print, probe};
 use super::words::{bind_native, get_native, set_native, use_native, value_predicate};
 
 // ---------------------------------------------------------------------------
@@ -115,14 +117,22 @@ pub fn register_natives(env: &mut Env) {
 
     // Arithmetic (M7, infix). The infix `+ - * /` implementations live in
     // `crate::math` alongside their prefix aliases (`add`/`subtract`/…).
-    env.natives
-        .insert(Symbol::new("+"), infix_native(crate::math::add as NativeFn, 2));
-    env.natives
-        .insert(Symbol::new("-"), infix_native(crate::math::subtract as NativeFn, 2));
-    env.natives
-        .insert(Symbol::new("*"), infix_native(crate::math::multiply as NativeFn, 2));
-    env.natives
-        .insert(Symbol::new("/"), infix_native(crate::math::divide as NativeFn, 2));
+    env.natives.insert(
+        Symbol::new("+"),
+        infix_native(crate::math::add as NativeFn, 2),
+    );
+    env.natives.insert(
+        Symbol::new("-"),
+        infix_native(crate::math::subtract as NativeFn, 2),
+    );
+    env.natives.insert(
+        Symbol::new("*"),
+        infix_native(crate::math::multiply as NativeFn, 2),
+    );
+    env.natives.insert(
+        Symbol::new("/"),
+        infix_native(crate::math::divide as NativeFn, 2),
+    );
     env.natives.insert(
         Symbol::new("//"),
         infix_native(crate::math::modulo as NativeFn, 2),

@@ -5,22 +5,27 @@ language, implemented in Rust. Red is a homoiconic, block-structured
 descendant of Rebol — code is data, evaluation is prefix-style and eager,
 and "dialects" are blocks interpreted by custom mini-interpreters.
 
-This repo is a **Red subset interpreter** (`v0.2.0`). It implements a usable
-slice of Red — lexer, parser, tree-walking evaluator, full series model, real
-word binding, functions, the `parse` dialect, **objects**, **real paths**,
-**refinements**, type conversions, string/control-flow/math natives, file &
-shell I/O, and a REPL. The build history is tracked in [`plan.md`](./plan.md)
-(v0.1) and [`plan2.md`](./plan2.md) (v0.2).
+This repo is a **Red subset interpreter** (`v0.3.0`). It implements a usable
+slice of Red — lexer, parser, **bytecode compiler + stack VM** (the default
+since v0.3), tree-walking evaluator (retained as the `--walk` fallback), full
+series model, real word binding, functions, the `parse` dialect, **objects**,
+**real paths**, **refinements**, type conversions, string/control-flow/math
+natives, file & shell I/O, and a REPL. The build history is tracked in
+[`plan.md`](./plan.md) (v0.1), [`plan2.md`](./plan2.md) (v0.2), and
+[`plan3.md`](./plan3.md) (v0.3 — VM + performance).
 
 ## Status
 
-- **Tagged:** `v0.2.0`
-- **Workspace:** three crates — `red-core` (value model + lexer + parser + printer),
-  `red-eval` (interpreter + natives + `parse`), `red-cli` (binary + REPL).
-- **Tests:** `cargo test --workspace` green. Golden fixtures in
+- **Tagged:** `v0.3.0`
+- **Workspace:** three crates — `red-core` (value model + lexer + parser + printer + VM IR types),
+  `red-eval` (compiler + VM + tree-walker + natives + `parse`), `red-cli` (binary + REPL).
+  A `fuzz/` crate (nightly-only, `libfuzzer-sys`) is excluded from the default workspace.
+- **Default evaluator:** bytecode VM (`EvalMode::Vm`). `--walk` on the CLI or the `force-walk` cargo feature forces the tree-walker for debugging and parity comparison.
+- **Tests:** `cargo test --workspace` green in VM mode; `--features force-walk` green in Walk mode (parity). Golden fixtures in
   `crates/red-core/tests/golden/` (round-trip), `crates/red-eval/tests/programs/`
-  (program execution), and `crates/red-eval/tests/programs_errors/` (error
-  rendering). CLI tests via `assert_cmd`.
+  (program execution), `crates/red-eval/tests/programs_errors/` (error
+  rendering), `crates/red-eval/tests/disasm/` (disassembly), and
+  `crates/red-eval/tests/property.rs` (VM/Walk parity proptests). CLI tests via `assert_cmd`.
 
 ## Build & run
 
@@ -30,9 +35,15 @@ cargo test  --workspace
 cargo run  -p red-cli -- examples/hello.red     # → Hello, World!
 cargo run  -p red-cli                            # → REPL (no args)
 cargo run  -p red-cli -- --help
-cargo run  -p red-cli -- --version               # → red 0.2.0
+cargo run  -p red-cli -- --version               # → red 0.3.0
 cargo run  -p red-cli -- --allow-shell examples/call.red   # enable call/shell
+cargo run  -p red-cli -- --walk examples/fib.red          # force tree-walker
+cargo run  -p red-cli -- --disasm examples/fib.red        # disassemble (no run)
+cargo run  -p red-cli -- --disasm-func fib examples/fib.red  # disassemble named func
+cargo run  -p red-cli -- --trace examples/arith.red       # per-instr VM trace to stderr
 ```
+
+The v0.3 language surface is frozen at v0.2 — no new natives or value types. v0.3 is a **performance release**: the bytecode VM delivers 2–4× speedups on compute-heavy programs (deep recursion, tight loops) while preserving exact observable behavior (golden parity, error parity). See `BENCHMARKS.md` for measurements.
 
 ## What's implemented
 
@@ -54,13 +65,25 @@ cargo run  -p red-cli -- --allow-shell examples/call.red   # enable call/shell
 `Refinement`, `File`, `Url`, `Object`, `Error`, `String8` (stub).
 
 ### Evaluation
-- Tree-walk `eval(Value, &mut Env)`.
+- **Bytecode compiler + stack VM** (v0.3, default): blocks compile to a flat
+  `Vec<Instr>` with a constant pool; the VM dispatches instrs with lexical
+  addressing (frame depth + slot index) where statically analyzable, falling
+  back to the dynamic `Context` slot mechanism for `bind`/`use`/`do`-on-data.
+  Tail-call optimization (`TailCall`/`TailReenter`) bounds call-stack depth for
+  tail-recursive programs. See `architecture.md` for the full design.
+- **Tree-walking evaluator** (`interp_walker.rs`, the v0.2 default): retained
+  as the `--walk` fallback and the path for `needs_rebind`-flagged blocks
+  (`use`/`make object!`/foreign-bound). `--features force-walk` runs the entire
+  test suite against the walker for byte-for-byte parity with the VM.
 - `Block` is **data** (returned as-is); `Paren` is **eager** (evaluated in place).
-- Word binding is real: `Unbound` / `Local(Context, slot)` / `Func(slot)`.
-  Unbound words at eval time error Red-style ("has no value"); there is no
-  global fallback chain.
+- Word binding is real: `Unbound` / `Local(Context, slot)` / `Func(slot)` /
+  `Lexical(depth, slot)` (VM-only). Unbound words at eval time error Red-style
+  ("has no value"); there is no global fallback chain.
 - SetWord at script top level binds into the user context.
 - Function bodies get bound at `func`/`does` creation time, not at load.
+- **Debug ergonomics (M31):** `--disasm` prints the bytecode disassembly with
+  per-instr `file:line:col` annotations (no run); `--disasm-func <name>` disassembles
+  a named top-level func body; `--trace` emits one line per executed VM instr to stderr.
 
 ### Natives (~140)
 - **I/O:** `print`, `prin`, `probe`, `form`, `mold`.
@@ -156,25 +179,29 @@ runnable via `cargo run -p red-cli -- examples/<name>.red`:
 
 ```
 rebol-clone/
-├── Cargo.toml                 # [workspace]
+├── Cargo.toml                 # [workspace] (excludes fuzz/)
 ├── crates/
-│   ├── red-core/              # value model, lexer, parser, printer
-│   │   ├── src/{lib,value,context,lexer,parser,printer,error}.rs
-│   │   └── tests/
-│   │       ├── round_trip.rs       # golden load → mold
-│   │       ├── golden/*.red *.expected
-│   │       └── property.rs
-│   ├── red-eval/              # tree-walk interpreter
-│   │   ├── src/{lib,context,interp,natives,series,binding,parse,error}.rs
-│   │   └── tests/programs/{*.red *.expected}
+│   ├── red-core/              # value model, lexer, parser, printer, VM IR types
+│   │   ├── src/{lib,value,context,env,error,source,lexer,parser,printer,vm_ir}.rs
+│   │   └── tests/{round_trip,property}.rs + golden/
+│   ├── red-eval/              # compiler + VM + tree-walker + natives + parse
+│   │   ├── src/{lib,interp,interp_runner,interp_walker,binding,series,parse,
+│   │   │        strings,math,convert,object,path,io}.rs
+│   │   ├── src/natives/       # split by concern: compare/control/eval/func/io/words/registry
+│   │   ├── src/vm/            # compiler.rs, vm.rs, lex.rs, pool.rs
+│   │   ├── benches/eval.rs    # criterion A/B bench harness (VM vs walker)
+│   │   └── tests/{programs,programs_errors,disasm,property,parity,bench_fixtures}.rs
 │   └── red-cli/               # binary + REPL
-│       ├── src/main.rs
+│       ├── src/{main,repl}.rs
 │       └── tests/cli.rs
+├── fuzz/                      # cargo-fuzz targets (nightly-only, excluded from workspace)
 ├── examples/                  # sample .red programs
+├── BENCHMARKS.md              # v0.3 VM bench numbers
 ├── project-brief.md           # feature scope and design decisions
-├── architecture.md            # implementation sketch (lexer/parser/eval internals)
+├── architecture.md            # implementation sketch (lexer/parser/compiler/VM/eval internals)
 ├── plan.md                    # v0.1 build checklist (complete)
-└── plan2.md                   # v0.2 roadmap
+├── plan2.md                   # v0.2 roadmap (complete)
+└── plan3.md                   # v0.3 VM + performance roadmap
 ```
 
 ## Design notes
@@ -191,9 +218,9 @@ rebol-clone/
   `HashMap<Symbol, NativeFn>` lookup. Real Red pre-binds native references at
   load; deferred.
 
-## Known gaps (v0.2)
+## Known gaps (v0.3)
 
-See [`project-brief.md`](./project-brief.md) and [`plan2.md`](./plan2.md) for
+See [`project-brief.md`](./project-brief.md) and [`plan3.md`](./plan3.md) for
 the authoritative list. Headlines:
 
 - **No closures** — `func` shallow-copies args per call.

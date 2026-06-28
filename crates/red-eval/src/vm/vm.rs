@@ -103,35 +103,35 @@ pub fn run(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
         natives_by_idx,
         ref_marks: Vec::new(),
         pending_refs: Vec::new(),
-            cached_block: None,
-            cached_instrs: None,
-            cached_spans: None,
-            cached_frame_gen: 0,
-            frame_gen: 0,
-        };
-        vm.frames.clear();
-        vm.stack.clear();
-        vm.frames.push(Frame {
-            func: None,
-            locals: Vec::new(),
-            depth: 0,
-            block,
-            pc: 0,
-        });
-        vm.frame_gen = vm.frame_gen.wrapping_add(1);
-        let result = vm.run_loop();
-        // M30.1.C: restore the pools. Extract the Vecs from `vm` before dropping
-        // it (the Vm borrows `env: &mut Env`, so we can't touch `env` while `vm`
-        // is alive). `std::mem::take` leaves `vm.frames`/`vm.stack` as empty
-        // Vecs (no alloc) so `vm`'s Drop is cheap.
-        let mut frames_pool = std::mem::take(&mut vm.frames);
-        let mut stack_pool = std::mem::take(&mut vm.stack);
-        frames_pool.clear();
-        stack_pool.clear();
-        drop(vm);
-        env.vm_frames_pool = frames_pool;
-        env.vm_stack_pool = stack_pool;
-        result
+        cached_block: None,
+        cached_instrs: None,
+        cached_spans: None,
+        cached_frame_gen: 0,
+        frame_gen: 0,
+    };
+    vm.frames.clear();
+    vm.stack.clear();
+    vm.frames.push(Frame {
+        func: None,
+        locals: Vec::new(),
+        depth: 0,
+        block,
+        pc: 0,
+    });
+    vm.frame_gen = vm.frame_gen.wrapping_add(1);
+    let result = vm.run_loop();
+    // M30.1.C: restore the pools. Extract the Vecs from `vm` before dropping
+    // it (the Vm borrows `env: &mut Env`, so we can't touch `env` while `vm`
+    // is alive). `std::mem::take` leaves `vm.frames`/`vm.stack` as empty
+    // Vecs (no alloc) so `vm`'s Drop is cheap.
+    let mut frames_pool = std::mem::take(&mut vm.frames);
+    let mut stack_pool = std::mem::take(&mut vm.stack);
+    frames_pool.clear();
+    stack_pool.clear();
+    drop(vm);
+    env.vm_frames_pool = frames_pool;
+    env.vm_stack_pool = stack_pool;
+    result
 }
 
 /// Run a compiled block in "reduce mode": every expression's result stays on

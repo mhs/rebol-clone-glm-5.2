@@ -38,7 +38,11 @@ pub(crate) fn if_native(
 }
 
 /// `either cond t-block f-block`
-pub(crate) fn either(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn either(
+    args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
     if args.len() != 3 {
         return Err(arity_err(args, "either", 3, args.len()));
     }
@@ -85,7 +89,11 @@ pub(crate) fn loop_native(
 
 /// `repeat 'word count block` — binds `word` to 1..=count, evaluates `block`
 /// each iteration. Accepts both lit-word (`'i`) and bare-word (`i`) forms.
-pub(crate) fn repeat(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn repeat(
+    args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
     if args.len() != 3 {
         return Err(arity_err(args, "repeat", 3, args.len()));
     }
@@ -398,7 +406,11 @@ pub(crate) fn default_native(
 
 /// `all [block]` — evaluates each expression in `block`; short-circuits to
 /// `none` on the first falsy value, otherwise returns the last value.
-pub(crate) fn all_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn all_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
     let body = expect_block(args, 0, "all")?;
     let series = match &body {
         Value::Block { series, .. } | Value::Paren { series, .. } => series.clone(),
@@ -420,7 +432,11 @@ pub(crate) fn all_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> R
 
 /// `any [block]` — evaluates each expression in `block`; returns the first
 /// truthy value, or `none` if all are falsy.
-pub(crate) fn any_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn any_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
     let body = expect_block(args, 0, "any")?;
     let series = match &body {
         Value::Block { series, .. } | Value::Paren { series, .. } => series.clone(),
@@ -441,7 +457,11 @@ pub(crate) fn any_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> R
 /// `try [block]` — evaluate `block`; on success return the value; on a
 /// catchable error, return a `Value::Error` carrying the message. Control-
 /// flow unwinds (`Return`/`Break`/`Continue`/`Throw`/`Quit`) propagate.
-pub(crate) fn try_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn try_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
     let body = expect_block(args, 0, "try")?;
     match dispatch_block(&body, env) {
         Ok(v) => Ok(v),

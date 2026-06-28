@@ -274,7 +274,11 @@ mod tests {
         ctx.slot_index(Symbol::new("c"));
         ctx.slot_index(Symbol::new("a"));
         ctx.slot_index(Symbol::new("b"));
-        let words: Vec<String> = ctx.words().into_iter().map(|s| s.as_str().to_string()).collect();
+        let words: Vec<String> = ctx
+            .words()
+            .into_iter()
+            .map(|s| s.as_str().to_string())
+            .collect();
         assert_eq!(words, vec!["c", "a", "b"]);
     }
 

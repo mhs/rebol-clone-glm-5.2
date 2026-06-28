@@ -824,20 +824,65 @@ mod tests {
         }
         check!(Value::Integer { n: 1, span: s });
         check!(Value::Float { f: 1.0, span: s });
-        check!(Value::String { s: Rc::from("x"), span: s });
-        check!(Value::Word { sym: Symbol::new("w"), binding: Binding::Unbound, span: s });
-        check!(Value::SetWord { sym: Symbol::new("w"), binding: Binding::Unbound, span: s });
-        check!(Value::GetWord { sym: Symbol::new("w"), binding: Binding::Unbound, span: s });
-        check!(Value::LitWord { sym: Symbol::new("w"), span: s });
-        check!(Value::Block { series: Series::empty(), span: s });
-        check!(Value::Paren { series: Series::empty(), span: s });
-        check!(Value::Path { parts: vec![], span: s });
-        check!(Value::GetPath { parts: vec![], span: s });
-        check!(Value::LitPath { parts: vec![], span: s });
-        check!(Value::SetPath { parts: vec![], span: s });
-        check!(Value::Refinement { sym: Symbol::new("r"), span: s });
-        check!(Value::File { path: Rc::from("p"), span: s });
-        check!(Value::Url { url: Rc::from("u"), span: s });
+        check!(Value::String {
+            s: Rc::from("x"),
+            span: s
+        });
+        check!(Value::Word {
+            sym: Symbol::new("w"),
+            binding: Binding::Unbound,
+            span: s
+        });
+        check!(Value::SetWord {
+            sym: Symbol::new("w"),
+            binding: Binding::Unbound,
+            span: s
+        });
+        check!(Value::GetWord {
+            sym: Symbol::new("w"),
+            binding: Binding::Unbound,
+            span: s
+        });
+        check!(Value::LitWord {
+            sym: Symbol::new("w"),
+            span: s
+        });
+        check!(Value::Block {
+            series: Series::empty(),
+            span: s
+        });
+        check!(Value::Paren {
+            series: Series::empty(),
+            span: s
+        });
+        check!(Value::Path {
+            parts: vec![],
+            span: s
+        });
+        check!(Value::GetPath {
+            parts: vec![],
+            span: s
+        });
+        check!(Value::LitPath {
+            parts: vec![],
+            span: s
+        });
+        check!(Value::SetPath {
+            parts: vec![],
+            span: s
+        });
+        check!(Value::Refinement {
+            sym: Symbol::new("r"),
+            span: s
+        });
+        check!(Value::File {
+            path: Rc::from("p"),
+            span: s
+        });
+        check!(Value::Url {
+            url: Rc::from("u"),
+            span: s
+        });
     }
 
     #[test]
@@ -854,7 +899,9 @@ mod tests {
     fn span_or_default_returns_zero_for_synthetic() {
         assert!(Value::None.span_or_default().is_default());
         assert!(Value::Logic(true).span_or_default().is_default());
-        assert!(Value::Func(Rc::new(FuncDef::default())).span_or_default().is_default());
+        assert!(Value::Func(Rc::new(FuncDef::default()))
+            .span_or_default()
+            .is_default());
     }
 
     #[test]
@@ -873,9 +920,21 @@ mod tests {
             Value::Integer { n, .. } => Value::Integer { n, span: s },
             Value::Float { f, .. } => Value::Float { f, span: s },
             Value::String { s: ss, .. } => Value::String { s: ss, span: s },
-            Value::Word { sym, binding, .. } => Value::Word { sym, binding, span: s },
-            Value::SetWord { sym, binding, .. } => Value::SetWord { sym, binding, span: s },
-            Value::GetWord { sym, binding, .. } => Value::GetWord { sym, binding, span: s },
+            Value::Word { sym, binding, .. } => Value::Word {
+                sym,
+                binding,
+                span: s,
+            },
+            Value::SetWord { sym, binding, .. } => Value::SetWord {
+                sym,
+                binding,
+                span: s,
+            },
+            Value::GetWord { sym, binding, .. } => Value::GetWord {
+                sym,
+                binding,
+                span: s,
+            },
             Value::LitWord { sym, .. } => Value::LitWord { sym, span: s },
             Value::Block { series, .. } => Value::Block { series, span: s },
             Value::Paren { series, .. } => Value::Paren { series, span: s },

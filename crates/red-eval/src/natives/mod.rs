@@ -35,9 +35,9 @@ mod io;
 mod registry;
 mod words;
 
-pub use registry::{install_constants, register_natives};
 pub(crate) use compare::values_equal;
 pub(crate) use func::{extract_spec, func_native, FuncSpec};
+pub use registry::{install_constants, register_natives};
 
 // ---------------------------------------------------------------------------
 // Shared helpers (used by every sub-module + across the crate)

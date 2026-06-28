@@ -142,7 +142,7 @@ fn gen_value(_depth: u32) -> BoxedStrategy<Value> {
         any::<bool>().prop_map(Value::Logic),
     ]
     .prop_recursive(
-        3, // max depth
+        3,  // max depth
         16, // max total items
         4,  // max items per collection
         |inner| {
@@ -242,11 +242,9 @@ fn gen_stmt() -> BoxedStrategy<String> {
     let expr = gen_expr();
     prop_oneof![
         // `word: expr` — assignment.
-        ("[a-z][a-z0-9]{0,5}", expr.clone())
-            .prop_map(|(w, e)| format!("{w}: {e}")),
+        ("[a-z][a-z0-9]{0,5}", expr.clone()).prop_map(|(w, e)| format!("{w}: {e}")),
         // `if cond [ expr ]` — conditional.
-        (expr.clone(), expr.clone())
-            .prop_map(|(c, t)| format!("if {c} [{t}]")),
+        (expr.clone(), expr.clone()).prop_map(|(c, t)| format!("if {c} [{t}]")),
         // `either cond [expr] [expr]` — branch.
         (expr.clone(), expr.clone(), expr.clone())
             .prop_map(|(c, t, f)| format!("either {c} [{t}] [{f}]")),
@@ -371,11 +369,11 @@ mod tail_recursion_stats {
 #[cfg(feature = "stats")]
 mod compile_idempotent {
     use super::*;
+    use red_core::vm_ir::CompiledBlock;
     use red_eval::binding::bind_pass;
     use red_eval::vm::compiler::{compile_block, NativeRegistry};
     use red_eval::vm::lex::Scope;
     use red_eval::{install_constants, register_natives};
-    use red_core::vm_ir::CompiledBlock;
 
     /// Compile `src` twice using the *same* `Env` (so the native registry
     /// snapshot is identical — `env.natives` insertion order is stable within
@@ -406,11 +404,19 @@ mod compile_idempotent {
         // `Binding::Lexical` rewrites.
         let body2 = red_eval::binding::deep_clone_series(&body);
         let mut scope1 = Scope::root(&env.user_ctx);
-        let b1 = compile_block(&body, &mut scope1, &registry)
-            .map_err(|e: CompileError| red_eval::Error::from(red_core::EvalError::Compile { kind: e.kind, span: e.span }))?;
+        let b1 = compile_block(&body, &mut scope1, &registry).map_err(|e: CompileError| {
+            red_eval::Error::from(red_core::EvalError::Compile {
+                kind: e.kind,
+                span: e.span,
+            })
+        })?;
         let mut scope2 = Scope::root(&env.user_ctx);
-        let b2 = compile_block(&body2, &mut scope2, &registry)
-            .map_err(|e: CompileError| red_eval::Error::from(red_core::EvalError::Compile { kind: e.kind, span: e.span }))?;
+        let b2 = compile_block(&body2, &mut scope2, &registry).map_err(|e: CompileError| {
+            red_eval::Error::from(red_core::EvalError::Compile {
+                kind: e.kind,
+                span: e.span,
+            })
+        })?;
         Ok((b1, b2))
     }
 
@@ -475,9 +481,10 @@ mod compile_idempotent {
 #[ignore = "demonstrates shrink readability; run with --ignored --nocapture"]
 fn shrink_produces_readable() {
     // Build a runner with a small case count so it shrinks quickly.
-    let mut config = proptest::test_runner::Config::default();
-    config.cases = 64;
-    let mut rt = proptest::test_runner::TestRunner::new(config);
+    let mut rt = proptest::test_runner::TestRunner::new(proptest::test_runner::Config {
+        cases: 64,
+        ..proptest::test_runner::Config::default()
+    });
     let strat = (10i32..10_000).prop_map(|n| Value::Integer {
         n: n as i64,
         span: Span::new(0, 0),
@@ -490,7 +497,8 @@ fn shrink_produces_readable() {
         if src.len() > 1 {
             panic!(
                 "deliberate shrink demo: source {:?} (len {}) is too long",
-                src, src.len()
+                src,
+                src.len()
             );
         }
         Ok(())
