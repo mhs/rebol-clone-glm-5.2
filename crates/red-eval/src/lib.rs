@@ -14,6 +14,7 @@
 pub mod binding;
 pub mod convert;
 pub mod interp;
+pub mod interp_runner;
 pub mod interp_walker;
 pub mod io;
 pub mod math;

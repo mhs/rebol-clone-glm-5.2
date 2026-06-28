@@ -45,13 +45,15 @@ rebol-clone/
 │   │   ├── src/
 │   │   │   ├── lib.rs
 │   │   │   ├── context.rs        # 9-line `pub use` re-export of Env/Context/... from red-core
-│   │   │   ├── interp.rs         # eval(Value, &mut Env) + run_source* entry points + RunOptions
-│   │   │   ├── natives.rs        # print/prin/probe, arithmetic, comparison, logic, control flow, eval, functions, binding natives, register_*/install_constants/install_system
+│   │   │   ├── interp.rs         # dispatch shim: eval(Value, &mut Env) — routes to walker or VM by env.mode
+│   │   │   ├── interp_runner.rs  # run_source*/run_series*/RunOptions entry points (extracted in M36)
+│   │   │   ├── interp_walker.rs  # tree-walking evaluator (the eval algorithm; entry points moved to interp_runner.rs)
+│   │   │   ├── natives/          # native ops split by concern: io/compare/control/func/eval/words/registry
 │   │   │   ├── series.rs         # first/next/append/select/find/... series natives
 │   │   │   ├── binding.rs        # bind_pass / bind_function_body + bind/use/in/get/set/value? natives
 │   │   │   ├── parse.rs          # parse dialect (matcher subset)
 │   │   │   ├── strings.rs        # rejoin/reform/join/split/trim/replace/uppercase/lowercase/suffix?
-│   │   │   ├── math.rs           # abs/negate/min/max/round/random/power/and/or/xor/complement/shift-*/even?/odd?/prefix aliases
+│   │   │   ├── math.rs           # + - * / infix + abs/negate/min/max/round/random/power/and/or/xor/complement/shift-*/even?/odd?/prefix aliases
 │   │   │   ├── convert.rs        # to-* family + make/to/form
 │   │   │   ├── object.rs         # make object! + object?/same?/words-of/values-of/reflect/in/object/context
 │   │   │   ├── path.rs           # path?/get-path?/lit-path?/to-path/to-get-path/to-lit-path

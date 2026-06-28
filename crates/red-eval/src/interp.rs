@@ -27,7 +27,7 @@
 //! [`interp_walker::eval`] directly.
 
 // Public API (re-exported by `lib.rs` to external callers — the CLI, tests):
-pub use crate::interp_walker::{
+pub use crate::interp_runner::{
     run_series, run_series_with_exit_output, run_series_with_output, run_source,
     run_source_with_exit, run_source_with_exit_opts, run_source_with_exit_output,
     run_source_with_output, RunOptions,

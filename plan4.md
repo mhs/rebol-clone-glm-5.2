@@ -225,7 +225,7 @@ broken. Close the gap.
 Larger refactors that improve navigability but carry real diff size. Defer
 until M31–M35 land; treat as opt-in.
 
-- [ ] **Split `crates/red-eval/src/natives.rs` (2488 lines) into `natives/`** *(medium)*
+- [x] **Split `crates/red-eval/src/natives.rs` (2488 lines) into `natives/`** *(medium)*
       Currently mixes I/O, arithmetic, control flow, function creation, word
       ops, and the registry. Proposed split: `natives/io.rs`
       (print/prin/probe), `natives/control.rs`
@@ -235,7 +235,7 @@ until M31–M35 land; treat as opt-in.
       `natives/registry.rs` (register_natives/install_constants/install_system),
       `natives/mod.rs` (re-exports). Arithmetic already lives in `math.rs` —
       keep it there.
-- [ ] **Extract `run_source*`/`run_series*` from `interp_legacy.rs`** *(low)*
+- [x] **Extract `run_source*`/`run_series*` from `interp_legacy.rs`** *(low)*
       `crates/red-eval/src/interp_legacy.rs:1300-1450` (the runner entry
       points) into `interp_runner.rs`. Shrinks the 1629-line walker by ~150
       lines and separates "entry points" from "eval algorithm".
@@ -244,7 +244,7 @@ until M31–M35 land; treat as opt-in.
       into `crates/red-eval/tests/compiler_tests.rs` / `tests/vm_tests.rs`.
       Shrinks the source files and lets the integration tests use the public
       API only (catches visibility bugs).
-- [ ] `cargo test --workspace` green; no behavior change.
+- [x] `cargo test --workspace` green; no behavior change.
 
 ## Milestone 37 — Cosmetic consistency (deferred)
 

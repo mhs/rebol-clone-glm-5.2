@@ -63,6 +63,74 @@ fn native_err(from: &Value, msg: impl Into<String>) -> EvalError {
 }
 
 // ---------------------------------------------------------------------------
+// Arithmetic infix: + - * /  (and the shared `num_binop` helper)
+// ---------------------------------------------------------------------------
+
+/// Apply a numeric binary operator to `args[0]` (left) and `args[1]` (right).
+/// Int+Int → Int; any Float involved → Float. `op` names the operation for
+/// error messages. Errors carry the offending operand's span.
+fn num_binop(
+    args: &[Value],
+    op: &str,
+    f_int: fn(i64, i64) -> Option<i64>,
+    f_float: fn(f64, f64) -> f64,
+) -> Result<Value, EvalError> {
+    let a = as_number(&args[0]).ok_or_else(|| num_type_err(&args[0]))?;
+    let b = as_number(&args[1]).ok_or_else(|| num_type_err(&args[1]))?;
+    match (a, b) {
+        (Num::Int(x), Num::Int(y)) => match f_int(x, y) {
+            Some(r) => Ok(Value::integer(r)),
+            // `f_int` returns None to signal a domain error (e.g. div-by-zero).
+            None => Err(EvalError::Native {
+                message: format!("math error: {op} by zero"),
+                span: args[0].span_or_default(),
+            }),
+        },
+        (Num::Int(x), Num::Float(y)) => Ok(Value::float(f_float(x as f64, y))),
+        (Num::Float(x), Num::Int(y)) => Ok(Value::float(f_float(x, y as f64))),
+        (Num::Float(x), Num::Float(y)) => Ok(Value::float(f_float(x, y))),
+    }
+}
+
+/// `+` infix — numeric addition, with string concatenation when both operands
+/// are strings (M15). Falls through to numeric addition otherwise.
+pub(crate) fn add(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if let (Value::String { s: a, .. }, Value::String { s: b, .. }) = (&args[0], &args[1]) {
+        let mut cat = String::with_capacity(a.len() + b.len());
+        cat.push_str(a);
+        cat.push_str(b);
+        return Ok(Value::string(std::rc::Rc::from(cat.as_str())));
+    }
+    num_binop(args, "add", |a, b| Some(a + b), |a, b| a + b)
+}
+
+/// `-` infix — numeric subtraction.
+pub(crate) fn subtract(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    num_binop(args, "division", |a, b| Some(a - b), |a, b| a - b)
+}
+
+/// `*` infix — numeric multiplication.
+pub(crate) fn multiply(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    num_binop(args, "division", |a, b| Some(a * b), |a, b| a * b)
+}
+
+/// `/` infix — numeric division. Integer division by zero → error.
+pub(crate) fn divide(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    num_binop(
+        args,
+        "division",
+        |a, b| {
+            if b == 0 {
+                None
+            } else {
+                Some(a / b)
+            }
+        },
+        |a, b| a / b,
+    )
+}
+
+// ---------------------------------------------------------------------------
 // `//` modulo (infix)
 // ---------------------------------------------------------------------------
 

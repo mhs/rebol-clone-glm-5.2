@@ -34,7 +34,7 @@ flowchart TD
   RC -->|contains| E2[env.rs, error.rs, source.rs, value.rs, context.rs]
   RE[red-eval] -->|re-exports| RC
   RE -->|contains| I[interp.rs]
-  RE -->|contains| N[natives.rs, series.rs, binding.rs, parse.rs, strings.rs, math.rs, convert.rs, object.rs, path.rs, io.rs]
+  RE -->|contains| N[natives/, series.rs, binding.rs, parse.rs, strings.rs, math.rs, convert.rs, object.rs, path.rs, io.rs, interp_runner.rs]
   RE -->|contains| CR[context.rs — 9-line re-export shim]
   CLI[red-cli] -->|depends on| RE
 ```
@@ -314,16 +314,21 @@ object's context).
 Every error carries the span of the offending token so the CLI can render
 `file.red:line:col: error: ...`.
 
-## Evaluator (`red-eval/src/interp.rs` + `interp_walker.rs`)
+## Evaluator (`red-eval/src/interp.rs` + `interp_walker.rs` + `interp_runner.rs`)
 
 Since M29 (v0.3), the evaluator is split into a thin dispatch shim
-(`interp.rs`) and the original tree-walker (`interp_walker.rs`). The
-default mode is the bytecode VM (`EvalMode::Vm`); `--walk` on the CLI or
-the `force-walk` cargo feature forces the tree-walker. The shim's
-`eval(block, env)` checks `env.mode`: `Walk` → `interp_walker::eval`
-directly; `Vm` → `dispatch_block` (compile-on-demand + `vm::run`, falling
-back to the walker for `needs_rebind`/foreign-bound/compile-error blocks).
-`run_series_inner_opts` calls `dispatch_block` (not `eval` directly) so the
+ (`interp.rs`), the original tree-walker (`interp_walker.rs`), and the
+ script entry-point plumbing (`interp_runner.rs`). M36 extracted the
+ `run_source*`/`run_series*`/`RunOptions` entry points out of the walker
+ into `interp_runner.rs` (shrinking the walker by ~150 lines + its test
+ module). The default mode is the bytecode VM (`EvalMode::Vm`); `--walk` on
+ the CLI or the `force-walk` cargo feature forces the tree-walker. The
+ shim's `eval(block, env)` checks `env.mode`: `Walk` →
+ `interp_walker::eval` directly; `Vm` → `dispatch_block`
+ (compile-on-demand + `vm::run`, falling back to the walker for
+ `needs_rebind`/foreign-bound/compile-error blocks).
+ `run_series_inner_opts` (in `interp_runner.rs`) calls `dispatch_block`
+ (not `eval` directly) so the
 top-level script body honors `env.mode`. `call_user_func` (the walker's
 function-call shim) calls `interp_walker::eval` directly — function bodies
 invoked from the walker always stay on the walker (the VM uses its own
@@ -521,7 +526,7 @@ for `make object!` (arity 1, spec block). Object predicates:
   `(Option<Value>, i32)` so the CLI can propagate the `quit`/`exit` code.
 
 ### Series natives
-Live in `series.rs`, registered in `natives.rs`. Each takes `&[Value]`,
+Live in `series.rs`, registered in `natives/registry.rs`. Each takes `&[Value]`,
 extracts its `Series` argument(s), manipulates the cursor or `RefCell`
 contents, returns a `Value`. Mutation affects shared storage (Red
 reference semantics).
@@ -654,7 +659,7 @@ ops per iteration.
 
 **E. Compile-once loop bodies with VM-internal iteration**
 (`resolve_compiled_block` in `interp_walker.rs`; loop natives in
-`natives.rs`/`series.rs`): the loop natives
+`natives/control.rs`/`series.rs`): the loop natives
 (`repeat`/`while`/`until`/`loop`/`foreach`/`forall`) previously called
 `dispatch_block` per iteration — each call paying a HashMap lookup + Rc
 bumps + `CompiledBlock` clone + pool drain/restore. M30.2 added
