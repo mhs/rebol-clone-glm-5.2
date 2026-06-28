@@ -174,26 +174,26 @@ The `unsafe` slot accessors the VM depends on have no direct tests. Add unit
 tests at the source-file level (consistent with the existing
 `#[cfg(test)] mod tests` pattern in `vm/compiler.rs:1602` and `vm/vm.rs:1231`).
 
-- [ ] **Unit tests for `crates/red-core/src/context.rs`** *(medium)*
+- [x] **Unit tests for `crates/red-core/src/context.rs`** *(medium)*
       Currently zero inline tests. Cover: `slot_index` idempotency (same word →
       same slot on re-add); `set`/`get` round-trip; `slot_value_unchecked` /
       `set_slot_unchecked` panic on OOB in `debug_assertions`; `words()`
       ordering invariant; `index_of` miss returns `None`; empty-context
       behavior.
-- [ ] **Unit tests for `crates/red-core/src/value.rs`** *(medium)*
+- [x] **Unit tests for `crates/red-core/src/value.rs`** *(medium)*
       Currently zero inline tests. Cover: `Span::is_default` (true for `0,0`,
       false otherwise); `Binding::is_lexical`/`as_lexical` round-trip;
       `FuncDef::invalidate_compiled` clears `compiled` and `needs_rebind`;
       `Value::word`/`set_word`/`integer`/`block` constructors set the expected
       variant and zero-span; `Value::span()` per variant.
-- [ ] **Add CLI flag-parsing tests** *(low)*
+- [x] **Add CLI flag-parsing tests** *(low)*
       `crates/red-cli/src/main.rs:44-58` flag loop is untested for edge cases.
       Add integration tests in `crates/red-cli/tests/cli.rs`: unknown flag
       rejected (`red --typo file.red` → exit 2); flag after positional
       (`red file.red --walk` works); `--help`/`--version` mixed with other
       args. Also fix the wrong comment at `main.rs:44` ("anywhere before the
       script path" — code accepts flags anywhere).
-- [ ] `cargo test --workspace` green; new tests pass under both default and
+- [x] `cargo test --workspace` green; new tests pass under both default and
       `--features force-walk`.
 
 ## Milestone 35 — Examples harness

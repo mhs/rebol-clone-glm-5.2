@@ -511,3 +511,396 @@ impl Default for Span {
         Span::new(0, 0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit coverage for `Value`/`Span`/`Binding`/`FuncDef` core types. M34.
+    //!
+    //! Pins the constructor shorthand invariants (zero span, unbound binding),
+    //! the `span()` per-variant contract, and `FuncDef::invalidate_compiled`.
+
+    use super::*;
+    use crate::vm_ir::CompiledBlock;
+
+    #[test]
+    fn span_new_stores_offsets() {
+        let s = Span::new(5, 11);
+        assert_eq!(s.start, 5);
+        assert_eq!(s.end, 11);
+    }
+
+    #[test]
+    fn span_default_is_zero_zero() {
+        assert_eq!(Span::default().start, 0);
+        assert_eq!(Span::default().end, 0);
+        assert!(Span::default().is_default());
+    }
+
+    #[test]
+    fn span_is_default_true_only_for_zero_zero() {
+        assert!(Span::new(0, 0).is_default());
+        assert!(!Span::new(0, 1).is_default());
+        assert!(!Span::new(1, 0).is_default());
+        assert!(!Span::new(3, 7).is_default());
+    }
+
+    #[test]
+    fn binding_default_is_unbound() {
+        let b: Binding = Binding::default();
+        assert!(matches!(b, Binding::Unbound));
+        assert!(!b.is_lexical());
+        assert!(b.as_lexical().is_none());
+    }
+
+    #[test]
+    fn binding_is_lexical_true_only_for_lexical() {
+        let lex = Binding::Lexical(2, 4);
+        assert!(lex.is_lexical());
+        assert_eq!(lex.as_lexical(), Some((2, 4)));
+
+        assert!(!Binding::Unbound.is_lexical());
+        assert!(Binding::Unbound.as_lexical().is_none());
+
+        let ctx = Rc::new(Context::new());
+        let local = Binding::Local(ctx, 3);
+        assert!(!local.is_lexical());
+        assert!(local.as_lexical().is_none());
+
+        let func = Binding::Func(1);
+        assert!(!func.is_lexical());
+        assert!(func.as_lexical().is_none());
+    }
+
+    #[test]
+    fn binding_as_lexical_round_trips() {
+        for (d, s) in [(0, 0), (1, 2), (5, 9), (usize::MAX, usize::MAX)] {
+            let b = Binding::Lexical(d, s);
+            assert_eq!(b.as_lexical(), Some((d, s)));
+        }
+    }
+
+    #[test]
+    fn funcdef_invalidate_compiled_clears_compiled_field() {
+        // The `compiled` field starts `None` for a default `FuncDef`, gets
+        // populated by the bytecode compiler, and is cleared by
+        // `invalidate_compiled` (called by rebind paths that mutate the
+        // body's word bindings). This test pins that contract.
+        //
+        // Note (M34 plan text correction): `needs_rebind` lives on
+        // `CompiledBlock` (`vm_ir.rs:131`), not on `FuncDef`.
+        // `invalidate_compiled` only clears `FuncDef::compiled`.
+        let block: Rc<CompiledBlock> = Rc::new(empty_compiled_block());
+        let mut fd = FuncDef {
+            compiled: Some(block),
+            ..FuncDef::default()
+        };
+        assert!(fd.compiled.is_some());
+        fd.invalidate_compiled();
+        assert!(fd.compiled.is_none());
+    }
+
+    #[test]
+    fn funcdef_default_has_no_compiled() {
+        let fd = FuncDef::default();
+        assert!(fd.compiled.is_none());
+        assert!(fd.params.is_empty());
+        assert!(fd.refinements.is_empty());
+        assert!(fd.locals.is_empty());
+        assert!(fd.freevars.is_empty());
+        assert!(!fd.variadic);
+        assert!(!fd.infix);
+        assert!(fd.native.is_none());
+    }
+
+    #[test]
+    fn value_word_constructor() {
+        match Value::word("foo") {
+            Value::Word { sym, binding, span } => {
+                assert_eq!(sym.as_str(), "foo");
+                assert!(matches!(binding, Binding::Unbound));
+                assert!(span.is_default());
+            }
+            other => panic!("expected Word, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_set_word_constructor() {
+        match Value::set_word("bar") {
+            Value::SetWord { sym, binding, span } => {
+                assert_eq!(sym.as_str(), "bar");
+                assert!(matches!(binding, Binding::Unbound));
+                assert!(span.is_default());
+            }
+            other => panic!("expected SetWord, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_get_word_constructor() {
+        match Value::get_word("baz") {
+            Value::GetWord { sym, binding, span } => {
+                assert_eq!(sym.as_str(), "baz");
+                assert!(matches!(binding, Binding::Unbound));
+                assert!(span.is_default());
+            }
+            other => panic!("expected GetWord, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_lit_word_constructor() {
+        match Value::lit_word("qux") {
+            Value::LitWord { sym, span } => {
+                assert_eq!(sym.as_str(), "qux");
+                assert!(span.is_default());
+            }
+            other => panic!("expected LitWord, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_integer_constructor() {
+        match Value::integer(-7) {
+            Value::Integer { n, span } => {
+                assert_eq!(n, -7);
+                assert!(span.is_default());
+            }
+            other => panic!("expected Integer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_float_constructor() {
+        match Value::float(2.5) {
+            Value::Float { f, span } => {
+                assert_eq!(f, 2.5);
+                assert!(span.is_default());
+            }
+            other => panic!("expected Float, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_string_constructor() {
+        match Value::string("hi") {
+            Value::String { s, span } => {
+                assert_eq!(&*s, "hi");
+                assert!(span.is_default());
+            }
+            other => panic!("expected String, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_block_constructor() {
+        match Value::block(Series::empty()) {
+            Value::Block { series, span } => {
+                assert!(series.data.borrow().is_empty());
+                assert_eq!(series.index, 0);
+                assert!(span.is_default());
+            }
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_paren_constructor() {
+        match Value::paren(Series::empty()) {
+            Value::Paren { series, span } => {
+                assert!(series.data.borrow().is_empty());
+                assert!(span.is_default());
+            }
+            other => panic!("expected Paren, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_path_constructor() {
+        let p = Value::path(vec![Value::word("a"), Value::word("b")]);
+        match p {
+            Value::Path { parts, span } => {
+                assert_eq!(parts.len(), 2);
+                assert!(span.is_default());
+            }
+            other => panic!("expected Path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_get_path_constructor() {
+        match Value::get_path(vec![Value::word("a")]) {
+            Value::GetPath { parts, span } => {
+                assert_eq!(parts.len(), 1);
+                assert!(span.is_default());
+            }
+            other => panic!("expected GetPath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_lit_path_constructor() {
+        match Value::lit_path(vec![Value::word("a")]) {
+            Value::LitPath { parts, span } => {
+                assert_eq!(parts.len(), 1);
+                assert!(span.is_default());
+            }
+            other => panic!("expected LitPath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_set_path_constructor() {
+        match Value::set_path(vec![Value::word("a")]) {
+            Value::SetPath { parts, span } => {
+                assert_eq!(parts.len(), 1);
+                assert!(span.is_default());
+            }
+            other => panic!("expected SetPath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_refinement_constructor() {
+        match Value::refinement("only") {
+            Value::Refinement { sym, span } => {
+                assert_eq!(sym.as_str(), "only");
+                assert!(span.is_default());
+            }
+            other => panic!("expected Refinement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_file_constructor() {
+        match Value::file("foo/bar.txt") {
+            Value::File { path, span } => {
+                assert_eq!(&*path, "foo/bar.txt");
+                assert!(span.is_default());
+            }
+            other => panic!("expected File, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_url_constructor() {
+        match Value::url("http://example.com") {
+            Value::Url { url, span } => {
+                assert_eq!(&*url, "http://example.com");
+                assert!(span.is_default());
+            }
+            other => panic!("expected Url, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_error_constructor() {
+        match Value::error("boom") {
+            Value::Error(ev) => assert_eq!(ev.message, "boom"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_object_constructor() {
+        let obj = ObjectDef::new();
+        match Value::object(obj) {
+            Value::Object(_) => {}
+            other => panic!("expected Object, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn span_returns_some_for_source_origin_variants() {
+        let s = Span::new(10, 20);
+        macro_rules! check {
+            ($v:expr) => {{
+                let v: Value = $v;
+                // Re-construct with a non-zero span where possible to confirm
+                // `span()` echoes the stored span, not the zero placeholder.
+                let with_span = set_span(v, s);
+                assert_eq!(with_span.span(), Some(s), "span not propagated");
+            }};
+        }
+        check!(Value::Integer { n: 1, span: s });
+        check!(Value::Float { f: 1.0, span: s });
+        check!(Value::String { s: Rc::from("x"), span: s });
+        check!(Value::Word { sym: Symbol::new("w"), binding: Binding::Unbound, span: s });
+        check!(Value::SetWord { sym: Symbol::new("w"), binding: Binding::Unbound, span: s });
+        check!(Value::GetWord { sym: Symbol::new("w"), binding: Binding::Unbound, span: s });
+        check!(Value::LitWord { sym: Symbol::new("w"), span: s });
+        check!(Value::Block { series: Series::empty(), span: s });
+        check!(Value::Paren { series: Series::empty(), span: s });
+        check!(Value::Path { parts: vec![], span: s });
+        check!(Value::GetPath { parts: vec![], span: s });
+        check!(Value::LitPath { parts: vec![], span: s });
+        check!(Value::SetPath { parts: vec![], span: s });
+        check!(Value::Refinement { sym: Symbol::new("r"), span: s });
+        check!(Value::File { path: Rc::from("p"), span: s });
+        check!(Value::Url { url: Rc::from("u"), span: s });
+    }
+
+    #[test]
+    fn span_returns_none_for_synthetic_variants() {
+        assert!(Value::None.span().is_none());
+        assert!(Value::Logic(true).span().is_none());
+        assert!(Value::Func(Rc::new(FuncDef::default())).span().is_none());
+        assert!(Value::String8(vec![1, 2]).span().is_none());
+        assert!(Value::error("x").span().is_none());
+        assert!(Value::object(ObjectDef::new()).span().is_none());
+    }
+
+    #[test]
+    fn span_or_default_returns_zero_for_synthetic() {
+        assert!(Value::None.span_or_default().is_default());
+        assert!(Value::Logic(true).span_or_default().is_default());
+        assert!(Value::Func(Rc::new(FuncDef::default())).span_or_default().is_default());
+    }
+
+    #[test]
+    fn span_or_default_returns_real_for_source_origin() {
+        let s = Span::new(7, 13);
+        let v = Value::Integer { n: 0, span: s };
+        assert_eq!(v.span_or_default(), s);
+    }
+
+    /// Helper: overwrite the span of a source-origin `Value` with `s`. Used
+    /// by `span_returns_some_for_source_origin_variants` to confirm `span()`
+    /// echoes the stored span rather than the zero placeholder the shorthand
+    /// constructors set.
+    fn set_span(v: Value, s: Span) -> Value {
+        match v {
+            Value::Integer { n, .. } => Value::Integer { n, span: s },
+            Value::Float { f, .. } => Value::Float { f, span: s },
+            Value::String { s: ss, .. } => Value::String { s: ss, span: s },
+            Value::Word { sym, binding, .. } => Value::Word { sym, binding, span: s },
+            Value::SetWord { sym, binding, .. } => Value::SetWord { sym, binding, span: s },
+            Value::GetWord { sym, binding, .. } => Value::GetWord { sym, binding, span: s },
+            Value::LitWord { sym, .. } => Value::LitWord { sym, span: s },
+            Value::Block { series, .. } => Value::Block { series, span: s },
+            Value::Paren { series, .. } => Value::Paren { series, span: s },
+            Value::Path { parts, .. } => Value::Path { parts, span: s },
+            Value::GetPath { parts, .. } => Value::GetPath { parts, span: s },
+            Value::LitPath { parts, .. } => Value::LitPath { parts, span: s },
+            Value::SetPath { parts, .. } => Value::SetPath { parts, span: s },
+            Value::Refinement { sym, .. } => Value::Refinement { sym, span: s },
+            Value::File { path, .. } => Value::File { path, span: s },
+            Value::Url { url, .. } => Value::Url { url, span: s },
+            other => other,
+        }
+    }
+
+    fn empty_compiled_block() -> CompiledBlock {
+        CompiledBlock {
+            instrs: Rc::from(&[][..]),
+            pool: Rc::from(&[][..]),
+            symbols: Rc::from(&Vec::<Symbol>::new()[..]),
+            freevars_table: Rc::from(&Vec::<Vec<Symbol>>::new()[..]),
+            n_locals: 0,
+            freevars: Vec::new(),
+            source_span: Span::new(0, 0),
+            needs_rebind: false,
+            arity: 0,
+        }
+    }
+}

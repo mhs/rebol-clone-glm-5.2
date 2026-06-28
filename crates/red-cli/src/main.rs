@@ -41,9 +41,10 @@ lines. Ctrl-C abandons the current input; Ctrl-D exits.
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // Parse leading flags (anywhere before the script path). `--allow-shell`
-    // enables `call`/`shell` natives; `--walk` forces the tree-walker
-    // (default is the bytecode VM since M29).
+    // Parse flags (may appear anywhere on the command line — before,
+    // between, or after positional args). `--allow-shell` enables
+    // `call`/`shell` natives; `--walk` forces the tree-walker (default is the
+    // bytecode VM since M29).
     let mut allow_shell = false;
     let mut walk = false;
     let mut positional: Vec<String> = Vec::new();

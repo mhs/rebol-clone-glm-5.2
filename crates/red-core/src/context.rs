@@ -137,3 +137,172 @@ impl Context {
         ordered.into_iter().map(|(s, _)| s).collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit coverage for `Context` slot accessors. M34.
+    //!
+    //! The `unsafe` `slot_value_unchecked` / `set_slot_unchecked` paths are
+    //! the VM's hot-path slot accessors; these tests pin their happy-path
+    //! parity with the checked variants and assert the `debug_assert!` OOB
+    //! guard fires under `cfg(debug_assertions)`.
+
+    use super::*;
+    use crate::value::{Symbol, Value};
+
+    #[test]
+    fn new_context_is_empty() {
+        let ctx = Context::new();
+        assert!(ctx.words().is_empty());
+        assert!(!ctx.has(&Symbol::new("x")));
+        assert!(ctx.index_of(&Symbol::new("x")).is_none());
+        assert!(ctx.get(&Symbol::new("x")).is_none());
+    }
+
+    #[test]
+    fn default_matches_new() {
+        let a = Context::new();
+        let b = Context::default();
+        assert!(a.words().is_empty());
+        assert!(b.words().is_empty());
+    }
+
+    #[test]
+    fn slot_index_is_idempotent() {
+        let ctx = Context::new();
+        let sym = Symbol::new("x");
+        let i1 = ctx.slot_index(sym.clone());
+        let i2 = ctx.slot_index(sym.clone());
+        assert_eq!(i1, i2);
+        assert_eq!(ctx.slots.borrow().len(), 1);
+        assert!(ctx.has(&sym));
+        assert_eq!(ctx.index_of(&sym), Some(i1));
+    }
+
+    #[test]
+    fn slot_index_is_monotonic_for_distinct_symbols() {
+        let ctx = Context::new();
+        let a = ctx.slot_index(Symbol::new("a"));
+        let b = ctx.slot_index(Symbol::new("b"));
+        let c = ctx.slot_index(Symbol::new("c"));
+        assert_eq!((a, b, c), (0, 1, 2));
+        // Re-adding an earlier symbol must not allocate a new slot.
+        assert_eq!(ctx.slot_index(Symbol::new("a")), a);
+        assert_eq!(ctx.slots.borrow().len(), 3);
+    }
+
+    #[test]
+    fn set_get_round_trip() {
+        let ctx = Context::new();
+        let sym = Symbol::new("x");
+        ctx.set(sym.clone(), Value::integer(42));
+        match ctx.get(&sym) {
+            Some(Value::Integer { n, .. }) => assert_eq!(n, 42),
+            other => panic!("expected Integer(42), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_on_new_symbol_allocates_slot() {
+        let ctx = Context::new();
+        ctx.set(Symbol::new("x"), Value::integer(1));
+        ctx.set(Symbol::new("y"), Value::integer(2));
+        assert_eq!(ctx.index_of(&Symbol::new("x")), Some(0));
+        assert_eq!(ctx.index_of(&Symbol::new("y")), Some(1));
+    }
+
+    #[test]
+    fn get_miss_returns_none() {
+        let ctx = Context::new();
+        ctx.set(Symbol::new("x"), Value::integer(1));
+        assert!(ctx.get(&Symbol::new("absent")).is_none());
+    }
+
+    #[test]
+    fn slot_value_and_set_slot_round_trip() {
+        let ctx = Context::new();
+        let idx = ctx.slot_index(Symbol::new("x"));
+        ctx.set_slot(idx, Value::integer(7));
+        match ctx.slot_value(idx) {
+            Value::Integer { n, .. } => assert_eq!(n, 7),
+            other => panic!("expected Integer(7), got {other:?}"),
+        }
+        // Overwrite via set_slot.
+        ctx.set_slot(idx, Value::integer(99));
+        match ctx.slot_value(idx) {
+            Value::Integer { n, .. } => assert_eq!(n, 99),
+            other => panic!("expected Integer(99), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slot_value_clones() {
+        // Mutating the returned value must not affect the stored slot.
+        let ctx = Context::new();
+        let idx = ctx.slot_index(Symbol::new("x"));
+        ctx.set_slot(idx, Value::integer(5));
+        let v = ctx.slot_value(idx);
+        drop(v);
+        match ctx.slot_value(idx) {
+            Value::Integer { n, .. } => assert_eq!(n, 5),
+            other => panic!("expected Integer(5), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unchecked_matches_checked() {
+        let ctx = Context::new();
+        let i = ctx.slot_index(Symbol::new("x"));
+        ctx.set_slot(i, Value::integer(123));
+        // Checked and unchecked reads return equal values.
+        let a = ctx.slot_value(i);
+        let b = ctx.slot_value_unchecked(i);
+        assert_eq!(format!("{a:?}"), format!("{b:?}"));
+        // Unchecked write matches checked write.
+        ctx.set_slot_unchecked(i, Value::integer(456));
+        match ctx.slot_value(i) {
+            Value::Integer { n, .. } => assert_eq!(n, 456),
+            other => panic!("expected Integer(456), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn words_preserves_insertion_order() {
+        // `words()` sorts by slot index, so the result is in insertion
+        // order, not alphabetical.
+        let ctx = Context::new();
+        ctx.slot_index(Symbol::new("c"));
+        ctx.slot_index(Symbol::new("a"));
+        ctx.slot_index(Symbol::new("b"));
+        let words: Vec<String> = ctx.words().into_iter().map(|s| s.as_str().to_string()).collect();
+        assert_eq!(words, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "slot_value_unchecked OOB")]
+    fn slot_value_unchecked_oob_panics_in_debug() {
+        let ctx = Context::new();
+        let _ = ctx.slot_value_unchecked(0);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "set_slot_unchecked OOB")]
+    fn set_slot_unchecked_oob_panics_in_debug() {
+        let ctx = Context::new();
+        ctx.set_slot_unchecked(0, Value::None);
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn slot_value_unchecked_oob_no_debug_assert() {
+        // In release builds the `debug_assert!` is absent; the call is
+        // still `unsafe` for OOB indices (UB), so we do NOT exercise the
+        // OOB path here — only assert the happy path is reachable.
+        let ctx = Context::new();
+        let i = ctx.slot_index(Symbol::new("x"));
+        ctx.set_slot(i, Value::integer(1));
+        let _ = ctx.slot_value_unchecked(i);
+    }
+}

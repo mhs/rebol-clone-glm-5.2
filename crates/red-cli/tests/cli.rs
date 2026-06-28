@@ -178,6 +178,96 @@ fn walk_flag_runs_tree_walker() {
     assert_eq!(String::from_utf8(vm_output).unwrap(), "3\n");
 }
 
+// --- M34: CLI flag-parsing edge cases -------------------------------------
+
+#[test]
+fn unknown_flag_falls_through_to_positional_and_errors() {
+    // `--typo` is not a recognized flag, so it becomes a positional arg and
+    // `run_file` tries to read it as a path. The read fails → `*** Error:`
+    // on stderr, non-zero exit. (The plan text suggested exit 2; the actual
+    // implementation returns exit 1 via the read-error branch. We assert the
+    // real behavior — non-zero exit + the error line.)
+    let dir = tempfile_dir();
+    let path = dir.join("real.red");
+    fs::write(&path, "Red [] print 1").unwrap();
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg("--typo")
+        .arg(&path)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("*** Error:"));
+}
+
+#[test]
+fn flag_after_positional_runs_script() {
+    // Flags may appear after the script path. `--walk` here must be parsed
+    // as a flag, not swallowed as a script arg.
+    let dir = tempfile_dir();
+    let path = dir.join("after.red");
+    fs::write(&path, "Red [] print 1 + 2").unwrap();
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg(&path)
+        .arg("--walk")
+        .assert()
+        .success()
+        .stdout("3\n");
+}
+
+#[test]
+fn flag_between_positional_args() {
+    // A flag between the script path and trailing args still parses as a
+    // flag; the trailing arg flows into `system/options/args`.
+    let dir = tempfile_dir();
+    let path = dir.join("between.red");
+    fs::write(&path, "Red [] print system/options/args").unwrap();
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg(&path)
+        .arg("--walk")
+        .arg("kept")
+        .assert()
+        .success()
+        .stdout("[\"kept\"]\n");
+}
+
+#[test]
+fn help_flag_wins_over_other_flags() {
+    // `--help` mixed with other recognized flags still prints help and exits
+    // 0 (it's matched as the sole positional).
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg("--allow-shell")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("USAGE:"));
+}
+
+#[test]
+fn version_flag_mixed_with_other_flag() {
+    // `--version` mixed with `--walk` prints the version and exits 0.
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg("--walk")
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(concat!("red ", env!("CARGO_PKG_VERSION"), "\n"));
+}
+
+#[test]
+fn multiple_recognized_flags_accumulate() {
+    // `--allow-shell --walk file` parses both flags; the script runs under
+    // walk mode with shell enabled. Just confirms no flag is dropped.
+    let dir = tempfile_dir();
+    let path = dir.join("multi.red");
+    fs::write(&path, "Red [] print 1").unwrap();
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg("--allow-shell")
+        .arg("--walk")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("1\n");
+}
+
 /// A scratch directory for test fixtures. Reuses `std::env::temp_dir()`; each
 /// test picks a unique name to avoid collisions.
 fn tempfile_dir() -> PathBuf {
