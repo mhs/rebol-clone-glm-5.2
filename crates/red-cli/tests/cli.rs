@@ -17,7 +17,10 @@ fn workspace_root() -> PathBuf {
 #[test]
 fn hello_world_prints_molded_string() {
     // mold-everything: `print "Hello, World!"` outputs the string with quotes.
-    let script = workspace_root().join("examples/hello.red");
+    // The fixture lives under `red-eval`'s golden program suite (the
+    // canonical copy with its `.expected` sibling); `examples/hello.red` was
+    // removed in M35 to deduplicate.
+    let script = workspace_root().join("crates/red-eval/tests/programs/hello.red");
     let mut cmd = Command::cargo_bin("red-cli").unwrap();
     cmd.arg(script)
         .assert()
