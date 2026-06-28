@@ -202,6 +202,9 @@ pub enum Value {
     Float { f: f64, span: Span },
     /// `"..."` / `{...}` string literal.
     String { s: Rc<str>, span: Span },
+    /// `#"a"` — a char! literal. Source-origin (the lexer scans the `#"-led
+    /// form); carries the byte-offset span of the whole token.
+    Char { c: char, span: Span },
     /// `foo`
     Word {
         sym: Symbol,
@@ -330,6 +333,7 @@ impl Value {
             Value::Integer { span, .. }
             | Value::Float { span, .. }
             | Value::String { span, .. }
+            | Value::Char { span, .. }
             | Value::Word { span, .. }
             | Value::SetWord { span, .. }
             | Value::GetWord { span, .. }
@@ -415,6 +419,14 @@ impl Value {
     pub fn string(s: impl Into<Rc<str>>) -> Self {
         Value::String {
             s: s.into(),
+            span: Span::default(),
+        }
+    }
+
+    /// Constructor shorthand for a char literal (zero span).
+    pub fn char(c: char) -> Self {
+        Value::Char {
+            c,
             span: Span::default(),
         }
     }
@@ -828,6 +840,7 @@ mod tests {
             s: Rc::from("x"),
             span: s
         });
+        check!(Value::Char { c: 'a', span: s });
         check!(Value::Word {
             sym: Symbol::new("w"),
             binding: Binding::Unbound,
@@ -920,6 +933,7 @@ mod tests {
             Value::Integer { n, .. } => Value::Integer { n, span: s },
             Value::Float { f, .. } => Value::Float { f, span: s },
             Value::String { s: ss, .. } => Value::String { s: ss, span: s },
+            Value::Char { c, .. } => Value::Char { c, span: s },
             Value::Word { sym, binding, .. } => Value::Word {
                 sym,
                 binding,

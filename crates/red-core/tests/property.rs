@@ -39,6 +39,16 @@ fn gen_value(_depth: u32) -> BoxedStrategy<Value> {
             s: s.into(),
             span: Span::new(0, 0),
         }),
+        // M38: char! literals — printable ASCII excluding `"`, `^`, `\` so the
+        // mold form `#"c"` stays escape-free and round-trips deterministically.
+        // (Escape forms are exercised by inline unit tests in printer.rs.)
+        "[a-zA-Z0-9 ,.;:_/()\\[\\]{}!@#$%&*+=|<>?~`'-]".prop_map(|s: String| {
+            let c = s.chars().next().unwrap_or('a');
+            Value::Char {
+                c,
+                span: Span::new(0, 0),
+            }
+        }),
         // Word family.
         "[a-z][a-z0-9]{0,8}".prop_map(|s: String| Value::Word {
             sym: red_core::Symbol::new(&s),

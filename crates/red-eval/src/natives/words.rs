@@ -200,6 +200,18 @@ pub(crate) fn value_predicate(
     Ok(Value::Logic(env.user_ctx.has(&sym)))
 }
 
+/// `char? value` — `true` if `value` is a `char!`, else `false`. (M38)
+pub(crate) fn char_predicate(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(arity_err(args, "char?", 1, 0));
+    }
+    Ok(Value::Logic(matches!(args[0], Value::Char { .. })))
+}
+
 /// `use [words] block` — evaluates `block` with the listed words bound as
 /// locals in a fresh child context layered over the user context. Body
 /// SetWords and loop vars inside `block` are also collected as use-locals

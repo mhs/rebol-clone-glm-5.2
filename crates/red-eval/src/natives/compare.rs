@@ -21,6 +21,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Integer { n: x, .. }, Value::Float { f: y, .. }) => (*x as f64) == *y,
         (Value::Float { f: x, .. }, Value::Integer { n: y, .. }) => *x == (*y as f64),
         (Value::String { s: x, .. }, Value::String { s: y, .. }) => x == y,
+        (Value::Char { c: x, .. }, Value::Char { c: y, .. }) => x == y,
         (Value::None, Value::None) => true,
         (Value::Logic(x), Value::Logic(y)) => x == y,
         (Value::Error(a), Value::Error(b)) => a.message == b.message,
@@ -116,6 +117,8 @@ fn as_number(v: &Value) -> Option<Num> {
     match v {
         Value::Integer { n, .. } => Some(Num::Int(*n)),
         Value::Float { f, .. } => Some(Num::Float(*f)),
+        // M38: char! ordered by codepoint for `<`/`>`/`<=`/`>=`.
+        Value::Char { c, .. } => Some(Num::Int(*c as i64)),
         _ => None,
     }
 }

@@ -97,7 +97,7 @@ fn parse_f64(s: &str, span_src: &Value) -> Result<f64, EvalError> {
 /// - `logic!`   → 1 if true, 0 if false
 /// - `none!`    → 0
 /// - `string!`  → parse as i64 (error on unparseable, span from the string)
-/// - `char!`    → deferred (stub error until char! type exists)
+/// - `char!`    → codepoint as integer (M38)
 fn to_integer(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(arity_err(args, "to-integer", 1, args.len()));
@@ -109,9 +109,64 @@ fn to_integer(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Valu
         Value::Logic(b) => Value::integer(if *b { 1 } else { 0 }),
         Value::None => Value::integer(0),
         Value::String { s, .. } => Value::integer(parse_i64(s, v)?),
+        Value::Char { c, .. } => Value::integer(*c as i64),
         other => {
             return Err(EvalError::TypeError {
-                expected: "integer!, float!, logic!, none!, or string!",
+                expected: "integer!, float!, logic!, none!, char!, or string!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            })
+        }
+    })
+}
+
+/// `to-char value` — coerce to `char!`. (M38)
+/// - `integer!` → codepoint (truncate to u32; error if not a valid char)
+/// - `float!`   → codepoint (truncate toward zero)
+/// - `logic!`   → `#"^(01)"` if true, `#"^(00)"` if false
+/// - `string!`  → first char of the string (error if empty/multi-char)
+/// - `char!`    → identity
+fn to_char(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "to-char", 1, args.len()));
+    }
+    let v = &args[0];
+    Ok(match v {
+        Value::Char { c, .. } => Value::char(*c),
+        Value::Integer { n, .. } => {
+            let cp = *n as u32;
+            let c = char::from_u32(cp).ok_or_else(|| EvalError::Native {
+                message: format!("to-char: integer {n} is not a valid codepoint"),
+                span: v.span_or_default(),
+            })?;
+            Value::char(c)
+        }
+        Value::Float { f, .. } => {
+            let cp = (*f as i64) as u32;
+            let c = char::from_u32(cp).ok_or_else(|| EvalError::Native {
+                message: format!("to-char: float {f} is not a valid codepoint"),
+                span: v.span_or_default(),
+            })?;
+            Value::char(c)
+        }
+        Value::Logic(b) => Value::char(if *b { '\u{1}' } else { '\u{0}' }),
+        Value::String { s, .. } => {
+            let mut chars = s.chars();
+            let c = chars.next().ok_or_else(|| EvalError::Native {
+                message: "to-char: empty string has no char".into(),
+                span: v.span_or_default(),
+            })?;
+            if chars.next().is_some() {
+                return Err(EvalError::Native {
+                    message: "to-char: string has more than one char".into(),
+                    span: v.span_or_default(),
+                });
+            }
+            Value::char(c)
+        }
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "char!, integer!, float!, logic!, or single-char string!",
                 found: type_name(other),
                 span: other.span_or_default(),
             })
@@ -349,6 +404,7 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
         "block!" | "block" => make_block(spec)?,
         "file!" | "file" => make_file(spec)?,
         "url!" | "url" => make_url(spec)?,
+        "char!" | "char" => make_char(spec)?,
         "object!" | "object" => return crate::object::make_object(spec, env),
         "function!" | "function" => {
             // Original behavior: spec is a packed `[[spec][body]]` block.
@@ -519,6 +575,43 @@ fn make_url(spec: &Value) -> Result<Value, EvalError> {
     Ok(Value::url(url))
 }
 
+/// `make char! <spec>` — construct a char! value. (M38)
+/// - `integer!` → codepoint (truncate to u32; error if invalid char)
+/// - `string!`  → first char (error if empty/multi-char)
+/// - `char!`    → identity
+fn make_char(spec: &Value) -> Result<Value, EvalError> {
+    match spec {
+        Value::Char { c, .. } => Ok(Value::char(*c)),
+        Value::Integer { n, .. } => {
+            let cp = *n as u32;
+            let c = char::from_u32(cp).ok_or_else(|| EvalError::Native {
+                message: format!("make char!: integer {n} is not a valid codepoint"),
+                span: spec.span_or_default(),
+            })?;
+            Ok(Value::char(c))
+        }
+        Value::String { s, .. } => {
+            let mut chars = s.chars();
+            let c = chars.next().ok_or_else(|| EvalError::Native {
+                message: "make char!: empty string".into(),
+                span: spec.span_or_default(),
+            })?;
+            if chars.next().is_some() {
+                return Err(EvalError::Native {
+                    message: "make char!: string has more than one char".into(),
+                    span: spec.span_or_default(),
+                });
+            }
+            Ok(Value::char(c))
+        }
+        other => Err(EvalError::TypeError {
+            expected: "integer!, char!, or single-char string!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // to <type> <value>
 // ---------------------------------------------------------------------------
@@ -546,6 +639,7 @@ fn to_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
         "logic!" | "logic" => to_logic(one, &RefineArgs::empty(), env),
         "file!" | "file" => to_file(one, &RefineArgs::empty(), env),
         "url!" | "url" => to_url(one, &RefineArgs::empty(), env),
+        "char!" | "char" => to_char(one, &RefineArgs::empty(), env),
         other => Err(EvalError::Native {
             message: format!("to: {other:?} type not supported in POC"),
             span: args[0].span_or_default(),
@@ -607,6 +701,7 @@ pub fn register_convert_natives(env: &mut Env) {
     reg(env, "to-logic", to_logic as NF, 1);
     reg(env, "to-file", to_file as NF, 1);
     reg(env, "to-url", to_url as NF, 1);
+    reg(env, "to-char", to_char as NF, 1);
 
     // make / to (arity 2)
     reg(env, "make", make_native as NF, 2);

@@ -580,10 +580,57 @@ mod tests {
     }
 
     #[test]
-    fn string_path_integer_returns_codepoint() {
-        // POC: string char pick returns the codepoint as an integer (char!
-        // deferred).
-        assert_eq!(mold_to_string(&run("s: \"abc\" s/2")), "98");
+    fn string_path_integer_returns_char() {
+        // M38: string char pick returns a `char!` (molded as `#"b"`).
+        assert_eq!(mold_to_string(&run("s: \"abc\" s/2")), "#\"b\"");
+    }
+
+    #[test]
+    fn char_literal_round_trips() {
+        assert_eq!(mold_to_string(&run("#\"a\"")), "#\"a\"");
+        assert_eq!(mold_to_string(&run("#\"^A\"")), "#\"^A\"");
+        assert_eq!(mold_to_string(&run("#\"^(41)\"")), "#\"A\"");
+    }
+
+    #[test]
+    fn char_pick_negative_index() {
+        // `s: "abc" s/-1` — negative index picks from the tail.
+        assert_eq!(mold_to_string(&run("s: \"abc\" s/-1")), "#\"c\"");
+    }
+
+    #[test]
+    fn char_predicate() {
+        assert_eq!(mold_to_string(&run("char? #\"a\"")), "true");
+        assert_eq!(mold_to_string(&run("char? 5")), "false");
+        assert_eq!(mold_to_string(&run("char? \"a\"")), "false");
+    }
+
+    #[test]
+    fn char_arith_add_int() {
+        // `char + int → char`, `char + char → int`.
+        assert_eq!(mold_to_string(&run("#\"a\" + 1")), "#\"b\"");
+        assert_eq!(mold_to_string(&run("#\"b\" - #\"a\"")), "1");
+        assert_eq!(mold_to_string(&run("1 + #\"a\"")), "#\"b\"");
+    }
+
+    #[test]
+    fn char_comparison() {
+        assert_eq!(mold_to_string(&run("#\"a\" < #\"b\"")), "true");
+        assert_eq!(mold_to_string(&run("#\"a\" = #\"a\"")), "true");
+        assert_eq!(mold_to_string(&run("#\"a\" = #\"b\"")), "false");
+    }
+
+    #[test]
+    fn char_to_integer_and_back() {
+        assert_eq!(mold_to_string(&run("to-integer #\"A\"")), "65");
+        assert_eq!(mold_to_string(&run("to-char 66")), "#\"B\"");
+        assert_eq!(mold_to_string(&run("make char! 67")), "#\"C\"");
+    }
+
+    #[test]
+    fn char_min_max() {
+        assert_eq!(mold_to_string(&run("min #\"a\" #\"b\"")), "#\"a\"");
+        assert_eq!(mold_to_string(&run("max #\"a\" #\"b\"")), "#\"b\"");
     }
 
     #[test]

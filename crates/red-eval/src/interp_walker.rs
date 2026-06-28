@@ -343,6 +343,7 @@ fn eval_prefix(
         | Value::Error(_)
         | Value::File { .. }
         | Value::Url { .. }
+        | Value::Char { .. }
         | Value::Object(_) => Ok(cur),
 
         // Path: a function-headed path is a refined call (`copy/part`,
@@ -626,9 +627,8 @@ fn select_field(current: &Value, sym: &Symbol, path_span: Span) -> Result<Value,
 }
 
 /// `pick`-style 1-based index selection (negative from tail) for block/string
-/// path parts. Out-of-range returns `none`. Strings defer char! support
-/// (plan: stub error until char! exists) — but we return the char as an
-/// integer for POC parity with `pick` on strings if `pick` does that.
+/// path parts. Out-of-range returns `none`. Strings return a `char!` (the
+/// codepoint at the 1-based index).
 fn pick_path_index(current: &Value, n: i64, path_span: Span) -> Result<Value, EvalError> {
     match current {
         Value::Block { series, .. } | Value::Paren { series, .. } => {
@@ -650,10 +650,8 @@ fn pick_path_index(current: &Value, n: i64, path_span: Span) -> Result<Value, Ev
             Ok(data[idx].clone())
         }
         Value::String { s, .. } => {
-            // POC: string char pick deferred until char! exists. Return the
-            // codepoint as an integer so `s/2` yields a usable value (mirrors
-            // `pick` on strings, which the series.rs implementation also
-            // returns as integers for POC).
+            // M38: string char pick returns a `char!` value (the codepoint at
+            // the 1-based index; negative counts from the tail).
             let chars: Vec<char> = s.chars().collect();
             let len = chars.len() as i64;
             let idx = if n > 0 {
@@ -669,7 +667,7 @@ fn pick_path_index(current: &Value, n: i64, path_span: Span) -> Result<Value, Ev
             if idx >= chars.len() {
                 return Ok(Value::None);
             }
-            Ok(Value::integer(chars[idx] as i64))
+            Ok(Value::char(chars[idx]))
         }
         other => Err(EvalError::TypeError {
             expected: "block!, paren!, or string! for integer path index",
@@ -677,6 +675,73 @@ fn pick_path_index(current: &Value, n: i64, path_span: Span) -> Result<Value, Ev
             span: path_span,
         }),
     }
+}
+
+/// M38: rebuild a string with the char at 1-based index `n` replaced by the
+/// codepoint of `rhs` (a `char!` or single-char `string!`/`integer!`). Returns
+/// the new string value. `Rc<str>` is immutable, so the caller must write the
+/// result back to the head word's binding.
+fn poke_string_char(s: &Rc<str>, n: i64, rhs: &Value, path_span: Span) -> Result<Value, EvalError> {
+    let new_c = match rhs {
+        Value::Char { c, .. } => *c,
+        Value::Integer { n: k, .. } => {
+            char::from_u32(*k as u32).ok_or_else(|| EvalError::Native {
+                message: format!("poke: integer {k} is not a valid char codepoint"),
+                span: path_span,
+            })?
+        }
+        Value::String { s: ss, .. } => {
+            let mut chars = ss.chars();
+            let c = chars.next().ok_or_else(|| EvalError::Native {
+                message: "poke: empty string cannot be poked as a char".into(),
+                span: path_span,
+            })?;
+            if chars.next().is_some() {
+                return Err(EvalError::Native {
+                    message: "poke: multi-char string is not a char".into(),
+                    span: path_span,
+                });
+            }
+            c
+        }
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "char!, integer!, or single-char string!",
+                found: crate::natives::type_name(other),
+                span: path_span,
+            });
+        }
+    };
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len() as i64;
+    let idx = if n > 0 {
+        (n - 1) as usize
+    } else if n < 0 {
+        match (len + n).try_into() {
+            Ok(v) => v,
+            Err(_) => {
+                return Err(EvalError::Native {
+                    message: format!("poke index {n} out of range"),
+                    span: path_span,
+                });
+            }
+        }
+    } else {
+        return Err(EvalError::Native {
+            message: "poke index 0 is invalid (1-based)".into(),
+            span: path_span,
+        });
+    };
+    if idx >= chars.len() {
+        return Err(EvalError::Native {
+            message: format!("poke index {n} out of range"),
+            span: path_span,
+        });
+    }
+    let mut rebuilt = chars.clone();
+    rebuilt[idx] = new_c;
+    let new_str: String = rebuilt.into_iter().collect();
+    Ok(Value::string(Rc::from(new_str.as_str())))
 }
 
 /// `:foo/bar` — resolve the head and walk the tail, returning the final
@@ -758,6 +823,15 @@ pub(crate) fn set_path_value(
     }
     // Final write.
     let final_part = &parts[parts.len() - 1];
+    // M38: string char poke. `Rc<str>` is immutable, so we rebuild the string
+    // and write the new value back to the head word's binding (mirrors how
+    // `s/2: #"X"` works in Red — strings are value types for path poke).
+    if let Value::String { s, .. } = &current {
+        if let Value::Integer { n, .. } = final_part {
+            let new_str = poke_string_char(s, *n, &rhs, path_span)?;
+            return write_setword(&head_sym, &head_binding, new_str, env, path_span);
+        }
+    }
     write_path_slot(&current, final_part, rhs, env, path_span)
 }
 
@@ -766,7 +840,9 @@ pub(crate) fn set_path_value(
 /// - Object + Word → set object slot.
 /// - Block + Integer → `poke`-style 1-based (negative from tail) write into
 ///   shared storage.
-/// - String + Integer → poke char (deferred; error).
+/// - String + Integer → handled in `set_path_value` (rebuild + write back to
+///   head binding); this arm is only reachable via nested paren paths and
+///   surfaces as an error (immutable `Rc<str>`).
 /// - Paren → evaluate, then recurse on the result (so `obj/(word)/field:` works).
 fn write_path_slot(
     current: &Value,
@@ -832,7 +908,7 @@ fn write_path_slot(
                 Ok(())
             }
             Value::String { .. } => Err(EvalError::Native {
-                message: "string char poke deferred until char! type exists".into(),
+                message: "string char poke must target a word head (immutable Rc<str>)".into(),
                 span: path_span,
             }),
             other => Err(EvalError::TypeError {

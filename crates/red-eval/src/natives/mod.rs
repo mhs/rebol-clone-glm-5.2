@@ -72,6 +72,7 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Integer { .. } => "integer!",
         Value::Float { .. } => "float!",
         Value::String { .. } => "string!",
+        Value::Char { .. } => "char!",
         Value::String8(_) => "binary!",
         Value::Word { .. } => "word!",
         Value::SetWord { .. } => "set-word!",

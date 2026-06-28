@@ -54,6 +54,83 @@ fn num_type_err(v: &Value) -> EvalError {
     }
 }
 
+/// M38: char codepoint extracted from a `char!` value, for char arithmetic
+/// (`char + int → char`, `char - char → int`, `char + char → int`).
+fn as_codepoint(v: &Value) -> Option<i64> {
+    match v {
+        Value::Char { c, .. } => Some(*c as i64),
+        _ => None,
+    }
+}
+
+/// M38: char arithmetic dispatcher. Returns `Some(result)` if either operand
+/// is a `char!` (and the combination is valid); `None` if neither is a char
+/// (caller falls through to numeric `num_binop`). Errors on char+float.
+fn char_binop(
+    args: &[Value],
+    op: &str,
+    f_char_int: fn(i64, i64) -> i64,
+    f_char_char: fn(i64, i64) -> i64,
+) -> Result<Option<Value>, EvalError> {
+    let a_cp = as_codepoint(&args[0]);
+    let b_cp = as_codepoint(&args[1]);
+    match (a_cp, b_cp) {
+        (Some(a), Some(b)) => {
+            // char + char → int (or char - char → int). Error if result is not
+            // a valid codepoint when caller expects char output — but Red's
+            // rule is char+char → integer, so always return int.
+            Ok(Some(Value::integer(f_char_char(a, b))))
+        }
+        (Some(a), None) => {
+            // char + int → char. Float operand is a type error.
+            if let Value::Float { .. } = &args[1] {
+                return Err(EvalError::TypeError {
+                    expected: "char! or integer!",
+                    found: type_name(&args[1]),
+                    span: args[1].span_or_default(),
+                });
+            }
+            let b = as_number(&args[1]).ok_or_else(|| num_type_err(&args[1]))?;
+            let n = match b {
+                Num::Int(k) => k,
+                Num::Float(_) => unreachable!("guarded above"),
+            };
+            let r = f_char_int(a, n);
+            let cp = r as u32;
+            let c = char::from_u32(cp).ok_or_else(|| EvalError::Native {
+                message: format!("{op}: result {r} is not a valid char codepoint"),
+                span: args[0].span_or_default(),
+            })?;
+            Ok(Some(Value::char(c)))
+        }
+        (None, Some(b)) => {
+            // int + char → char (only valid for `+`; `-` is not symmetric on
+            // char — `int - char` is a type error in Red). Caller (`subtract`)
+            // rejects this path before dispatching.
+            if let Value::Float { .. } = &args[0] {
+                return Err(EvalError::TypeError {
+                    expected: "char! or integer!",
+                    found: type_name(&args[0]),
+                    span: args[0].span_or_default(),
+                });
+            }
+            let a = as_number(&args[0]).ok_or_else(|| num_type_err(&args[0]))?;
+            let n = match a {
+                Num::Int(k) => k,
+                Num::Float(_) => unreachable!("guarded above"),
+            };
+            let r = f_char_int(n, b);
+            let cp = r as u32;
+            let c = char::from_u32(cp).ok_or_else(|| EvalError::Native {
+                message: format!("{op}: result {r} is not a valid char codepoint"),
+                span: args[0].span_or_default(),
+            })?;
+            Ok(Some(Value::char(c)))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
 /// `EvalError::Native` with the span sourced from `from`.
 fn native_err(from: &Value, msg: impl Into<String>) -> EvalError {
     EvalError::Native {
@@ -93,7 +170,8 @@ fn num_binop(
 }
 
 /// `+` infix — numeric addition, with string concatenation when both operands
-/// are strings (M15). Falls through to numeric addition otherwise.
+/// are strings (M15), and char arithmetic (M38: `char + int → char`,
+/// `char + char → int`). Falls through to numeric addition otherwise.
 pub(crate) fn add(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     if let (Value::String { s: a, .. }, Value::String { s: b, .. }) = (&args[0], &args[1]) {
         let mut cat = String::with_capacity(a.len() + b.len());
@@ -101,16 +179,32 @@ pub(crate) fn add(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<
         cat.push_str(b);
         return Ok(Value::string(std::rc::Rc::from(cat.as_str())));
     }
+    if let Some(r) = char_binop(args, "add", |a, b| a + b, |a, b| a + b)? {
+        return Ok(r);
+    }
     num_binop(args, "add", |a, b| Some(a + b), |a, b| a + b)
 }
 
-/// `-` infix — numeric subtraction.
+/// `-` infix — numeric subtraction, with char arithmetic (M38:
+/// `char - char → int`, `char - int → char`). Falls through to numeric
+/// subtraction otherwise. `int - char` is a type error in Red.
 pub(crate) fn subtract(
     args: &[Value],
     _refs: &RefineArgs,
     _env: &mut Env,
 ) -> Result<Value, EvalError> {
-    num_binop(args, "division", |a, b| Some(a - b), |a, b| a - b)
+    // `int - char` is not allowed (asymmetric). Block it before `char_binop`.
+    if as_codepoint(&args[0]).is_none() && as_codepoint(&args[1]).is_some() {
+        return Err(EvalError::TypeError {
+            expected: "char! or float!",
+            found: type_name(&args[0]),
+            span: args[0].span_or_default(),
+        });
+    }
+    if let Some(r) = char_binop(args, "subtract", |a, b| a - b, |a, b| a - b)? {
+        return Ok(r);
+    }
+    num_binop(args, "subtraction", |a, b| Some(a - b), |a, b| a - b)
 }
 
 /// `*` infix — numeric multiplication.
@@ -302,10 +396,11 @@ fn divide_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Va
 // min / max
 // ---------------------------------------------------------------------------
 
-/// Numeric ordering. Returns `Less`/`Equal`/`Greater`.
+/// Numeric ordering. Returns `Less`/`Equal`/`Greater`. M38: also accepts
+/// `char!` operands (compared by codepoint) so `min`/`max` work on chars.
 fn num_ordering(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalError> {
-    let x = as_number(a).ok_or_else(|| num_type_err(a))?;
-    let y = as_number(b).ok_or_else(|| num_type_err(b))?;
+    let x = as_orderable(a).ok_or_else(|| num_type_err(a))?;
+    let y = as_orderable(b).ok_or_else(|| num_type_err(b))?;
     Ok(match (x, y) {
         (Num::Int(x), Num::Int(y)) => x.cmp(&y),
         (Num::Int(x), Num::Float(y)) => (x as f64)
@@ -316,6 +411,18 @@ fn num_ordering(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalError> {
             .unwrap_or(std::cmp::Ordering::Equal),
         (Num::Float(x), Num::Float(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
     })
+}
+
+/// Like `as_number` but also accepts `char!` (by codepoint) — used only by
+/// `num_ordering` (so `min`/`max` accept chars while `+`/`-`/`*`/`/` use the
+/// dedicated `char_binop` path).
+fn as_orderable(v: &Value) -> Option<Num> {
+    match v {
+        Value::Integer { n, .. } => Some(Num::Int(*n)),
+        Value::Float { f, .. } => Some(Num::Float(*f)),
+        Value::Char { c, .. } => Some(Num::Int(*c as i64)),
+        _ => None,
+    }
 }
 
 fn min_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {

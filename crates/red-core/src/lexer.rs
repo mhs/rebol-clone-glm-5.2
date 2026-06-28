@@ -29,6 +29,10 @@ pub enum TokenKind {
     /// `http://example.com/x` — a url! literal. Produced when a word run
     /// matches `scheme://...`. The full text (including scheme) is stored.
     Url(Rc<str>),
+    /// `#"a"` — a char! literal. Produced by `#"` followed by either a single
+    /// char, a `^`-escape (`^-` tab, `^/` newline, `^@` null, `^M-C` meta,
+    /// `^^` literal caret, `^"` literal quote), or `^(NN)` codepoint hex.
+    Char(char),
     LBracket,
     RBracket,
     LParen,
@@ -55,6 +59,9 @@ pub enum LexError {
     /// `{...` hit EOF with braces still open. `depth` is the number of
     /// unclosed `{` at EOF.
     UnbalancedBrace { span: Span, depth: i32 },
+    /// `#"...` hit EOF before the closing `"`, or contained a malformed
+    /// `^`-escape or `^(NN)` codepoint.
+    InvalidChar { span: Span, chars: String },
 }
 
 impl LexError {
@@ -64,7 +71,8 @@ impl LexError {
             LexError::UnterminatedString { span }
             | LexError::InvalidNumber { span, .. }
             | LexError::InvalidWord { span }
-            | LexError::UnbalancedBrace { span, .. } => *span,
+            | LexError::UnbalancedBrace { span, .. }
+            | LexError::InvalidChar { span, .. } => *span,
         }
     }
 }
@@ -81,6 +89,9 @@ impl std::fmt::Display for LexError {
             LexError::InvalidWord { .. } => write!(f, "invalid word (empty body)"),
             LexError::UnbalancedBrace { depth, .. } => {
                 write!(f, "unbalanced brace — {depth} unclosed `{{` at EOF")
+            }
+            LexError::InvalidChar { chars, .. } => {
+                write!(f, "invalid char literal: {chars:?}")
             }
         }
     }
@@ -167,6 +178,17 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
         // so this scans its own run rather than reusing `scan_word`.
         if c == b'%' {
             let (end, kind) = scan_file(src, &mut i)?;
+            out.push(Token {
+                kind,
+                span: Span::new(start, end),
+            });
+            continue;
+        }
+
+        // Char literal: `#"..."` form. A bare `#` not followed by `"` falls
+        // through to `scan_word` (preserving back-compat with `#foo` words).
+        if c == b'#' && bytes.get(i + 1) == Some(&b'"') {
+            let (end, kind) = scan_char(src, &mut i)?;
             out.push(Token {
                 kind,
                 span: Span::new(start, end),
@@ -303,6 +325,125 @@ fn scan_braced(src: &str, i: &mut usize) -> Result<(usize, String), LexError> {
         span: Span::new(start, bytes.len()),
         depth,
     })
+}
+
+/// `#"..."` — a char! literal. Inside the quotes exactly one "char unit"
+/// appears:
+/// - a literal character: `#"a"` → `'a'`
+/// - a `^`-escape: `#"^-"` → tab, `#"^/"` → newline, `#"^@"` → null,
+///   `#"^^"` → literal caret, `#"^""` → literal quote, `#"^M-C"` → meta
+///   (`C` with high bit cleared: codepoint `C` XOR `0x80` ... actually Red's
+///   `^M-C` form yields `chr & 0x1F` for control, but for POC we map `M-<c>`
+///   to `(c as u8).wrapping_sub(0x40)` matching Red's "control" semantics)
+/// - a `^(NN)` codepoint hex form (1-6 hex digits): `#"^(41)"` → `'A'`
+///
+/// EOF before closing `"` or a malformed escape → `InvalidChar`.
+fn scan_char(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError> {
+    let start = *i;
+    let bytes = src.as_bytes();
+    // Consume `#"`.
+    *i += 2;
+    if *i >= bytes.len() {
+        return Err(LexError::InvalidChar {
+            span: Span::new(start, bytes.len()),
+            chars: src[start..].to_string(),
+        });
+    }
+
+    let c = decode_char_unit(src, bytes, i).map_err(|chars| LexError::InvalidChar {
+        span: Span::new(start, *i),
+        chars,
+    })?;
+
+    // Expect closing `"`.
+    if *i >= bytes.len() || bytes[*i] != b'"' {
+        return Err(LexError::InvalidChar {
+            span: Span::new(start, bytes.len()),
+            chars: src[start..(*i).min(bytes.len())].to_string(),
+        });
+    }
+    *i += 1; // consume closing `"`
+    Ok((*i, TokenKind::Char(c)))
+}
+
+/// Decode a single "char unit" starting at `*i` inside a `#"..."` literal.
+/// On error returns a `String` describing the bad input (caller wraps as
+/// `InvalidChar`).
+fn decode_char_unit(src: &str, bytes: &[u8], i: &mut usize) -> Result<char, String> {
+    let c = bytes[*i];
+    if c == b'^' {
+        *i += 1;
+        if *i >= bytes.len() {
+            return Err("caret escape at EOF".into());
+        }
+        let esc = bytes[*i];
+        *i += 1;
+        // `^(NN)` — codepoint hex form.
+        if esc == b'(' {
+            let mut hex = String::new();
+            while *i < bytes.len() && bytes[*i] != b')' {
+                let h = bytes[*i];
+                if !h.is_ascii_hexdigit() {
+                    return Err(format!("invalid hex digit in ^(...): {:?}", h as char));
+                }
+                hex.push(h as char);
+                *i += 1;
+                if hex.len() > 6 {
+                    return Err("^(...) codepoint too long".into());
+                }
+            }
+            if *i >= bytes.len() {
+                return Err("unterminated ^(...)".into());
+            }
+            *i += 1; // consume `)`
+            if hex.is_empty() {
+                return Err("empty ^()".into());
+            }
+            let n = u32::from_str_radix(&hex, 16)
+                .map_err(|e| format!("bad codepoint ^({hex}): {e}"))?;
+            return char::from_u32(n).ok_or_else(|| format!("codepoint ^({hex}) out of range",));
+        }
+        // Single-char caret escape.
+        // Single-char caret escape.
+        let decoded = match esc {
+            b'-' => '\t',       // tab
+            b'/' => '\n',       // newline
+            b'@' => '\u{0000}', // null
+            b'^' => '^',        // literal caret
+            b'"' => '"',        // literal quote
+            b')' => ')',
+            b'(' => '(',
+            // `^M-C` meta form: control/meta syntax. Only triggered when `M`
+            // is followed by `-` — otherwise `^M` is Ctrl-M (CR, codepoint 13).
+            b'M' if bytes.get(*i) == Some(&b'-') => {
+                *i += 1; // consume `-`
+                if *i >= bytes.len() {
+                    return Err("`^M-` at EOF".into());
+                }
+                let mc = bytes[*i];
+                *i += 1;
+                mc.wrapping_sub(0x40) as char
+            }
+            // Any other letter: `^A` = Ctrl-A (codepoint 1), `^M` = CR (13),
+            // `^Z` = Ctrl-Z (26). Maps to `(letter - 0x40)` uppercase.
+            _ => {
+                if esc.is_ascii_uppercase() || esc.is_ascii_lowercase() {
+                    esc.to_ascii_uppercase().wrapping_sub(0x40) as char
+                } else {
+                    esc as char
+                }
+            }
+        };
+        return Ok(decoded);
+    }
+    // Ordinary byte — decode one UTF-8 char.
+    let ch_len = utf8_len(c);
+    let s = src
+        .get(*i..*i + ch_len)
+        .ok_or("bad UTF-8 in char literal")?;
+    let ch = s.chars().next().ok_or("empty char literal")?;
+    *i += ch_len;
+    Ok(ch)
 }
 
 /// `[0-9]+` optionally followed by `.[0-9]+` and/or `[eE][+-]?[0-9]+`.
@@ -743,6 +884,53 @@ mod tests {
     #[test]
     fn quoted_string_empty() {
         assert_eq!(one("\"\""), TokenKind::String(Rc::from("")));
+    }
+
+    #[test]
+    fn char_literal_basic() {
+        assert_eq!(one("#\"a\""), TokenKind::Char('a'));
+        assert_eq!(one("#\"Z\""), TokenKind::Char('Z'));
+        assert_eq!(one("#\"1\""), TokenKind::Char('1'));
+    }
+
+    #[test]
+    fn char_literal_caret_escape() {
+        // `^-` tab, `^/` newline, `^@` null, `^^` literal caret, `^"` quote.
+        assert_eq!(one("#\"^-\""), TokenKind::Char('\t'));
+        assert_eq!(one("#\"^/\""), TokenKind::Char('\n'));
+        assert_eq!(one("#\"^@\""), TokenKind::Char('\u{0}'));
+        assert_eq!(one("#\"^^\""), TokenKind::Char('^'));
+        assert_eq!(one("#\"^\"\""), TokenKind::Char('"'));
+    }
+
+    #[test]
+    fn char_literal_control_letter() {
+        // `^A` = Ctrl-A = codepoint 1; `^M` = CR = 13.
+        assert_eq!(one("#\"^A\""), TokenKind::Char('\u{1}'));
+        assert_eq!(one("#\"^M\""), TokenKind::Char('\r'));
+        assert_eq!(one("#\"^Z\""), TokenKind::Char('\u{1A}'));
+    }
+
+    #[test]
+    fn char_literal_codepoint_hex() {
+        assert_eq!(one("#\"^(41)\""), TokenKind::Char('A'));
+        assert_eq!(one("#\"^(61)\""), TokenKind::Char('a'));
+        assert_eq!(one("#\"^(1F600)\""), TokenKind::Char('\u{1F600}'));
+    }
+
+    #[test]
+    fn char_literal_unterminated() {
+        let err = lex("#\"a").unwrap_err();
+        assert!(matches!(err, LexError::InvalidChar { .. }));
+        // Bad codepoint form.
+        let err = lex("#\"^(ZZ)\"").unwrap_err();
+        assert!(matches!(err, LexError::InvalidChar { .. }));
+    }
+
+    #[test]
+    fn char_literal_does_not_affect_bare_hash_word() {
+        // A bare `#` not followed by `"` should fall through to word scan.
+        assert!(matches!(one("#foo"), TokenKind::Word(_)));
     }
 
     #[test]

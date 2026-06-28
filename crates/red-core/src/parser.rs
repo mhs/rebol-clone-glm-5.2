@@ -146,6 +146,10 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok(Value::String { s, span: tok.span })
             }
+            TokenKind::Char(c) => {
+                self.advance()?;
+                Ok(Value::Char { c, span: tok.span })
+            }
             TokenKind::Word(sym) => {
                 self.advance()?;
                 let head = Value::Word {

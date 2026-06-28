@@ -627,6 +627,7 @@ fn compile_prefix(
         }
         Value::Float { .. }
         | Value::String { .. }
+        | Value::Char { .. }
         | Value::String8(_)
         | Value::LitWord { .. }
         | Value::Block { .. }

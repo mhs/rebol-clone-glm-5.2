@@ -25,7 +25,9 @@ use super::control::{
 use super::eval::{do_native, load_native, reduce};
 use super::func::{does_native, func_native, function_native, function_predicate, return_native};
 use super::io::{prin, print, probe};
-use super::words::{bind_native, get_native, set_native, use_native, value_predicate};
+use super::words::{
+    bind_native, char_predicate, get_native, set_native, use_native, value_predicate,
+};
 
 // ---------------------------------------------------------------------------
 // Native-wrapping helpers
@@ -286,6 +288,10 @@ pub fn register_natives(env: &mut Env) {
     env.natives.insert(
         Symbol::new("value?"),
         fixed_native(value_predicate as NativeFn, 1),
+    );
+    env.natives.insert(
+        Symbol::new("char?"),
+        fixed_native(char_predicate as NativeFn, 1),
     );
     env.natives
         .insert(Symbol::new("use"), fixed_native(use_native as NativeFn, 2));

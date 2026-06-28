@@ -15,6 +15,7 @@ pub fn mold(value: &Value, out: &mut String) {
         }
         Value::Float { f, .. } => mold_float(*f, out),
         Value::String { s, .. } => mold_string(s, out),
+        Value::Char { c, .. } => mold_char(*c, out),
         Value::String8(bytes) => {
             // POC: mold as `#{hex}` so it round-trips as a distinct literal.
             out.push_str("#{");
@@ -113,6 +114,7 @@ pub fn form(value: &Value, out: &mut String) {
         }
         Value::Float { f, .. } => mold_float(*f, out),
         Value::String { s, .. } => out.push_str(s),
+        Value::Char { c, .. } => out.push(*c),
         Value::String8(bytes) => {
             out.push_str("#{");
             for b in bytes {
@@ -264,6 +266,42 @@ fn mold_string(s: &str, out: &mut String) {
     out.push('"');
 }
 
+/// Mold a char! literal in the `#"..."` form, using Red caret-escapes for
+/// special chars. The escapes mirror the lexer's `scan_char` decoder:
+/// - `^-` → tab, `^/` → newline, `^@` → null
+/// - `^^` → literal caret, `^"` → literal quote
+/// - control chars (`\x01`..`\x1F` other than the named above) → `^A`..`^Z`
+/// - any other char → the literal char
+/// - codepoints above U+FFFF → `^(NNNNNN)` hex form
+fn mold_char(c: char, out: &mut String) {
+    out.push_str("#\"");
+    match c {
+        '\t' => out.push_str("^-"),
+        '\n' => out.push_str("^/"),
+        '\r' => out.push_str("^M"),
+        '\0' => out.push_str("^@"),
+        '^' => out.push_str("^^"),
+        '"' => out.push_str("^\""),
+        c if (c as u32) < 0x20 => {
+            // Other control char: use `^<letter>` form (Ctrl-A..Ctrl-Z).
+            let n = (c as u32) + 0x40;
+            if let Some(letter) = char::from_u32(n) {
+                out.push('^');
+                out.push(letter);
+            } else {
+                use std::fmt::Write;
+                let _ = write!(out, "^({:X})", c as u32);
+            }
+        }
+        c if (c as u32) > 0xFFFF => {
+            use std::fmt::Write;
+            let _ = write!(out, "^({:X})", c as u32);
+        }
+        _ => out.push(c),
+    }
+    out.push('"');
+}
+
 /// Mold a file! path. Uses the bare `%path` form when the path contains no
 /// file-delimiter characters (so `%foo/bar.txt` round-trips compactly), and
 /// the quoted `%"..."` form (with string-style escapes) when it does (e.g.
@@ -392,6 +430,43 @@ mod tests {
         assert_eq!(mold_to_string(&s("a\nb")), "\"a\\nb\"");
         assert_eq!(mold_to_string(&s("a\tb")), "\"a\\tb\"");
         assert_eq!(mold_to_string(&s("a\rb")), "\"a\\rb\"");
+    }
+
+    #[test]
+    fn mold_char_basic() {
+        assert_eq!(mold_to_string(&Value::char('a')), "#\"a\"");
+        assert_eq!(mold_to_string(&Value::char('Z')), "#\"Z\"");
+        assert_eq!(mold_to_string(&Value::char('1')), "#\"1\"");
+    }
+
+    #[test]
+    fn mold_char_caret_escapes() {
+        assert_eq!(mold_to_string(&Value::char('\t')), "#\"^-\"");
+        assert_eq!(mold_to_string(&Value::char('\n')), "#\"^/\"");
+        assert_eq!(mold_to_string(&Value::char('\u{0}')), "#\"^@\"");
+        assert_eq!(mold_to_string(&Value::char('^')), "#\"^^\"");
+        assert_eq!(mold_to_string(&Value::char('"')), "#\"^\"\"");
+        assert_eq!(mold_to_string(&Value::char('\r')), "#\"^M\"");
+        assert_eq!(mold_to_string(&Value::char('\u{1}')), "#\"^A\"");
+    }
+
+    #[test]
+    fn mold_char_round_trips_via_lexer() {
+        // M38: every molded char must re-parse to the same char value.
+        for c in [
+            'a', 'Z', '0', ' ', '!', '#', '%', '&', '\t', '\n', '\r', '\0', '^', '"', '\u{1A}',
+            '\u{7F}',
+        ] {
+            let molded = mold_to_string(&Value::char(c));
+            let toks = crate::lexer::lex(&molded).expect("lex molded char");
+            assert_eq!(toks.len(), 1, "expected 1 token for {molded:?}");
+            match &toks[0].kind {
+                crate::lexer::TokenKind::Char(parsed) => {
+                    assert_eq!(*parsed, c, "round-trip mismatch: {molded:?} → {parsed:?}");
+                }
+                other => panic!("expected Char token for {molded:?}, got {other:?}"),
+            }
+        }
     }
 
     #[test]
