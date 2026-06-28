@@ -201,19 +201,24 @@ tests at the source-file level (consistent with the existing
 35 of 36 `examples/*.red` files are never run by CI; they could be silently
 broken. Close the gap.
 
-- [ ] **Add a test that runs every `examples/*.red`** *(medium)*
-      New `crates/red-cli/tests/examples.rs` (or extend `cli.rs`) that walks
-      `examples/*.red`, runs `red <file>`, and asserts exit 0 (or compares
-      against a `.expected` if present). Skip `fib.rb`-style misnamed files;
-      gate shell-using examples behind `--allow-shell`. This makes `examples/`
-      a regression surface rather than dead weight.
-- [ ] **Deduplicate `examples/hello.red` vs `tests/programs/hello.red`** *(low)*
-      `crates/red-cli/tests/cli.rs:20` references `examples/hello.red`; the
-      golden harness uses `tests/programs/`. Either symlink or delete the
-      duplicate.
-- [ ] **Add trailing newline to `examples/tree-walk.red`** *(low)*
-      Last line lacks a trailing newline. POSIX text-file convention.
-- [ ] `cargo test --workspace` green with the new examples test.
+- [x] **Add a test that runs every `examples/*.red`** *(medium)*
+      New `crates/red-cli/tests/examples.rs` that walks `examples/*.red`,
+      runs `red <file>` from the workspace root (required for the file-IO
+      examples' relative `%examples/_tmp_*` paths), and asserts exit 0.
+      Forward-compatible: compares stdout against an optional
+      `examples/<stem>.expected` sibling if present, otherwise exit-0 only.
+      No `--allow-shell` needed (no example invokes `call`/`shell` — all
+      grep hits are in comments). `fib.rb` was already renamed in M33, so
+      no misnamed-file skip is required.
+- [x] **Deduplicate `examples/hello.red` vs `tests/programs/hello.red`** *(low)*
+      `examples/hello.red` deleted (byte-identical duplicate of
+      `crates/red-eval/tests/programs/hello.red`); `cli.rs:20` repointed
+      at the canonical golden copy.
+- [x] **Add trailing newline to `examples/tree-walk.red`** *(low)*
+      Last line lacked a trailing newline. Appended `\n` (POSIX convention).
+- [x] `cargo test --workspace` green with the new examples test;
+      `--features force-walk` green; `cargo clippy --workspace --all-targets
+      -- -D warnings` clean.
 
 ## Milestone 36 — Modularity (optional, larger)
 
