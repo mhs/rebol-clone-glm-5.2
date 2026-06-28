@@ -899,6 +899,7 @@ name = "red-eval"
 version = "0.2.0"
 dependencies = [
  "criterion",
+ "proptest",
  "red-core",
  "tempfile",
  "ureq",

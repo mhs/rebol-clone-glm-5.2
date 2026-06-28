@@ -1,0 +1,28 @@
+[package]
+name = "red-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+# In-tree path dependency. `red-eval` provides `run_source` — the fuzzer
+# feeds arbitrary bytes to it and asserts no panic (errors are fine).
+red-eval = { path = "../crates/red-eval" }
+red-core = { path = "../crates/red-core" }
+
+[[bin]]
+name = "run_source"
+path = "fuzz_targets/run_source.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "run_source_vm"
+path = "fuzz_targets/run_source_vm.rs"
+test = false
+doc = false

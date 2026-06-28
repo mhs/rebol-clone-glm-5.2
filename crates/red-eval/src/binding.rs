@@ -539,7 +539,7 @@ pub(crate) fn rebind_to_context(series: &Series, ctx: &Rc<Context>, names: &[Sym
 /// `Series::clone` only bumps the outer `Rc`, sharing nested storage —
 /// unsuitable when `bind`/`use` need to rebind words without corrupting the
 /// original source tree.
-pub(crate) fn deep_clone_series(series: &Series) -> Series {
+pub fn deep_clone_series(series: &Series) -> Series {
     let data = series.data.borrow();
     let cloned: Vec<Value> = data.iter().map(deep_clone_value).collect();
     Series::new(cloned)

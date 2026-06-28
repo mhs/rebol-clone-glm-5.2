@@ -1284,23 +1284,96 @@ per-recursion-call overhead. All are semantics-preserving.
 
 ## Milestone 32 - Property tests + fuzzing the VM
 
-- [ ] Extend the existing `proptest` round-trip to compile+VM-run: for a
+- [x] Extend the existing `proptest` round-trip to compile+VM-run: for a
       generated small `Value` tree, `mold(vm_run(compile(parse(mold(v)))))`
       == `mold(walk_run(parse(mold(v))))`
-- [ ] Property test: for any small generated program, VM mode and Walk mode
+      (Ground truth: `vm_walk_mold_parity_for_values` in
+      `crates/red-eval/tests/property.rs`. Reuses a local copy of
+      `red-core/tests/property.rs`'s `gen_value` strategy (reparseable
+      variants only). `mold_to_source(&v)` produces the source string;
+      `run_captured(&src, walk=false)` and `run_captured(&src, walk=true)`
+      run both modes; `normalize()` strips `line:col:` prefixes from
+      errors so VM/Walk span-localization differences don't fail the
+      parity assertion. Most random values error in both modes (unbound
+      words); the property is "both modes agree on Ok-or-Err and the
+      result/error". The M31 per-instr span work closed the span gap so
+      message bodies now match.)
+- [x] Property test: for any small generated program, VM mode and Walk mode
       produce identical stdout (capture both)
-- [ ] Property test: for any small generated program, the call-stack depth at
+      (Ground truth: `vm_walk_stdout_parity_for_programs` in
+      `crates/red-eval/tests/property.rs`. `gen_program()` generates 1..4
+      statements from a tiny grammar: assignments (`word: expr`), `if`,
+      `either`, `repeat` (bounded 0..20), and bare expressions (leaf or
+      `leaf op leaf`). Integers bounded to ±1000 to avoid arithmetic
+      overflow panics (the POC's `+`/`-`/`*` natives panic on i64
+      overflow rather than producing an `EvalError`; the fuzz target
+      covers the panic case, but the parity test wants "both modes
+      agree", not "both modes panic identically"). `normalize()` strips
+      `line:col:` prefixes; `prop_assert_eq!` compares.)
+- [x] Property test: for any small generated program, the call-stack depth at
       the end of execution is <= a small constant (e.g. 32) when the program
       is tail-recursive - assert via a test-only `Env::max_frame_depth` counter
-- [ ] Property test: compilation is idempotent - compiling a block twice
+      (Ground truth: `tail_recursive_programs_have_bounded_stack` in the
+      `tail_recursion_stats` submodule (stats feature only). Generates a
+      tail-recursive `countdown n acc` program for `n` in 1..1000, runs it
+      on the VM (via `run_keeping_env_stats` with `walk=false`), asserts
+      `env.max_frame_depth <= 32`. The `TailReenter` optimization reuses the
+      current frame, so depth stays bounded regardless of `n`. Runs on a
+      256 MiB-stack thread (mirrors `bench_fixtures.rs::run_on_big_stack`)
+      for robustness — the VM is fine on the default stack, but the thread
+      keeps the test portable.)
+- [x] Property test: compilation is idempotent - compiling a block twice
       yields identical `CompiledBlock`s (modulo pool dedup order)
-- [ ] Add `cargo-fuzz` target fuzzing `run_source(arbitrary_bytes)` ->
+      (Ground truth: `compilation_is_idempotent` in the `compile_idempotent`
+      submodule (stats feature only). `compile_twice(src)` compiles the
+      source twice using the *same* `Env` (so `env.natives` insertion order
+      is identical — `HashMap` seed differs across separate `Env`s, which
+      would shift native indices) with deep-cloned bodies (since
+      `analyze_block` mutates bindings in place). Compares the instr stream
+      (by `Debug` string, since `Instr` doesn't derive `PartialEq`),
+      `n_locals`, `needs_rebind`, `arity`, and the per-instr `spans` table.
+      Pool dedup order is NOT asserted (the pool is a `Vec` without dedup;
+      recompiling may intern constants in a different order). Programs that
+      fail to parse or compile are skipped — the property is about
+      idempotency of successful compiles, not about every generated string
+      being compilable. Required promoting `binding::deep_clone_series` from
+      `pub(crate)` to `pub` and re-exporting it from `red-eval/src/lib.rs`
+      so the test can deep-clone the body before the second compile.)
+- [x] Add `cargo-fuzz` target fuzzing `run_source(arbitrary_bytes)` ->
       VM must not panic (may error, may not abort). Distinguish panics (bugs)
       from `EvalError`s (graceful)
-- [ ] Inline `#[test]`: proptest minimal case reduction produces a readable
+      (Ground truth: two fuzz targets in `fuzz/fuzz_targets/`:
+      `run_source.rs` (default mode) and `run_source_vm.rs` (explicit VM
+      mode via `RunOptions::default()`). Both feed arbitrary bytes (lossy
+      UTF-8) to `run_source`/`run_source_with_exit_opts` and assert no panic
+      — an `Err` (lex/parse/eval error) is a graceful failure, not a bug.
+      The `fuzz/` crate uses `libfuzzer-sys` (`#![no_main]`, nightly-only)
+      and is excluded from the default workspace so `cargo build/test
+      --workspace` don't try to compile it under stable. Run with
+      `cargo +nightly fuzz run run_source` (requires `cargo-fuzz`
+      installed and a nightly toolchain). Verified: 1000 iterations with
+      no panics; coverage grew to 2330 edges.)
+- [x] Inline `#[test]`: proptest minimal case reduction produces a readable
       shrink
-- [ ] `cargo test --workspace` passes; `cargo fuzz run run_source` runs
+      (Ground truth: `shrink_produces_readable` in
+      `crates/red-eval/tests/property.rs`, gated `#[ignore]` so it doesn't
+      fail the suite. Builds a `TestRunner` with 64 cases, runs a strategy
+      generating integers 10..10_000 mapped to `Value::Integer`, deliberately
+      fails on any source longer than 1 char. Proptest shrinks to the minimal
+      failing case (a 2-digit value like `10`), demonstrating the shrunk
+      source is a readable short string, not an opaque nested tree. The
+      `TestError::Fail(reason)` is inspected to confirm the shrunk case
+      length is 2-3 chars. Run with
+      `cargo test shrink_produces_readable -- --ignored --nocapture`.)
+- [x] `cargo test --workspace` passes; `cargo fuzz run run_source` runs
       (separate job)
+      (Ground truth: `cargo test --workspace` (653 tests), `--features
+      red-eval/stats` (657 tests — 4 extra from the stats-gated property
+      tests), and `--features force-walk` (653 tests) all pass with zero
+      build warnings. `cargo +nightly fuzz build run_source` builds
+      successfully; `cargo +nightly fuzz run run_source -- -runs=1000`
+      ran 1000 iterations without panics. The fuzz crate is a separate
+      nightly job — not part of `cargo test --workspace`.)
 
 ## Milestone 33 - Walker removal prep + cleanup
 
