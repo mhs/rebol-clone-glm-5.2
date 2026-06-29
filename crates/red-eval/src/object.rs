@@ -185,6 +185,7 @@ fn same_predicate(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<
         (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
         (Value::Func(a), Value::Func(b)) => Rc::ptr_eq(a, b),
         (Value::Error(a), Value::Error(b)) => Rc::ptr_eq(a, b),
+        (Value::Map(a), Value::Map(b)) => Rc::ptr_eq(a, b),
         _ => false,
     };
     Ok(Value::Logic(same))
@@ -200,23 +201,31 @@ fn not_same_predicate(
     Ok(Value::Logic(!matches!(v, Value::Logic(true))))
 }
 
-/// `words-of object` — block of the object's word names (as lit-words).
+/// `words-of object|map` — block of the object's word names (as lit-words),
+/// or the map's keys (as their natural `Value` form).
 fn words_of_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(arity_err(args, "words-of", 1, args.len()));
     }
-    let obj = match &args[0] {
-        Value::Object(o) => o.clone(),
-        other => {
-            return Err(EvalError::TypeError {
-                expected: "object!",
-                found: type_name(other),
-                span: other.span_or_default(),
-            });
+    match &args[0] {
+        Value::Object(o) => {
+            let borrow = obj_borrow_words(o);
+            Ok(Value::block(Series::new(borrow)))
         }
-    };
+        Value::Map(m) => Ok(Value::block(Series::new(m.borrow().keys()))),
+        other => Err(EvalError::TypeError {
+            expected: "object! or map!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
+/// Helper: borrow an object's words as unbound `Word` values (excluding
+/// `self`).
+fn obj_borrow_words(obj: &Rc<RefCell<ObjectDef>>) -> Vec<Value> {
     let borrow = obj.borrow();
-    let words: Vec<Value> = borrow
+    borrow
         .ctx
         .words()
         .into_iter()
@@ -226,11 +235,11 @@ fn words_of_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result
             binding: Binding::Unbound,
             span: Span::default(),
         })
-        .collect();
-    Ok(Value::block(Series::new(words)))
+        .collect()
 }
 
-/// `values-of object` — block of the object's slot values.
+/// `values-of object|map` — block of the object's slot values, or the map's
+/// values in insertion order.
 fn values_of_native(
     args: &[Value],
     _refs: &RefineArgs,
@@ -239,25 +248,25 @@ fn values_of_native(
     if args.len() != 1 {
         return Err(arity_err(args, "values-of", 1, args.len()));
     }
-    let obj = match &args[0] {
-        Value::Object(o) => o.clone(),
-        other => {
-            return Err(EvalError::TypeError {
-                expected: "object!",
-                found: type_name(other),
-                span: other.span_or_default(),
-            });
+    match &args[0] {
+        Value::Object(o) => {
+            let borrow = o.borrow();
+            let values: Vec<Value> = borrow
+                .ctx
+                .words()
+                .into_iter()
+                .filter(|s| s.as_str() != "self")
+                .filter_map(|s| borrow.ctx.get(&s))
+                .collect();
+            Ok(Value::block(Series::new(values)))
         }
-    };
-    let borrow = obj.borrow();
-    let values: Vec<Value> = borrow
-        .ctx
-        .words()
-        .into_iter()
-        .filter(|s| s.as_str() != "self")
-        .filter_map(|s| borrow.ctx.get(&s))
-        .collect();
-    Ok(Value::block(Series::new(values)))
+        Value::Map(m) => Ok(Value::block(Series::new(m.borrow().values()))),
+        other => Err(EvalError::TypeError {
+            expected: "object! or map!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
 }
 
 /// `reflect object 'words` / `'values` — alias dispatch for words/values.

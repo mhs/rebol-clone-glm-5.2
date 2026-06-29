@@ -328,6 +328,9 @@ pub fn register_natives(env: &mut Env) {
     // Objects & contexts (M18)
     crate::object::register_object_natives(env);
 
+    // Maps (M43)
+    crate::map::register_map_natives(env);
+
     // Path natives (M19)
     crate::path::register_path_natives(env);
 

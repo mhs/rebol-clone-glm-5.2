@@ -17,6 +17,7 @@ pub mod interp;
 pub mod interp_runner;
 pub mod interp_walker;
 pub mod io;
+pub mod map;
 pub mod math;
 pub mod natives;
 pub mod object;

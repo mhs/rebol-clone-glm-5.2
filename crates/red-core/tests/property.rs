@@ -20,7 +20,9 @@
 //! are generated with word-only parts so they reparse via adjacency folding.
 
 use proptest::prelude::*;
-use red_core::{load_source, mold_to_string, printer::mold, Series, Span, Value};
+use red_core::{
+    load_source, mold_to_string, printer::mold, MapDef, MapKey, Series, Span, Symbol, Value,
+};
 
 /// Generate a `Value` tree of bounded depth using only reparseable variants.
 fn gen_value(_depth: u32) -> BoxedStrategy<Value> {
@@ -204,5 +206,38 @@ proptest! {
             "round-trip mismatch\n--- original value ---\n{:?}\n--- molded ---\n{}\n--- re-molded ---\n{}",
             v, molded, re_molded
         );
+    }
+}
+
+// M43: `map!` mold is deterministic. Maps are synthetic (mold as
+// `make map! [...]` which parses to a block, not a Map value), so they're
+// excluded from the `gen_value` round-trip above. This focused test builds a
+// `MapDef` directly with hashable keys and asserts that molding it twice
+// yields the same string, and that the form starts with `make map! [`.
+proptest! {
+    #[test]
+    fn map_mold_is_stable(
+        word_keys in prop::collection::vec("[a-z][a-z0-9]{0,6}", 0..4),
+        int_keys in prop::collection::vec(any::<i64>(), 0..3),
+    ) {
+        let m = MapDef::new();
+        for (i, k) in word_keys.iter().enumerate() {
+            m.set(
+                MapKey::Sym(Symbol::new(k)),
+                Value::Integer { n: i as i64, span: Span::new(0, 0) },
+            );
+        }
+        for (i, k) in int_keys.iter().enumerate() {
+            m.set(MapKey::Int(*k), Value::integer((i as i64) * 10));
+        }
+        let v = Value::map(m);
+        let molded1 = mold_to_string(&v);
+        let molded2 = mold_to_string(&v);
+        prop_assert_eq!(&molded1, &molded2, "mold not deterministic");
+        prop_assert!(
+            molded1.starts_with("make map! ["),
+            "expected `make map! [...]` form, got: {molded1}"
+        );
+        prop_assert!(molded1.ends_with(']'), "expected closing ]: {molded1}");
     }
 }

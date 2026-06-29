@@ -58,6 +58,17 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
                     .filter(|s| s.as_str() != "self")
                     .all(|s| values_equal(&a.ctx.get(s).unwrap(), &b.ctx.get(s).unwrap()))
         }
+        (Value::Map(a), Value::Map(b)) => {
+            // Deep entry equality: same keys (order-independent for equality,
+            // though insertion order is preserved for iteration), same values.
+            let a = a.borrow();
+            let b = b.borrow();
+            a.len() == b.len()
+                && a.entries
+                    .borrow()
+                    .iter()
+                    .all(|(k, v)| b.get(k).is_some_and(|bv| values_equal(v, &bv)))
+        }
         _ => false,
     }
 }

@@ -156,6 +156,7 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Url { .. } => "url!",
         Value::Error(_) => "error!",
         Value::Object(_) => "object!",
+        Value::Map(_) => "map!",
     }
 }
 

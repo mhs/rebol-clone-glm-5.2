@@ -417,6 +417,7 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
         "binary!" | "binary" => make_binary(spec)?,
         "error!" | "error" => return make_error(spec),
         "object!" | "object" => return crate::object::make_object(spec, env),
+        "map!" | "map" => return crate::map::make_map(spec, env),
         "function!" | "function" => {
             // Original behavior: spec is a packed `[[spec][body]]` block.
             let packed = expect_block(&[args[0].clone(), spec.clone()], 1, "make")?;
@@ -739,6 +740,7 @@ fn to_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
         "char!" | "char" => to_char(one, &RefineArgs::empty(), env),
         "binary!" | "binary" => to_binary(one, &RefineArgs::empty(), env),
         "error!" | "error" => to_error(one, &RefineArgs::empty(), env),
+        "map!" | "map" => crate::map::to_map(one, &RefineArgs::empty(), env),
         other => Err(EvalError::Native {
             message: format!("to: {other:?} type not supported in POC"),
             span: args[0].span_or_default(),

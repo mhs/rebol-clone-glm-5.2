@@ -1,0 +1,11 @@
+make map! [a: 1 b: 2]
+1
+true
+2
+make map! [a: 1 b: 2]
+1
+99
+none
+true
+false
+true

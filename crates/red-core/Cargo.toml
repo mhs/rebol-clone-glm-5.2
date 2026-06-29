@@ -15,5 +15,8 @@ stats = []
 # divergences. Off in normal builds (the VM is the default since M29).
 force-walk = []
 
+[dependencies]
+indexmap = "2"
+
 [dev-dependencies]
 proptest = "1"

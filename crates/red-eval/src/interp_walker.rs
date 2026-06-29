@@ -344,7 +344,8 @@ fn eval_prefix(
         | Value::File { .. }
         | Value::Url { .. }
         | Value::Char { .. }
-        | Value::Object(_) => Ok(cur),
+        | Value::Object(_)
+        | Value::Map(_) => Ok(cur),
 
         // Path: a function-headed path is a refined call (`copy/part`,
         // `find/case`); anything else is a data-path select (`block/2`,
@@ -531,6 +532,12 @@ fn eval_path_call(
             dispatch_call_with_refs(resolved, &head_sym, &leading_refs, data, i, env, path_span)
         }
         Value::Object(obj) => select_object_path(obj, &parts[1..], data, i, env, path_span),
+        // M43: map-headed path — `m/word`, `m/2`, `m/key: val`. No method-call
+        // dispatch (maps aren't objects); the tail is walked as a data path.
+        Value::Map(_) => {
+            let result = walk_data_path(resolved, &parts[1..], env, path_span)?;
+            Ok(result)
+        }
         // Non-function, non-object data path: walk the tail selecting by
         // integer index (block/string) or word field (object encountered
         // mid-walk). Paren parts are evaluated in place. M19.
@@ -613,14 +620,15 @@ fn step_path(
     }
 }
 
-/// Select a named field from `current`. Objects look up by slot; other types
-/// error. (Map support deferred per plan.)
+/// Select a named field from `current`. Objects look up by slot; maps look up
+/// by `MapKey::Sym` with a string fall-back; other types error.
 fn select_field(current: &Value, sym: &Symbol, path_span: Span) -> Result<Value, EvalError> {
     match current {
         Value::Object(obj) => obj.borrow().ctx.get(sym).ok_or_else(|| EvalError::Native {
             message: format!("object has no field {}", sym.as_str()),
             span: path_span,
         }),
+        Value::Map(m) => Ok(crate::map::select_map_field(m, sym)),
         other => Err(EvalError::Native {
             message: format!(
                 "cannot select field {} from {}",
@@ -675,6 +683,10 @@ fn pick_path_index(current: &Value, n: i64, path_span: Span) -> Result<Value, Ev
             }
             Ok(Value::char(chars[idx]))
         }
+        Value::Map(m) => Ok(crate::map::select_map_key(
+            m,
+            &red_core::value::MapKey::Int(n),
+        )),
         other => Err(EvalError::TypeError {
             expected: "block!, paren!, or string! for integer path index",
             found: crate::natives::type_name(other),
@@ -872,6 +884,17 @@ fn write_path_slot(
                         Ok(())
                     }
                 }
+                Value::Map(m) => {
+                    // M43: set map entry. Word keys use `MapKey::Sym`; a
+                    // string-valued key path (`m/"k": v`) routes through the
+                    // `step_path` Paren arm and lands here as a Word only if
+                    // the path part is literally a word — string keys are
+                    // handled by the integer/value path via `from_value` in
+                    // the caller. For the word case, `Sym` is correct.
+                    let key = red_core::value::MapKey::Sym(sym.clone());
+                    m.borrow().set(key, rhs);
+                    Ok(())
+                }
                 other => Err(EvalError::Native {
                     message: format!(
                         "cannot set field {} on {}",
@@ -917,6 +940,12 @@ fn write_path_slot(
                 message: "string char poke must target a word head (immutable Rc<str>)".into(),
                 span: path_span,
             }),
+            Value::Map(m) => {
+                // M43: `m/2: value` → set MapKey::Int(2).
+                let key = red_core::value::MapKey::Int(*n);
+                m.borrow().set(key, rhs);
+                Ok(())
+            }
             other => Err(EvalError::TypeError {
                 expected: "block! or paren! for integer set-path index",
                 found: crate::natives::type_name(other),
@@ -934,11 +963,22 @@ fn write_path_slot(
             )?;
             write_path_slot(&v, part, rhs, env, path_span)
         }
-        other => Err(EvalError::TypeError {
-            expected: "word!, integer!, or paren! in set-path",
-            found: crate::natives::type_name(other),
-            span: other.span_or_default(),
-        }),
+        other => {
+            // M43: map! set-path with a non-word/non-integer key part
+            // (string, char, logic, none). Any hashable value is a valid
+            // map key.
+            if let Value::Map(m) = current {
+                if let Some(key) = red_core::value::MapKey::from_value(other) {
+                    m.borrow().set(key, rhs);
+                    return Ok(());
+                }
+            }
+            Err(EvalError::TypeError {
+                expected: "word!, integer!, or paren! in set-path",
+                found: crate::natives::type_name(other),
+                span: other.span_or_default(),
+            })
+        }
     }
 }
 

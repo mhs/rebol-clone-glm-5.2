@@ -169,6 +169,10 @@ fn any_block_q(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Val
 }
 
 fn empty_q(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    // M43: map! emptiness.
+    if let Value::Map(m) = &args[0] {
+        return Ok(Value::Logic(m.borrow().is_empty()));
+    }
     let (series, _, _) = extract_series(&args[0])?;
     // Empty when the cursor is at or past the tail.
     Ok(Value::Logic(series.index >= storage_len(&series)))
@@ -274,6 +278,10 @@ fn index_q(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, 
 fn length_q(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     if let Value::String8 { bytes, .. } = &args[0] {
         return Ok(Value::integer(bytes.len() as i64));
+    }
+    // M43: map! entry count.
+    if let Value::Map(m) = &args[0] {
+        return Ok(Value::integer(m.borrow().len() as i64));
     }
     let (series, _, _) = extract_series(&args[0])?;
     let len = storage_len(&series);
@@ -410,7 +418,31 @@ pub(crate) fn word_sym(v: &Value) -> Option<&Symbol> {
 
 /// `select series value` — find `value` from the cursor; return the value
 /// *after* the match, or `none` if not found / match is last.
+///
+/// M43: on a `map!`, `select map key` returns the value stored at `key` (or
+/// `none` if absent). The key is converted via `MapKey::from_value`; a
+/// `Word` key maps to `MapKey::Sym` (with a string fall-back, matching path
+/// resolution).
 fn select(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if let Value::Map(m) = &args[0] {
+        let key =
+            red_core::value::MapKey::from_value(&args[1]).ok_or_else(|| EvalError::Native {
+                message: format!("select: key type {} is not hashable", type_name(&args[1])),
+                span: args[1].span_or_default(),
+            })?;
+        // Word-key fall-back: try Sym, then Str.
+        if let red_core::value::MapKey::Sym(sym) = &key {
+            let b = m.borrow();
+            if let Some(v) = b.get(&key) {
+                return Ok(v);
+            }
+            let s: std::rc::Rc<str> = std::rc::Rc::from(sym.as_str());
+            return Ok(b
+                .get(&red_core::value::MapKey::Str(s))
+                .unwrap_or(Value::None));
+        }
+        return Ok(m.borrow().get(&key).unwrap_or(Value::None));
+    }
     let (series, _, _) = extract_series(&args[0])?;
     let needle = &args[1];
     let data = series.data.borrow();
@@ -434,6 +466,31 @@ fn select(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, E
 /// same, but routes through a dedicated case-sensitive comparator so future
 /// default-case-insensitive behavior can change without touching `find`).
 fn find(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    // M43: map! lookup. Returns the key (as a `Value`) if present, else `none`.
+    if let Value::Map(m) = &args[0] {
+        let key =
+            red_core::value::MapKey::from_value(&args[1]).ok_or_else(|| EvalError::Native {
+                message: format!("find: key type {} is not hashable", type_name(&args[1])),
+                span: args[1].span_or_default(),
+            })?;
+        let b = m.borrow();
+        // Word-key fall-back: Sym then Str.
+        if let red_core::value::MapKey::Sym(sym) = &key {
+            if b.get(&key).is_some() {
+                return Ok(key.to_value());
+            }
+            let s: std::rc::Rc<str> = std::rc::Rc::from(sym.as_str());
+            let str_key = red_core::value::MapKey::Str(s);
+            if b.get(&str_key).is_some() {
+                return Ok(str_key.to_value());
+            }
+            return Ok(Value::None);
+        }
+        if b.get(&key).is_some() {
+            return Ok(key.to_value());
+        }
+        return Ok(Value::None);
+    }
     // M41: binary! series. Returns the 1-based index of the first match, or
     // `none`. Needle may be a binary!, integer (single byte), or string.
     if let Value::String8 { bytes, .. } = &args[0] {
@@ -695,8 +752,14 @@ fn remove(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, E
     Ok(mk_series(series, span, is_paren))
 }
 
-/// `clear series` — truncate from the cursor to the tail.
+/// `clear series|map` — truncate the series from cursor to tail, or remove
+/// all entries from a map. Returns the emptied value.
 fn clear(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    // M43: map! clear.
+    if let Value::Map(m) = &args[0] {
+        m.borrow().clear();
+        return Ok(args[0].clone());
+    }
     let (series, span, is_paren) = extract_series(&args[0])?;
     {
         let mut data = series.data.borrow_mut();
@@ -725,6 +788,10 @@ fn take(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eva
 /// including) the position marked by a positioned series alias of the same
 /// storage (Red's `/part` with a series argument).
 fn copy(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    // M43: map! shallow copy (new MapDef with cloned entries).
+    if let Value::Map(m) = &args[0] {
+        return Ok(Value::map(m.borrow().clone()));
+    }
     // M41: binary! copy. `/part n` copies the first `n` bytes.
     if let Value::String8 { bytes, span } = &args[0] {
         let out: Vec<u8> = if refs.has(&Symbol::new("part")) {

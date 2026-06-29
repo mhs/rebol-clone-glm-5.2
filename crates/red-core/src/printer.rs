@@ -1,7 +1,7 @@
 //! `mold`: value → Red source text. Inverse of the parser; round-trip
 //! property is `mold(parse(s)) == normalize(s)`.
 
-use crate::value::{ObjectDef, Value};
+use crate::value::{MapDef, MapKey, ObjectDef, Value};
 
 /// Append the Red source form of `value` to `out`.
 pub fn mold(value: &Value, out: &mut String) {
@@ -133,6 +133,7 @@ pub fn mold(value: &Value, out: &mut String) {
         Value::File { path, .. } => mold_file(path, out),
         Value::Url { url, .. } => out.push_str(url),
         Value::Object(obj) => mold_object(&obj.borrow(), out),
+        Value::Map(m) => mold_map(&m.borrow(), out),
     }
 }
 
@@ -201,6 +202,7 @@ pub fn form(value: &Value, out: &mut String) {
             let o = obj.borrow();
             form_object_body(&o, out);
         }
+        Value::Map(m) => form_map(&m.borrow(), out),
     }
 }
 
@@ -261,6 +263,60 @@ fn form_object_body(obj: &ObjectDef, out: &mut String) {
         out.push_str(sym.as_str());
         out.push_str(": ");
         form(&val, out);
+    }
+}
+
+/// Mold a map as `make map! [k1 v1 k2 v2 ...]`. Word keys emit as set-words
+/// (`a: 1`) — the natural Red form that reparses via `make map!`. Other key
+/// types (int/string/char/bool/none) emit the key value followed by its value.
+/// Single-line for empty/single-entry maps; multi-entry maps stay
+/// space-separated on one line (matches Red's compact mold).
+fn mold_map(m: &MapDef, out: &mut String) {
+    out.push_str("make map! [");
+    let entries = m.entries.borrow();
+    let mut first = true;
+    for (k, v) in entries.iter() {
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+        mold_map_key(k, out, true);
+        out.push(' ');
+        mold(v, out);
+    }
+    out.push(']');
+}
+
+/// `form` of a map: same `make map! [...]` body as `mold` (Red treats `form`
+/// of a map like its mold).
+fn form_map(m: &MapDef, out: &mut String) {
+    out.push_str("make map! [");
+    let entries = m.entries.borrow();
+    let mut first = true;
+    for (k, v) in entries.iter() {
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+        mold_map_key(k, out, false);
+        out.push(' ');
+        form(v, out);
+    }
+    out.push(']');
+}
+
+/// Emit a single map key. When `set_word_form` is true, `Sym` keys render as
+/// set-words (`a:`) so the surrounding `make map! [...]` block reparses;
+/// otherwise (`form`), they render as bare words.
+fn mold_map_key(k: &MapKey, out: &mut String, set_word_form: bool) {
+    match k {
+        MapKey::Sym(sym) => {
+            out.push_str(sym.as_str());
+            if set_word_form {
+                out.push(':');
+            }
+        }
+        _ => mold(&k.to_value(), out),
     }
 }
 

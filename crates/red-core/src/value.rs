@@ -7,6 +7,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use indexmap::IndexMap;
+
 use crate::context::Context;
 use crate::env::NativeFn;
 use crate::vm_ir::CompiledBlock;
@@ -281,6 +283,10 @@ pub enum Value {
     /// Synthetic — produced by `make object!`/`object`/`context`; carries no
     /// source span of its own.
     Object(Rc<RefCell<ObjectDef>>),
+    /// A map (M43): an insertion-ordered heterogeneous key→value table. Keys
+    /// are the hashable subset of `Value` (`MapKey`); values are arbitrary.
+    /// Synthetic — produced by `make map!`/`to-map`; carries no source span.
+    Map(Rc<RefCell<MapDef>>),
 }
 
 /// Payload of a `Value::Error`. M42 extends the prior message-only stub to
@@ -397,6 +403,127 @@ impl ObjectDef {
     }
 }
 
+/// Hashable key for a `MapDef`. The subset of `Value` that is hashable and
+/// non-container: word-family (as `Sym`), integers, strings, chars, logic,
+/// and `none`. Container values (blocks, parens, objects, maps, funcs,
+/// paths, errors, files, urls, refinements) are not hashable.
+///
+/// `PartialEq`/`Eq`/`Hash` are derived; every variant is hashable. `Sym`
+/// compares by `Symbol` (interned `Rc<str>`), so two equal symbols hash
+/// equal even if interned separately.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum MapKey {
+    Sym(Symbol),
+    Int(i64),
+    Str(Rc<str>),
+    Char(char),
+    Bool(bool),
+    None,
+}
+
+impl MapKey {
+    /// Convert a `Value` to a `MapKey`. Returns `None` for unhashable types
+    /// (blocks, objects, funcs, paths, files, urls, refinements, errors,
+    /// other maps).
+    pub fn from_value(v: &Value) -> Option<Self> {
+        Some(match v {
+            Value::None => MapKey::None,
+            Value::Logic(b) => MapKey::Bool(*b),
+            Value::Integer { n, .. } => MapKey::Int(*n),
+            Value::Char { c, .. } => MapKey::Char(*c),
+            Value::String { s, .. } => MapKey::Str(s.clone()),
+            Value::Word { sym, .. }
+            | Value::SetWord { sym, .. }
+            | Value::GetWord { sym, .. }
+            | Value::LitWord { sym, .. } => MapKey::Sym(sym.clone()),
+            // Unhashable: container values, paths, funcs, errors, objects,
+            // maps, files, urls, refinements. (Refinements are word-shaped
+            // but path-dispatched; excluding them keeps map keys
+            // unambiguous.)
+            _ => return None,
+        })
+    }
+
+    /// Reconstruct the `Value` form of this key. Sym keys return a bare
+    /// `Word` (unbound) — the natural source form for a map key.
+    pub fn to_value(&self) -> Value {
+        match self {
+            MapKey::None => Value::None,
+            MapKey::Bool(b) => Value::Logic(*b),
+            MapKey::Int(n) => Value::integer(*n),
+            MapKey::Char(c) => Value::char(*c),
+            MapKey::Str(s) => Value::string(s.clone()),
+            MapKey::Sym(sym) => Value::Word {
+                sym: sym.clone(),
+                binding: Binding::Unbound,
+                span: Span::default(),
+            },
+        }
+    }
+}
+
+/// A map! (M43): an insertion-ordered heterogeneous key→value table backed
+/// by `indexmap::IndexMap<MapKey, Value>`. Keys are the hashable subset of
+/// `Value` (see `MapKey`); values are arbitrary `Value`s. Insertion order
+/// is preserved (matching Red's `map!` semantics and mirroring `Context`'s
+/// ordered-word behavior) so `keys-of`/`values-of`/iteration are stable.
+///
+/// Mutation is interior (`RefCell`), so a `Map` value is shared by aliases
+/// the same way `Object`/`Series` are: `m: make map! [a 1] n: m m/b: 2 n/b`
+/// reads `2` from both. The `IndexMap` is wrapped in `RefCell` because the
+/// enum stores `Rc<RefCell<MapDef>>` (shared ownership + mutation).
+#[derive(Clone, Debug, Default)]
+pub struct MapDef {
+    pub entries: RefCell<IndexMap<MapKey, Value>>,
+}
+
+impl MapDef {
+    pub fn new() -> Self {
+        Self {
+            entries: RefCell::new(IndexMap::new()),
+        }
+    }
+
+    pub fn get(&self, key: &MapKey) -> Option<Value> {
+        self.entries.borrow().get(key).cloned()
+    }
+
+    /// Insert `val` at `key`, replacing any existing entry. Returns the
+    /// previous value (if any). Preserves insertion order on first insert;
+    /// updates in place on replace.
+    pub fn set(&self, key: MapKey, val: Value) -> Option<Value> {
+        self.entries.borrow_mut().insert(key, val)
+    }
+
+    /// Remove the entry at `key`. Returns the removed value (if any).
+    /// Subsequent keys keep their relative order.
+    pub fn remove(&self, key: &MapKey) -> Option<Value> {
+        self.entries.borrow_mut().shift_remove(key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.borrow().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.borrow().is_empty()
+    }
+
+    pub fn clear(&self) {
+        self.entries.borrow_mut().clear();
+    }
+
+    /// Keys in insertion order, as `Value`s.
+    pub fn keys(&self) -> Vec<Value> {
+        self.entries.borrow().keys().map(MapKey::to_value).collect()
+    }
+
+    /// Values in insertion order.
+    pub fn values(&self) -> Vec<Value> {
+        self.entries.borrow().values().cloned().collect()
+    }
+}
+
 impl Value {
     /// Span of this value in the original source. Every source-origin variant
     /// (`Integer`/`Float`/`String`/word-family/`Block`/`Paren`/`Path`/
@@ -422,9 +549,12 @@ impl Value {
             | Value::File { span, .. }
             | Value::Url { span, .. }
             | Value::String8 { span, .. } => Some(*span),
-            Value::None | Value::Logic(_) | Value::Func(_) | Value::Error(_) | Value::Object(_) => {
-                None
-            }
+            Value::None
+            | Value::Logic(_)
+            | Value::Func(_)
+            | Value::Error(_)
+            | Value::Object(_)
+            | Value::Map(_) => None,
         }
     }
 
@@ -617,6 +747,11 @@ impl Value {
     /// Constructor shorthand for an object wrapping `obj_def`.
     pub fn object(obj_def: ObjectDef) -> Self {
         Value::Object(Rc::new(RefCell::new(obj_def)))
+    }
+
+    /// Constructor shorthand for a map wrapping `map_def`.
+    pub fn map(map_def: MapDef) -> Self {
+        Value::Map(Rc::new(RefCell::new(map_def)))
     }
 }
 

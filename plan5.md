@@ -346,72 +346,72 @@ updates mold/form/equality/same.
 New `MapDef` struct (don't reuse `ObjectDef` — needs heterogeneous keys).
 Adds `indexmap` dep for insertion-order preservation.
 
-- [ ] Add `indexmap = "2"` to `crates/red-eval/Cargo.toml [dependencies]`
+- [x] Add `indexmap = "2"` to `crates/red-eval/Cargo.toml [dependencies]`
       (red-eval only; red-core stays zero-dep by keeping `MapDef` in red-eval
       — or add `indexmap` to red-core if the `Value` variant must live there;
       **decision: `Value::Map` lives in red-core (the enum is there), so
       `indexmap` joins red-core's deps** — first non-std dep for red-core)
-- [ ] Add `indexmap = "2"` to `crates/red-core/Cargo.toml [dependencies]`
-- [ ] Define `MapDef` in `crates/red-core/src/value.rs`:
-  - [ ] `pub struct MapDef { entries: RefCell<IndexMap<MapKey, Value>> }`
-  - [ ] `MapKey` enum: `Sym(Symbol)`/`Int(i64)`/`Str(Rc<str>)`/`Char(char)`/
+- [x] Add `indexmap = "2"` to `crates/red-core/Cargo.toml [dependencies]`
+- [x] Define `MapDef` in `crates/red-core/src/value.rs`:
+  - [x] `pub struct MapDef { entries: RefCell<IndexMap<MapKey, Value>> }`
+  - [x] `MapKey` enum: `Sym(Symbol)`/`Int(i64)`/`Str(Rc<str>)`/`Char(char)`/
         `Bool(bool)`/`None` — the set of hashable, non-container Red values
-  - [ ] `MapKey::from_value(&Value) -> Option<MapKey>` (returns `None` for
+  - [x] `MapKey::from_value(&Value) -> Option<MapKey>` (returns `None` for
         unhashable types like `Block`/`Object`/`Func`)
-  - [ ] `MapKey::to_value() -> Value`
-  - [ ] `MapDef::new()`, `get(&MapKey)`, `set(MapKey, Value)`,
+  - [x] `MapKey::to_value() -> Value`
+  - [x] `MapDef::new()`, `get(&MapKey)`, `set(MapKey, Value)`,
         `remove(&MapKey)`, `len()`, `keys()`, `values()`
-- [ ] Add `Value::Map(Rc<RefCell<MapDef>>)` variant (struct-tuple, synthetic
+- [x] Add `Value::Map(Rc<RefCell<MapDef>>)` variant (struct-tuple, synthetic
       — no span)
-- [ ] Add `Value::map()` constructor shorthand
-- [ ] Implement `Hash` for the `MapKey` enum (derive; all variants are
+- [x] Add `Value::map()` constructor shorthand
+- [x] Implement `Hash` for the `MapKey` enum (derive; all variants are
       hashable)
-- [ ] Update `printer.rs`:
-  - [ ] `mold` arm: `make map! [key1 val1 key2 val2 ...]` form, one entry
+- [x] Update `printer.rs`:
+  - [x] `mold` arm: `make map! [key1 val1 key2 val2 ...]` form, one entry
         per line for multi-entry maps (matches Red)
-  - [ ] `form` arm: same as mold
-- [ ] Extend `interp_walker.rs` `eval_prefix` self-evaluating arm with
+  - [x] `form` arm: same as mold
+- [x] Extend `interp_walker.rs` `eval_prefix` self-evaluating arm with
       `Value::Map(_)`
-- [ ] Extend `vm/compiler.rs:630` const-pool arm with `Value::Map(_)`
-- [ ] Add `map?` predicate
-- [ ] Add `to-map` converter (from block of key/value pairs, from object →
+- [x] Extend `vm/compiler.rs:630` const-pool arm with `Value::Map(_)`
+- [x] Add `map?` predicate
+- [x] Add `to-map` converter (from block of key/value pairs, from object →
         map of word/value)
-- [ ] Add `make map! <spec>` to the `make` dispatcher:
-  - [ ] From block: `make map! [a: 1 b: 2]` → key=`'a` (word), val=`1`
-  - [ ] From object: extract word/value pairs
-  - [ ] From block of pairs: `make map! [[a 1] [b 2]]`
-- [ ] Implement path resolution for `map!`:
-  - [ ] `map/word` → lookup by `MapKey::Sym` (also try as string if word
+- [x] Add `make map! <spec>` to the `make` dispatcher:
+  - [x] From block: `make map! [a: 1 b: 2]` → key=`'a` (word), val=`1`
+  - [x] From object: extract word/value pairs
+  - [x] From block of pairs: `make map! [[a 1] [b 2]]`
+- [x] Implement path resolution for `map!`:
+  - [x] `map/word` → lookup by `MapKey::Sym` (also try as string if word
         not found)
-  - [ ] `map/integer` → lookup by `MapKey::Int`
-  - [ ] `map/string` → lookup by `MapKey::Str`
-  - [ ] `map/char` → lookup by `MapKey::Char`
-  - [ ] Set-path `map/word: value` → `MapDef::set`
-- [ ] Update `interp_walker.rs` path resolver (`eval_get_path`/
+  - [x] `map/integer` → lookup by `MapKey::Int`
+  - [x] `map/string` → lookup by `MapKey::Str`
+  - [x] `map/char` → lookup by `MapKey::Char`
+  - [x] Set-path `map/word: value` → `MapDef::set`
+- [x] Update `interp_walker.rs` path resolver (`eval_get_path`/
       `set_path_value`) and `vm/vm.rs` `GetPath`/`SetPath` arms
-- [ ] Implement `select` on `map!` (return value or `none`)
-- [ ] Implement `find` on `map!` (return key or `none`)
-- [ ] Implement `put`/`extend`/`copy` on `map!`
-- [ ] Implement `keys-of`/`values-of` on `map!` (already exist for
+- [x] Implement `select` on `map!` (return value or `none`)
+- [x] Implement `find` on `map!` (return key or `none`)
+- [x] Implement `put`/`extend`/`copy` on `map!`
+- [x] Implement `keys-of`/`values-of` on `map!` (already exist for
         objects — extend)
-- [ ] Implement `length?`/`empty?`/`clear` on `map!`
-- [ ] Update `same?`/`not-same?` for `map!` (Rc identity)
-- [ ] Update equality (`compare.rs`): deep equality on entries
-- [ ] Update `type_name` to return `"map!"`
-- [ ] Inline `#[test]`: `make map! [a: 1 b: 2]` molds back identically
-- [ ] Inline `#[test]`: `m: make map! [a: 1] m/a` → `1`
-- [ ] Inline `#[test]`: `m/b: 2 m/b` → `2`
-- [ ] Inline `#[test]`: heterogeneous keys `m: make map! [a 1 2 "two" #"c" 3]`
+- [x] Implement `length?`/`empty?`/`clear` on `map!`
+- [x] Update `same?`/`not-same?` for `map!` (Rc identity)
+- [x] Update equality (`compare.rs`): deep equality on entries
+- [x] Update `type_name` to return `"map!"`
+- [x] Inline `#[test]`: `make map! [a: 1 b: 2]` molds back identically
+- [x] Inline `#[test]`: `m: make map! [a: 1] m/a` → `1`
+- [x] Inline `#[test]`: `m/b: 2 m/b` → `2`
+- [x] Inline `#[test]`: heterogeneous keys `m: make map! [a 1 2 "two" #"c" 3]`
         round-trips
-- [ ] Inline `#[test]`: `map? make map! []` → true; `map? []` → false
-- [ ] Inline `#[test]`: `length? make map! [a 1 b 2]` → `2`
-- [ ] Inline `#[test]`: insertion order preserved: `keys-of m` → `[a 2 #"c"]`
-- [ ] Add golden fixtures: `map_construct`, `map_paths`, `map_hetero_keys`,
+- [x] Inline `#[test]`: `map? make map! []` → true; `map? []` → false
+- [x] Inline `#[test]`: `length? make map! [a 1 b 2]` → `2`
+- [x] Inline `#[test]`: insertion order preserved: `keys-of m` → `[a 2 #"c"]`
+- [x] Add golden fixtures: `map_construct`, `map_paths`, `map_hetero_keys`,
         `map_convert`
-- [ ] Add `programs_errors/map_unhashable_key.red` (e.g. using a block as
+- [x] Add `programs_errors/map_unhashable_key.red` (e.g. using a block as
         a key)
-- [ ] Update `property.rs` to include `Map` round-trip
-- [ ] `cargo test --workspace` green; `--features force-walk` green
+- [x] Update `property.rs` to include `Map` round-trip
+- [x] `cargo test --workspace` green; `--features force-walk` green
 
 ## Milestone 44 — `pair!` and `tuple!`
 
