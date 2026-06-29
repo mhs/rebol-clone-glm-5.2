@@ -212,6 +212,320 @@ pub(crate) fn char_predicate(
     Ok(Value::Logic(matches!(args[0], Value::Char { .. })))
 }
 
+// ---------------------------------------------------------------------------
+// M39 type predicates + type?/types-of
+// ---------------------------------------------------------------------------
+
+/// Helper: arity-1 predicate that returns `Value::Logic(matches!(args[0], ..))`.
+fn pred1(args: &[Value], name: &str, f: impl Fn(&Value) -> bool) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(arity_err(args, name, 1, 0));
+    }
+    Ok(Value::Logic(f(&args[0])))
+}
+
+pub(crate) fn integer_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "integer?", |v| matches!(v, Value::Integer { .. }))
+}
+
+pub(crate) fn float_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "float?", |v| matches!(v, Value::Float { .. }))
+}
+
+/// `number?` — true for `integer!` or `float!`.
+pub(crate) fn number_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "number?", |v| {
+        matches!(v, Value::Integer { .. } | Value::Float { .. })
+    })
+}
+
+pub(crate) fn string_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "string?", |v| matches!(v, Value::String { .. }))
+}
+
+pub(crate) fn logic_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "logic?", |v| matches!(v, Value::Logic(_)))
+}
+
+pub(crate) fn none_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "none?", |v| matches!(v, Value::None))
+}
+
+/// `binary?` — true for `binary!` (`Value::String8`). The variant exists
+/// (M16 stub); M41 wires the lexer/parser/converters to make it reachable
+/// from source. The predicate is real today.
+pub(crate) fn binary_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "binary?", |v| matches!(v, Value::String8(_)))
+}
+
+/// `error?` — true for `error!` (`Value::Error`). The variant exists (M16
+/// basic `try`/`catch`/`throw`); M42 extends the field set, not the variant.
+pub(crate) fn error_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "error?", |v| matches!(v, Value::Error(_)))
+}
+
+pub(crate) fn word_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "word?", |v| matches!(v, Value::Word { .. }))
+}
+
+pub(crate) fn set_word_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "set-word?", |v| matches!(v, Value::SetWord { .. }))
+}
+
+pub(crate) fn get_word_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "get-word?", |v| matches!(v, Value::GetWord { .. }))
+}
+
+pub(crate) fn lit_word_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "lit-word?", |v| matches!(v, Value::LitWord { .. }))
+}
+
+pub(crate) fn refinement_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "refinement?", |v| {
+        matches!(v, Value::Refinement { .. })
+    })
+}
+
+/// `any-word?` — true for any word-family value (`word!`/`set-word!`/
+/// `get-word!`/`lit-word!`/`refinement!`).
+pub(crate) fn any_word_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "any-word?", |v| {
+        matches!(
+            v,
+            Value::Word { .. }
+                | Value::SetWord { .. }
+                | Value::GetWord { .. }
+                | Value::LitWord { .. }
+                | Value::Refinement { .. }
+        )
+    })
+}
+
+/// `any-path?` — true for any path-family value (`path!`/`get-path!`/
+/// `lit-path!`/`set-path!`).
+pub(crate) fn any_path_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "any-path?", |v| {
+        matches!(
+            v,
+            Value::Path { .. }
+                | Value::GetPath { .. }
+                | Value::LitPath { .. }
+                | Value::SetPath { .. }
+        )
+    })
+}
+
+/// `any-object?` — true for `object!`. Umbrella category (only one member
+/// today; future types like `module!` would join).
+pub(crate) fn any_object_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "any-object?", |v| matches!(v, Value::Object(_)))
+}
+
+/// `type? value` — returns the type word for `value` (e.g. `integer!`,
+/// `string!`, `char!`). Mirrors Red's `type?` native (distinct from the `?`
+/// predicate family, which returns `logic!`).
+pub(crate) fn type_q(args: &[Value], _r: &RefineArgs, _e: &mut Env) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(arity_err(args, "type?", 1, 0));
+    }
+    Ok(Value::word(type_name(&args[0])))
+}
+
+/// `types-of value` — returns a block of all type words the value matches,
+/// including umbrella categories (`number!`/`any-word!`/`any-path!`/
+/// `any-block!`/`any-object!`/`series!`). E.g. `types-of 5` →
+/// `[integer! number!]`; `types-of 'foo` → `[word! any-word!]`.
+pub(crate) fn types_of(args: &[Value], _r: &RefineArgs, _e: &mut Env) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(arity_err(args, "types-of", 1, 0));
+    }
+    let v = &args[0];
+    let mut out: Vec<Value> = Vec::new();
+    let primary = type_name(v);
+    out.push(Value::word(primary));
+
+    // Umbrella categories.
+    let is_number = matches!(v, Value::Integer { .. } | Value::Float { .. });
+    let is_any_word = matches!(
+        v,
+        Value::Word { .. }
+            | Value::SetWord { .. }
+            | Value::GetWord { .. }
+            | Value::LitWord { .. }
+            | Value::Refinement { .. }
+    );
+    let is_any_path = matches!(
+        v,
+        Value::Path { .. } | Value::GetPath { .. } | Value::LitPath { .. } | Value::SetPath { .. }
+    );
+    let is_any_block = matches!(
+        v,
+        Value::Block { .. }
+            | Value::Paren { .. }
+            | Value::Path { .. }
+            | Value::GetPath { .. }
+            | Value::LitPath { .. }
+            | Value::SetPath { .. }
+    );
+    let is_any_object = matches!(v, Value::Object(_));
+    // `series!` covers blocks, parens, paths, strings, binary, files, urls.
+    let is_series = matches!(
+        v,
+        Value::Block { .. }
+            | Value::Paren { .. }
+            | Value::Path { .. }
+            | Value::GetPath { .. }
+            | Value::LitPath { .. }
+            | Value::SetPath { .. }
+            | Value::String { .. }
+            | Value::String8(_)
+            | Value::File { .. }
+            | Value::Url { .. }
+    );
+    let is_any_string = matches!(v, Value::String { .. } | Value::String8(_));
+
+    if is_number {
+        out.push(Value::word("number!"));
+    }
+    if is_any_word {
+        out.push(Value::word("any-word!"));
+    }
+    if is_any_path {
+        out.push(Value::word("any-path!"));
+    }
+    if is_any_block {
+        out.push(Value::word("any-block!"));
+    }
+    if is_any_string {
+        out.push(Value::word("any-string!"));
+    }
+    if is_any_object {
+        out.push(Value::word("any-object!"));
+    }
+    if is_series {
+        out.push(Value::word("series!"));
+    }
+
+    Ok(Value::block(Series::new(out)))
+}
+
+// ---------------------------------------------------------------------------
+// Registration for the M39 type-predicate natives.
+// ---------------------------------------------------------------------------
+
+type NF = fn(&[Value], &RefineArgs, &mut Env) -> Result<Value, EvalError>;
+
+pub(crate) fn register_word_predicate_natives(env: &mut Env) {
+    use red_core::value::FuncDef;
+    use std::rc::Rc as StdRc;
+
+    let reg = |env: &mut Env, name: &str, f: NF| {
+        let params: Vec<Symbol> = vec![Symbol::new("__arg0")];
+        env.natives.insert(
+            Symbol::new(name),
+            StdRc::new(FuncDef {
+                params,
+                native: Some(f),
+                variadic: false,
+                infix: false,
+                ..Default::default()
+            }),
+        );
+    };
+
+    // Scalar type predicates.
+    reg(env, "integer?", integer_predicate);
+    reg(env, "float?", float_predicate);
+    reg(env, "number?", number_predicate);
+    reg(env, "string?", string_predicate);
+    reg(env, "logic?", logic_predicate);
+    reg(env, "none?", none_predicate);
+    reg(env, "binary?", binary_predicate);
+    reg(env, "error?", error_predicate);
+
+    // Word-family predicates.
+    reg(env, "word?", word_predicate);
+    reg(env, "set-word?", set_word_predicate);
+    reg(env, "get-word?", get_word_predicate);
+    reg(env, "lit-word?", lit_word_predicate);
+    reg(env, "refinement?", refinement_predicate);
+    reg(env, "any-word?", any_word_predicate);
+
+    // Path-family predicates.
+    reg(env, "any-path?", any_path_predicate);
+
+    // Object predicates.
+    reg(env, "any-object?", any_object_predicate);
+
+    // Introspection.
+    reg(env, "type?", type_q);
+    reg(env, "types-of", types_of);
+}
+
 /// `use [words] block` — evaluates `block` with the listed words bound as
 /// locals in a fresh child context layered over the user context. Body
 /// SetWords and loop vars inside `block` are also collected as use-locals

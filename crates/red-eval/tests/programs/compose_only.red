@@ -1,0 +1,5 @@
+Red []
+print compose [([1 2 3])]
+print compose/only [([1 2 3])]
+print compose [(reduce [1 2 3])]
+print compose/only [(reduce [1 2 3])]

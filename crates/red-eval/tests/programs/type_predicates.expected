@@ -1,0 +1,18 @@
+true
+false
+true
+true
+true
+true
+true
+true
+true
+true
+true
+integer!
+string!
+char!
+[integer! number!]
+[float! number!]
+[word! any-word!]
+[block! any-block! series!]

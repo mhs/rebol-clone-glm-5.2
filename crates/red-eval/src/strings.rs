@@ -25,7 +25,7 @@ use red_core::value::{FuncDef, Series, Symbol, Value};
 use red_core::{Env, EvalError, RefineArgs};
 use std::rc::Rc;
 
-use crate::interp::eval_expression;
+use crate::interp::{dispatch_block, eval_expression};
 use crate::natives::{expect_block, type_name};
 
 // ---------------------------------------------------------------------------
@@ -104,6 +104,82 @@ fn reform(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
     drop(data);
     let result_block = Value::block(Series::new(results));
     Ok(mk_string(form_to_string(&result_block)))
+}
+
+// ---------------------------------------------------------------------------
+// compose (M39)
+// ---------------------------------------------------------------------------
+
+/// `compose block` — walk a block, evaluating only `(...)` paren expressions
+/// and leaving every other value verbatim, returning a new block. Matches
+/// Red's `compose` semantics:
+///   - `compose [a (1 + 2) b]` → `[a 3 b]`
+///   - An empty `()` evaluates to `none` (matching Red).
+///   - By default, when a paren evaluates to a `block!`, its elements are
+///     *spliced* into the output. `/only` suppresses splicing — the block
+///     is pushed as a single value.
+///   - `/deep` recurses into nested `block!` values, composing them in
+///     place (parens inside nested blocks are also evaluated).
+///
+/// Reuses `dispatch_block` (the VM-aware shim) for each paren so `compose`
+/// honors `env.mode` (VM by default, walker under `--walk`).
+fn compose(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    let body = expect_block(args, 0, "compose")?;
+    let series = match &body {
+        Value::Block { series, .. } | Value::Paren { series, .. } => series.clone(),
+        _ => unreachable!("expect_block guarantees Block"),
+    };
+    let deep = refs.has(&Symbol::new("deep"));
+    let only = refs.has(&Symbol::new("only"));
+    let mut out: Vec<Value> = Vec::new();
+    compose_into(&series, env, deep, only, &mut out)?;
+    Ok(Value::block(Series::new(out)))
+}
+
+/// Recursive core of `compose`. Walks `series` from its cursor, appending
+/// composed values to `out`.
+fn compose_into(
+    series: &Series,
+    env: &mut Env,
+    deep: bool,
+    only: bool,
+    out: &mut Vec<Value>,
+) -> Result<(), EvalError> {
+    let data = series.data.borrow();
+    let mut i = series.index;
+    while i < data.len() {
+        let v = &data[i];
+        match v {
+            // Paren: evaluate, splice (unless `/only`).
+            Value::Paren { series: ps, .. } => {
+                let result = dispatch_block(&Value::paren(ps.clone()), env)?;
+                match (only, &result) {
+                    (_, Value::None) => {
+                        // An empty paren yields `none`; always push as-is
+                        // (splicing `none` would contribute nothing, which
+                        // contradicts Red's `compose [() ()] → [none none]`).
+                        out.push(Value::None);
+                    }
+                    (false, Value::Block { series: bs, .. }) => {
+                        // Splice the block's elements into the output.
+                        let bd = bs.data.borrow();
+                        out.extend(bd.iter().skip(bs.index).cloned());
+                    }
+                    _ => out.push(result),
+                }
+            }
+            // Block: recurse under `/deep`, else push verbatim.
+            Value::Block { series: bs, .. } if deep => {
+                let mut nested: Vec<Value> = Vec::new();
+                compose_into(bs, env, deep, only, &mut nested)?;
+                out.push(Value::block(Series::new(nested)));
+            }
+            // Any other value: verbatim copy.
+            other => out.push(other.clone()),
+        }
+        i += 1;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +476,13 @@ pub fn register_string_natives(env: &mut Env) {
     reg_refined(env, "replace", replace as NF, 3, &[("all", 0)]);
     reg_refined(env, "uppercase", uppercase as NF, 1, &[("part", 1)]);
     reg_refined(env, "lowercase", lowercase as NF, 1, &[("part", 1)]);
+    reg_refined(
+        env,
+        "compose",
+        compose as NF,
+        1,
+        &[("deep", 0), ("only", 0)],
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -610,5 +693,42 @@ mod tests {
     #[test]
     fn copy_part_string_limits_length() {
         assert_eq!(mold_val(&val("copy/part \"abc\" 2")), "\"ab\"");
+    }
+
+    // --- compose (M39) ---
+
+    #[test]
+    fn compose_evaluates_parens() {
+        assert_eq!(mold_val(&val("compose [a (1 + 2) b]")), "[a 3 b]");
+    }
+
+    #[test]
+    fn compose_empty_paren_yields_none() {
+        // Red: empty parens evaluate to `none`.
+        assert_eq!(mold_val(&val("compose [() (1) ()]")), "[none 1 none]");
+    }
+
+    #[test]
+    fn compose_deep_recurses_into_nested_blocks() {
+        assert_eq!(mold_val(&val("compose/deep [a [(1 + 2)] b]")), "[a [3] b]");
+        // A nested block with no parens is left structurally intact.
+        assert_eq!(mold_val(&val("compose/deep [a [b c] b]")), "[a [b c] b]");
+    }
+
+    #[test]
+    fn compose_only_keeps_block_whole() {
+        // Default splices: `([1 2 3])` → `1 2 3`.
+        assert_eq!(mold_val(&val("compose [([1 2 3])]")), "[1 2 3]");
+        // `/only` keeps the block as a single value.
+        assert_eq!(mold_val(&val("compose/only [([1 2 3])]")), "[[1 2 3]]");
+    }
+
+    #[test]
+    fn compose_leaves_literals_verbatim() {
+        // Words, strings, integers are left untouched.
+        assert_eq!(
+            mold_val(&val("compose [foo \"bar\" 42 (1 + 1)]")),
+            "[foo \"bar\" 42 2]"
+        );
     }
 }

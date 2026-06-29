@@ -807,4 +807,122 @@ mod tests {
         assert_eq!(code, 3);
         assert_eq!(mold_to_string(&val), "none");
     }
+
+    // --- M39 type predicates + type?/types-of ---
+
+    #[test]
+    fn integer_predicate_matches() {
+        assert_eq!(mold_to_string(&val("integer? 5")), "true");
+        assert_eq!(mold_to_string(&val("integer? 5.0")), "false");
+    }
+
+    #[test]
+    fn float_predicate_matches() {
+        assert_eq!(mold_to_string(&val("float? 5.0")), "true");
+        assert_eq!(mold_to_string(&val("float? 5")), "false");
+    }
+
+    #[test]
+    fn number_predicate_matches_int_and_float() {
+        assert_eq!(mold_to_string(&val("number? 5")), "true");
+        assert_eq!(mold_to_string(&val("number? 5.0")), "true");
+        assert_eq!(mold_to_string(&val("number? \"a\"")), "false");
+    }
+
+    #[test]
+    fn string_predicate_matches() {
+        assert_eq!(mold_to_string(&val("string? \"hi\"")), "true");
+        assert_eq!(mold_to_string(&val("string? 5")), "false");
+    }
+
+    #[test]
+    fn logic_predicate_matches() {
+        assert_eq!(mold_to_string(&val("logic? true")), "true");
+        assert_eq!(mold_to_string(&val("logic? false")), "true");
+        assert_eq!(mold_to_string(&val("logic? 5")), "false");
+    }
+
+    #[test]
+    fn none_predicate_matches() {
+        assert_eq!(mold_to_string(&val("none? none")), "true");
+        assert_eq!(mold_to_string(&val("none? 0")), "false");
+    }
+
+    #[test]
+    fn error_predicate_matches() {
+        assert_eq!(mold_to_string(&val("error? try [1 + \"a\"]")), "true");
+        assert_eq!(mold_to_string(&val("error? 5")), "false");
+    }
+
+    #[test]
+    fn word_predicates() {
+        // `'foo` is a `lit-word!`; its evaluation yields the word `foo`.
+        // To get a bare `word!` value, extract `first` of a block of words.
+        assert_eq!(mold_to_string(&val("word? first [foo]")), "true");
+        assert_eq!(mold_to_string(&val("set-word? first [foo:]")), "true");
+        assert_eq!(mold_to_string(&val("get-word? first [:foo]")), "true");
+        assert_eq!(mold_to_string(&val("lit-word? 'foo")), "true");
+        assert_eq!(mold_to_string(&val("refinement? first [/foo]")), "true");
+    }
+
+    #[test]
+    fn any_word_predicate_matches_all_word_kinds() {
+        assert_eq!(mold_to_string(&val("any-word? first [foo]")), "true");
+        assert_eq!(mold_to_string(&val("any-word? first [foo:]")), "true");
+        assert_eq!(mold_to_string(&val("any-word? first [:foo]")), "true");
+        assert_eq!(mold_to_string(&val("any-word? 'foo")), "true");
+        assert_eq!(mold_to_string(&val("any-word? 5")), "false");
+    }
+
+    #[test]
+    fn any_path_predicate_matches_path_kinds() {
+        // `foo/bar` with unbound `foo` resolves via path machinery; the path
+        // value itself is what the predicate inspects.
+        assert_eq!(mold_to_string(&val("any-path? 'foo/bar")), "true");
+        assert_eq!(mold_to_string(&val("any-path? 5")), "false");
+    }
+
+    #[test]
+    fn any_object_predicate_matches() {
+        assert_eq!(mold_to_string(&val("any-object? make object! []")), "true");
+        assert_eq!(mold_to_string(&val("any-object? 5")), "false");
+    }
+
+    #[test]
+    fn type_q_returns_type_word() {
+        assert_eq!(mold_to_string(&val("type? 5")), "integer!");
+        assert_eq!(mold_to_string(&val("type? 5.0")), "float!");
+        assert_eq!(mold_to_string(&val("type? \"hi\"")), "string!");
+        assert_eq!(mold_to_string(&val(r#"type? #"a""#)), "char!");
+        assert_eq!(mold_to_string(&val("type? true")), "logic!");
+        assert_eq!(mold_to_string(&val("type? none")), "none!");
+        assert_eq!(mold_to_string(&val("type? first [foo]")), "word!");
+        assert_eq!(mold_to_string(&val("type? 'foo")), "lit-word!");
+        assert_eq!(mold_to_string(&val("type? [1 2]")), "block!");
+    }
+
+    #[test]
+    fn types_of_returns_specific_and_umbrella() {
+        // Integer matches `integer!` + `number!`.
+        assert_eq!(mold_to_string(&val("types-of 5")), "[integer! number!]");
+        // Float matches `float!` + `number!`.
+        assert_eq!(mold_to_string(&val("types-of 5.0")), "[float! number!]");
+        // String matches `string!` + `any-string!` + `series!`.
+        assert_eq!(
+            mold_to_string(&val("types-of \"hi\"")),
+            "[string! any-string! series!]"
+        );
+        // Word matches `word!` + `any-word!`.
+        assert_eq!(
+            mold_to_string(&val("types-of first [foo]")),
+            "[word! any-word!]"
+        );
+        // Block matches `block!` + `any-block!` + `series!`.
+        assert_eq!(
+            mold_to_string(&val("types-of [1 2]")),
+            "[block! any-block! series!]"
+        );
+        // None matches only `none!` (no umbrella).
+        assert_eq!(mold_to_string(&val("types-of none")), "[none!]");
+    }
 }

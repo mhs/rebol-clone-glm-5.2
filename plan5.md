@@ -138,36 +138,36 @@ Quick wins. `compose` parallels `rejoin` (`strings.rs:74`) and reuses the
 `dispatch_block_reduce` infrastructure. The missing predicates are trivial —
 each is a one-line match arm in `natives/words.rs`.
 
-- [ ] Implement `compose` native in `crates/red-eval/src/strings.rs`:
-  - [ ] Walks a block, evaluates only `(...)` paren expressions, leaves
+- [x] Implement `compose` native in `crates/red-eval/src/strings.rs`:
+  - [x] Walks a block, evaluates only `(...)` paren expressions, leaves
         literals verbatim, returns a new block
-  - [ ] `compose/deep` refinement recurses into nested blocks
-  - [ ] `compose/only` refinement wraps non-paren results as a single value
+  - [x] `compose/deep` refinement recurses into nested blocks
+  - [x] `compose/only` refinement wraps non-paren results as a single value
         (not spread)
-  - [ ] Register in `strings.rs` registration block (~line 386)
-- [ ] Add type predicates to `natives/words.rs` (alongside `function?`/
+  - [x] Register in `strings.rs` registration block (~line 386)
+- [x] Add type predicates to `natives/words.rs` (alongside `function?`/
       `value?`):
-  - [ ] `integer?`, `float?`, `number?` (int or float), `string?`, `logic?`,
+  - [x] `integer?`, `float?`, `number?` (int or float), `string?`, `logic?`,
         `none?`, `char?` (lands in M38 but register here if not already),
         `binary?` (lands in M41 — register here as a forward-declared
         always-false stub until M41)
-  - [ ] `word?`, `set-word?`, `get-word?`, `lit-word?`, `refinement?`,
+  - [x] `word?`, `set-word?`, `get-word?`, `lit-word?`, `refinement?`,
         `path?` (already exists — confirm), `any-word?`, `any-path?`
-  - [ ] `error?` (forward-stub until M42 — checks the `Value::Error`
+  - [x] `error?` (forward-stub until M42 — checks the `Value::Error`
         variant), `object?` (already exists — confirm), `any-object?`
-  - [ ] `type?` of value (returns type word — Red's `type?` native, distinct
+  - [x] `type?` of value (returns type word — Red's `type?` native, distinct
         from the `?` predicates)
-- [ ] Implement `types-of` returning a block of type words a value matches
+- [x] Implement `types-of` returning a block of type words a value matches
       (e.g. `types-of 5` → `[integer! number!]`)
-- [ ] Inline `#[test]`: `compose [a (1 + 2) b]` → `[a 3 b]`
-- [ ] Inline `#[test]`: `compose/deep [a [(1 + 2)] b]` → `[a [3] b]`
-- [ ] Inline `#[test]`: `compose [() (1) ()]` → `[none 1 none]`
-- [ ] Inline `#[test]`: `integer? 5` → true; `integer? 5.0` → false
-- [ ] Inline `#[test]`: `number? 5`, `number? 5.0` → both true
-- [ ] Inline `#[test]`: `type? #"a"` → `char!`
-- [ ] Inline `#[test]`: `any-word? 'foo` → true; `any-word? 5` → false
-- [ ] Add golden fixtures: `compose_basic`, `compose_deep`, `type_predicates`
-- [ ] `cargo test --workspace` green; `--features force-walk` green
+- [x] Inline `#[test]`: `compose [a (1 + 2) b]` → `[a 3 b]`
+- [x] Inline `#[test]`: `compose/deep [a [(1 + 2)] b]` → `[a [3] b]`
+- [x] Inline `#[test]`: `compose [() (1) ()]` → `[none 1 none]`
+- [x] Inline `#[test]`: `integer? 5` → true; `integer? 5.0` → false
+- [x] Inline `#[test]`: `number? 5`, `number? 5.0` → both true
+- [x] Inline `#[test]`: `type? #"a"` → `char!`
+- [x] Inline `#[test]`: `any-word? 'foo` → true; `any-word? 5` → false
+- [x] Add golden fixtures: `compose_basic`, `compose_deep`, `type_predicates`
+- [x] `cargo test --workspace` green; `--features force-walk` green
 
 ## Milestone 40 — Trig & transcendental math
 

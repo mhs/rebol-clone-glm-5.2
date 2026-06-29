@@ -26,7 +26,8 @@ use super::eval::{do_native, load_native, reduce};
 use super::func::{does_native, func_native, function_native, function_predicate, return_native};
 use super::io::{prin, print, probe};
 use super::words::{
-    bind_native, char_predicate, get_native, set_native, use_native, value_predicate,
+    bind_native, char_predicate, get_native, register_word_predicate_natives, set_native,
+    use_native, value_predicate,
 };
 
 // ---------------------------------------------------------------------------
@@ -299,6 +300,9 @@ pub fn register_natives(env: &mut Env) {
         Symbol::new("bind"),
         fixed_native(bind_native as NativeFn, 2),
     );
+
+    // M39: type predicates + type?/types-of.
+    register_word_predicate_natives(env);
 
     // Series (M8)
     crate::series::register_series_natives(env);
