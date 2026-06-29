@@ -16,8 +16,9 @@ pub fn mold(value: &Value, out: &mut String) {
         Value::Float { f, .. } => mold_float(*f, out),
         Value::String { s, .. } => mold_string(s, out),
         Value::Char { c, .. } => mold_char(*c, out),
-        Value::String8(bytes) => {
-            // POC: mold as `#{hex}` so it round-trips as a distinct literal.
+        Value::String8 { bytes, .. } => {
+            // M41: mold as `#{HEX}` (uppercase) — matches Red's binary! form
+            // and round-trips through the lexer.
             out.push_str("#{");
             for b in bytes {
                 use std::fmt::Write;
@@ -115,7 +116,7 @@ pub fn form(value: &Value, out: &mut String) {
         Value::Float { f, .. } => mold_float(*f, out),
         Value::String { s, .. } => out.push_str(s),
         Value::Char { c, .. } => out.push(*c),
-        Value::String8(bytes) => {
+        Value::String8 { bytes, .. } => {
             out.push_str("#{");
             for b in bytes {
                 use std::fmt::Write;
@@ -335,7 +336,7 @@ fn mold_file(path: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::value::{Series, Symbol};
+    use crate::value::{Series, Span, Symbol};
     use std::rc::Rc;
 
     fn s(literal: &str) -> Value {
@@ -448,6 +449,50 @@ mod tests {
         assert_eq!(mold_to_string(&Value::char('"')), "#\"^\"\"");
         assert_eq!(mold_to_string(&Value::char('\r')), "#\"^M\"");
         assert_eq!(mold_to_string(&Value::char('\u{1}')), "#\"^A\"");
+    }
+
+    #[test]
+    fn mold_binary_round_trips_via_lexer() {
+        // M41: every molded binary must re-parse to the same bytes.
+        let cases: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![0x00],
+            vec![0xFF],
+            vec![0x48, 0x65, 0x6C, 0x6C, 0x6F], // "Hello"
+            vec![0xDE, 0xAD, 0xBE, 0xEF],
+            vec![0x00, 0x01, 0x02, 0xFE, 0xFF],
+        ];
+        for bytes in cases {
+            let v = Value::String8 {
+                bytes: bytes.clone(),
+                span: Span::new(0, 0),
+            };
+            let molded = mold_to_string(&v);
+            let toks = crate::lexer::lex(&molded).expect("lex molded binary");
+            assert_eq!(toks.len(), 1, "expected 1 token for {molded:?}");
+            match &toks[0].kind {
+                crate::lexer::TokenKind::Binary(parsed) => {
+                    assert_eq!(parsed.as_ref(), bytes.as_slice(), "round-trip mismatch");
+                }
+                other => panic!("expected Binary token for {molded:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn mold_binary_is_uppercase_hex() {
+        // Red molds binaries as `#{HEX}` uppercase — no separators.
+        let v = Value::String8 {
+            bytes: vec![0xDE, 0xAD],
+            span: Span::new(0, 0),
+        };
+        assert_eq!(mold_to_string(&v), "#{DEAD}");
+        // Lowercase input bytes still produce uppercase hex.
+        let v2 = Value::String8 {
+            bytes: vec![0xab, 0xcd],
+            span: Span::new(0, 0),
+        };
+        assert_eq!(mold_to_string(&v2), "#{ABCD}");
     }
 
     #[test]

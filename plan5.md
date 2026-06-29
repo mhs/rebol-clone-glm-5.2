@@ -209,46 +209,59 @@ The `String8(Vec<u8>)` variant exists (`value.rs:270`) but is unreachable.
 This milestone wires it up end-to-end and de-stubs `read/binary`/`write/
 binary`.
 
-- [ ] Add `Value::binary(bytes: Vec<u8>)` constructor shorthand
-- [ ] Add `Value::string8` as alias (keep old name for back-compat with
+- [x] Add `Value::binary(bytes: Vec<u8>)` constructor shorthand
+- [x] Add `Value::string8` as alias (keep old name for back-compat with
       any test code at `value.rs:893`)
-- [ ] Extend lexer to parse `#{hex}` literals into `Value::String8`:
-  - [ ] `scan_binary` after `#`-char dispatch: `#{...}` form
-  - [ ] Accept even/odd hex digit count (odd → high nibble zero-padded)
-  - [ ] Allow whitespace inside `{}` (Red behavior) — skipped
-  - [ ] Error `InvalidBinary` on non-hex chars or unterminated `#}`
-- [ ] Extend parser: `TokenKind::Binary(Vec<u8>)` → `Value::String8`
-- [ ] Confirm `mold` arm (`printer.rs:18-26`) emits `#{HEX}` uppercase,
+- [x] Promote `Value::String8(Vec<u8>)` → `Value::String8 { bytes, span }`
+      (struct-with-span, matching the M38 `Char` template — `#{hex}` is now
+      source-origin and errors localize to the literal)
+- [x] Extend lexer to parse `#{hex}` literals into `TokenKind::Binary`:
+  - [x] `scan_binary` after `#`-char dispatch: `#{...}` form
+  - [x] Accept even/odd hex digit count (odd → high nibble zero-padded)
+  - [x] Allow whitespace inside `{}` (Red behavior) — skipped (plan decision)
+  - [x] Error `InvalidBinary` on non-hex chars or unterminated `#}`
+- [x] Extend parser: `TokenKind::Binary(Rc<[u8]>)` → `Value::String8`
+- [x] Confirm `mold` arm (`printer.rs:18-26`) emits `#{HEX}` uppercase,
       no separators — matches Red
-- [ ] Confirm `form` arm (`printer.rs:116-123`) emits same `#{HEX}` form
-- [ ] Add `binary?` predicate (was forward-stubbed in M39 — replace stub)
-- [ ] Add `to-binary` converter (`convert.rs`):
-  - [ ] From string → UTF-8 bytes
-  - [ ] From integer → big-endian 8 bytes
-  - [ ] From block of integers → byte vec (each int mod 256)
-- [ ] Add `make binary! <value>` to the `make` dispatcher
-- [ ] Add `to-string` from `binary!` (UTF-8 decode; error on invalid UTF-8)
-- [ ] Implement `length?` on `binary!` (byte count)
-- [ ] Implement `pick`/`poke`/`copy`/`find`/`append`/`insert` on `binary!`
-      (byte-indexed; returns `Integer` 0-255)
-- [ ] De-stub `read/binary` (`io.rs:86-91`): read file bytes as `binary!`
-- [ ] De-stub `write/binary` (`io.rs:159-163`): write `binary!` to file
-- [ ] Update `type_name` (`natives/mod.rs:75`) — already returns
-      `"binary!"`, confirm
-- [ ] Extend `vm/compiler.rs:630` const-pool arm (already includes
-      `String8` — confirm)
-- [ ] Inline `#[test]`: `#{48656C6C6F}` molds back to `#{48656C6C6F}`
-- [ ] Inline `#[test]`: `to-binary "hi"` → `#{6869}`
-- [ ] Inline `#[test]`: `read/binary %fixtures/binary.dat` round-trips with
-      `write/binary` (use `tempfile` dev-dep already present)
-- [ ] Inline `#[test]`: `length? #{0102}` → `2`
-- [ ] Inline `#[test]`: `pick #{41 42} 2` → `66` (`'B'` as integer)
-- [ ] Add golden fixtures: `binary_literal`, `binary_io`, `binary_convert`
-- [ ] Add `programs_errors/binary_bad_hex.red` for non-hex in `#{...}`
-- [ ] Update `property.rs` to include `String8` round-trip (already noted
-      as not reparseable — adjust proptest to skip the mold-reparse step
-      for `binary!` and instead assert byte-equality)
-- [ ] `cargo test --workspace` green; `--features force-walk` green
+- [x] Confirm `form` arm (`printer.rs:116-123`) emits same `#{HEX}` form
+- [x] Add `binary?` predicate (was forward-stubbed in M39 — replaced stub;
+      predicate was already real, just unreachable)
+- [x] Add `to-binary` converter (`convert.rs`):
+  - [x] From string → UTF-8 bytes
+  - [x] From integer → big-endian 8 bytes
+  - [x] From block of integers → byte vec (each int mod 256)
+- [x] Add `make binary! <value>` to the `make` dispatcher (also accepts
+      char!/string!/binary! elements in a block spec)
+- [x] Add `to-string` from `binary!` (UTF-8 decode; error on invalid UTF-8)
+- [x] Implement `length?` on `binary!` (byte count)
+- [x] Implement `pick`/`poke`/`copy`/`find`/`append`/`insert` on `binary!`
+      (byte-indexed; `pick` returns `Integer` 0-255; value semantics —
+      `poke`/`append`/`insert` return a new binary, aliases don't see
+      updates, mirroring the existing `String` behavior)
+- [x] De-stub `read/binary` (`io.rs:86-91`): read file bytes as `binary!`
+- [x] De-stub `write/binary` (`io.rs:159-163`): write `binary!` to file
+      (also accepts `string!`); `/append` supported
+- [x] Update `type_name` (`natives/mod.rs:75`) — already returns
+      `"binary!"`, confirmed
+- [x] Extend `vm/compiler.rs:630` const-pool arm (already includes
+      `String8` — confirmed; pattern updated to struct form)
+- [x] Add `String8` equality arm to `compare.rs:values_equal` (was
+      catch-all `_ => false`, so `#{00} = #{00}` was wrongly `false`)
+- [x] Inline `#[test]`: `#{48656C6C6F}` molds back to `#{48656C6C6F}`
+- [x] Inline `#[test]`: `to-binary "hi"` → `#{6869}`
+- [x] Inline `#[test]`: `read/binary` round-trips with `write/binary`
+      (uses `tempfile` dev-dep)
+- [x] Inline `#[test]`: `length? #{0102}` → `2`
+- [x] Inline `#[test]`: `pick #{4142} 2` → `66` (`'B'` as integer)
+- [x] Add golden fixtures: `binary_literal`, `binary_io`, `binary_convert`,
+      `binary_series`
+- [x] Add `programs_errors/binary_bad_hex.red` for non-hex in `#{...}`
+- [x] Update `property.rs` to include `String8` in the normal
+      `mold(parse(mold(v)))` round-trip proptest (now that `#{hex}` reparses,
+      the byte-equality-only approach was unnecessary)
+- [x] `cargo test --workspace` green; `--features force-walk` green;
+      `cargo clippy --workspace --all-targets -- -D warnings` clean (both
+      modes); `cargo fmt --all --check` clean
 
 ## Milestone 42 — First-class `error!` values
 

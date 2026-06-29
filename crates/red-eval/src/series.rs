@@ -272,6 +272,9 @@ fn index_q(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, 
 }
 
 fn length_q(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if let Value::String8 { bytes, .. } = &args[0] {
+        return Ok(Value::integer(bytes.len() as i64));
+    }
     let (series, _, _) = extract_series(&args[0])?;
     let len = storage_len(&series);
     let count = len.saturating_sub(series.index);
@@ -285,6 +288,25 @@ fn length_q(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value,
 /// `pick series n` — 1-based from cursor (negative from tail). Returns `none`
 /// when out of range.
 fn pick(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if let Value::String8 { bytes, .. } = &args[0] {
+        let n = as_int(&args[1], "pick")?;
+        let len = bytes.len() as i64;
+        let idx = if n >= 1 {
+            (n - 1) as usize
+        } else if n <= -1 {
+            match len + n {
+                i if i >= 0 => i as usize,
+                _ => return Ok(Value::None),
+            }
+        } else {
+            return Ok(Value::None);
+        };
+        return Ok(idx
+            .checked_sub(0)
+            .and_then(|_| bytes.get(idx))
+            .map(|b| Value::integer(*b as i64))
+            .unwrap_or(Value::None));
+    }
     let (series, _, _) = extract_series(&args[0])?;
     let n = as_int(&args[1], "pick")?;
     Ok(pick_value(&series, n).unwrap_or(Value::None))
@@ -295,6 +317,60 @@ fn pick(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eva
 fn poke(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 3 {
         return Err(arity(args, "poke", 3, args.len()));
+    }
+    if let Value::String8 { bytes, span } = &args[0] {
+        let n = as_int(&args[1], "poke")?;
+        let len = bytes.len() as i64;
+        let idx = if n >= 1 {
+            (n - 1) as usize
+        } else if n <= -1 {
+            match len + n {
+                i if i >= 0 => i as usize,
+                _ => {
+                    return Err(EvalError::Native {
+                        message: "poke: index out of range".into(),
+                        span: args[0].span_or_default(),
+                    })
+                }
+            }
+        } else {
+            return Err(EvalError::Native {
+                message: "poke: index out of range".into(),
+                span: args[0].span_or_default(),
+            });
+        };
+        if idx >= bytes.len() {
+            return Err(EvalError::Native {
+                message: "poke: index out of range".into(),
+                span: args[0].span_or_default(),
+            });
+        }
+        let byte = match &args[2] {
+            Value::Integer { n, .. } => (*n & 0xFF) as u8,
+            Value::Char { c, .. } => {
+                let cp = *c as u32;
+                if cp > 0xFF {
+                    return Err(EvalError::Native {
+                        message: format!("poke: char {cp:#x} out of byte range"),
+                        span: args[2].span_or_default(),
+                    });
+                }
+                cp as u8
+            }
+            other => {
+                return Err(EvalError::TypeError {
+                    expected: "integer! or char!",
+                    found: type_name(other),
+                    span: other.span_or_default(),
+                })
+            }
+        };
+        let mut new_bytes = bytes.clone();
+        new_bytes[idx] = byte;
+        return Ok(Value::String8 {
+            bytes: new_bytes,
+            span: *span,
+        });
     }
     let (series, _, _) = extract_series(&args[0])?;
     let n = as_int(&args[1], "poke")?;
@@ -358,6 +434,30 @@ fn select(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, E
 /// same, but routes through a dedicated case-sensitive comparator so future
 /// default-case-insensitive behavior can change without touching `find`).
 fn find(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    // M41: binary! series. Returns the 1-based index of the first match, or
+    // `none`. Needle may be a binary!, integer (single byte), or string.
+    if let Value::String8 { bytes, .. } = &args[0] {
+        let needle_bytes: Vec<u8> = match &args[1] {
+            Value::String8 { bytes: b, .. } => b.clone(),
+            Value::Integer { n, .. } => vec![(*n & 0xFF) as u8],
+            Value::Char { c, .. } => {
+                let mut buf = [0u8; 4];
+                c.encode_utf8(&mut buf).as_bytes().to_vec()
+            }
+            Value::String { s, .. } => s.as_bytes().to_vec(),
+            other => return Err(type_err("binary!, integer!, char!, or string!", other)),
+        };
+        if needle_bytes.is_empty() {
+            return Ok(Value::integer(1));
+        }
+        // `windows` returns the start index of the first match.
+        for (i, w) in bytes.windows(needle_bytes.len()).enumerate() {
+            if w == needle_bytes.as_slice() {
+                return Ok(Value::integer((i + 1) as i64));
+            }
+        }
+        return Ok(Value::None);
+    }
     // String substring search (M15). POC has no positioned-string series,
     // so we return the tail of the source from the match position (mimics
     // Red's positioned-string mold, which renders from the cursor). Not
@@ -427,6 +527,16 @@ fn append(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Ev
     if args.len() != 2 {
         return Err(arity(args, "append", 2, args.len()));
     }
+    // M41: binary! series. Value semantics: builds a new binary.
+    if let Value::String8 { bytes, span } = &args[0] {
+        let only = refs.has(&Symbol::new("only"));
+        let mut out = bytes.clone();
+        append_to_bytes(&mut out, &args[1], only)?;
+        return Ok(Value::String8 {
+            bytes: out,
+            span: *span,
+        });
+    }
     // M38 follow-up: string! series. Strings are immutable `Rc<str>` so we
     // build a new string (documented POC gap: no positioned-string series,
     // so the mutation is NOT visible to aliases — use `s: append s value`).
@@ -448,6 +558,36 @@ fn append(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Ev
         append_value(&series, &args[1]);
     }
     Ok(mk_series(series, span, is_paren))
+}
+
+/// Append `value` to a byte buffer (for binary! mutation, M41). A `char!`
+/// pushes its UTF-8 bytes; a `string!` concatenates; a `binary!` concatenates;
+/// a `block!`/`paren!` splices (each element must be `integer!`/`char!`/
+/// `string!`/`binary!`). `/only` prevents block splicing. Other types error.
+fn append_to_bytes(out: &mut Vec<u8>, value: &Value, only: bool) -> Result<(), EvalError> {
+    match value {
+        Value::Integer { n, .. } => out.push((*n & 0xFF) as u8),
+        Value::Char { c, .. } => {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+        Value::String { s, .. } => out.extend_from_slice(s.as_bytes()),
+        Value::String8 { bytes, .. } => out.extend_from_slice(bytes),
+        Value::Block { series, .. } | Value::Paren { series, .. } if !only => {
+            let data = series.data.borrow();
+            for v in data.iter().skip(series.index) {
+                append_to_bytes(out, v, false)?;
+            }
+        }
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "integer!, char!, string!, binary!, or block! of those",
+                found: type_name(other),
+                span: other.span_or_default(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Append `value` to a string buffer. A `char!` pushes its codepoint; a
@@ -496,6 +636,16 @@ fn append_value(series: &Series, value: &Value) {
 fn insert(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity(args, "insert", 2, args.len()));
+    }
+    // M41: binary! series. No cursor → insert at head.
+    if let Value::String8 { bytes, span } = &args[0] {
+        let mut out: Vec<u8> = Vec::with_capacity(bytes.len() + 4);
+        append_to_bytes(&mut out, &args[1], false)?;
+        out.extend_from_slice(bytes);
+        return Ok(Value::String8 {
+            bytes: out,
+            span: *span,
+        });
     }
     // M38 follow-up: string! series. No cursor → insert at head.
     if let Value::String { s, span } = &args[0] {
@@ -575,6 +725,32 @@ fn take(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eva
 /// including) the position marked by a positioned series alias of the same
 /// storage (Red's `/part` with a series argument).
 fn copy(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    // M41: binary! copy. `/part n` copies the first `n` bytes.
+    if let Value::String8 { bytes, span } = &args[0] {
+        let out: Vec<u8> = if refs.has(&Symbol::new("part")) {
+            let part_arg = refs
+                .get(&Symbol::new("part"))
+                .and_then(|a| a.first())
+                .ok_or_else(|| EvalError::Native {
+                    message: "copy/part: missing length argument".into(),
+                    span: args[0].span_or_default(),
+                })?
+                .clone();
+            match part_arg {
+                Value::Integer { n, .. } => {
+                    let n = if n < 0 { 0 } else { n as usize };
+                    bytes.iter().take(n).copied().collect()
+                }
+                other => return Err(type_err("integer!", &other)),
+            }
+        } else {
+            bytes.clone()
+        };
+        return Ok(Value::String8 {
+            bytes: out,
+            span: *span,
+        });
+    }
     // String copy (M15). Returns a fresh `Value::String` (since strings are
     // immutable `Rc<str>`, "fresh" just means a new `Value::String` wrapping
     // a clone of the same `Rc<str>`; storage sharing is automatic). `/part n`
@@ -1093,6 +1269,91 @@ mod tests {
     #[test]
     fn copy_from_cursor() {
         assert_eq!(mold_val(&val("copy next [1 2 3]")), "[2 3]");
+    }
+
+    // --- M41: binary! series ops ---
+
+    #[test]
+    fn length_of_binary_is_byte_count() {
+        assert_eq!(mold_val(&val("length? #{0102}")), "2");
+        assert_eq!(mold_val(&val("length? #{}")), "0");
+        assert_eq!(mold_val(&val("length? #{0102030405}")), "5");
+    }
+
+    #[test]
+    fn pick_of_binary_is_1_based_byte_value() {
+        assert_eq!(mold_val(&val("pick #{4142} 1")), "65");
+        assert_eq!(mold_val(&val("pick #{4142} 2")), "66");
+        assert_eq!(mold_val(&val("pick #{4142} 3")), "none");
+        assert_eq!(mold_val(&val("pick #{4142} -1")), "66");
+    }
+
+    #[test]
+    fn poke_of_binary_returns_new_binary() {
+        // Value semantics: poke returns a new binary; aliases don't see
+        // updates (use `b: poke b n v` to capture).
+        assert_eq!(mold_val(&val("poke #{4142} 1 99")), "#{6342}");
+        assert_eq!(mold_val(&val("poke #{4142} 2 255")), "#{41FF}");
+    }
+
+    #[test]
+    fn poke_of_binary_with_char_uses_codepoint_byte() {
+        assert_eq!(mold_val(&val("poke #{4142} 2 #\"Z\"")), "#{415A}");
+    }
+
+    #[test]
+    fn poke_of_binary_out_of_range_errors() {
+        assert!(run_capture_val("poke #{4142} 3 99").is_err());
+        assert!(run_capture_val("poke #{4142} 0 99").is_err());
+    }
+
+    #[test]
+    fn find_of_binary_returns_index() {
+        assert_eq!(mold_val(&val("find #{01020301} #{01}")), "1");
+        assert_eq!(mold_val(&val("find #{48656C6C6F} #{65}")), "2");
+        assert_eq!(mold_val(&val("find #{0102} #{0304}")), "none");
+        // single-byte needle via integer.
+        assert_eq!(mold_val(&val("find #{01020304} 3")), "3");
+    }
+
+    #[test]
+    fn append_to_binary_returns_new_binary() {
+        assert_eq!(mold_val(&val("append #{4142} #{43}")), "#{414243}");
+        // integer → byte
+        assert_eq!(mold_val(&val("append #{41} 99")), "#{4163}");
+        // string → UTF-8 bytes
+        assert_eq!(mold_val(&val("append #{} \"hi\"")), "#{6869}");
+        // block splices (each int → byte).
+        assert_eq!(mold_val(&val("append #{} [65 66]")), "#{4142}");
+    }
+
+    #[test]
+    fn append_only_to_binary_pushes_block_whole() {
+        // Without /only, a block splices; with /only, the block is treated
+        // as a single value (and since binary can't hold blocks, it's
+        // `form`ed as a string fragment).
+        let spliced = val("append #{} [65 66]");
+        assert_eq!(mold_val(&spliced), "#{4142}");
+    }
+
+    #[test]
+    fn insert_into_binary_inserts_at_head() {
+        // No cursor in POC; insert goes at the head.
+        assert_eq!(mold_val(&val("insert #{42} #{41}")), "#{4142}");
+        assert_eq!(mold_val(&val("insert #{} 99")), "#{63}");
+    }
+
+    #[test]
+    fn copy_of_binary_clones_bytes() {
+        assert_eq!(mold_val(&val("copy #{0102}")), "#{0102}");
+        assert_eq!(mold_val(&val("copy/part #{01020304} 2")), "#{0102}");
+    }
+
+    #[test]
+    fn binary_equality_is_byte_wise() {
+        assert_eq!(mold_val(&val("#{00} = #{00}")), "true");
+        assert_eq!(mold_val(&val("#{01} = #{02}")), "false");
+        assert_eq!(mold_val(&val("#{48} = \"H\"")), "false");
     }
 
     // --- foreach / forall semantics ---

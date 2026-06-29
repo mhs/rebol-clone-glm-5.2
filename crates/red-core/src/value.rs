@@ -179,12 +179,12 @@ impl FuncDef {
 }
 
 /// The single runtime value type. Covers every variant from the brief, even
-/// ones not exercised until later milestones (`Path`, `String8`, `Func`).
+/// ones not exercised until later milestones (`Path`, `Func`).
 ///
 /// Every variant that originates from source (`Integer`, `Float`, `String`,
-/// the word family, `Block`, `Paren`) carries the byte-offset `Span` of its
-/// originating token so eval-time errors can render `file:line:col:`. The
-/// synthetic variants (`None`, `Logic`, `Func`, `Path`, `String8`) are
+/// the word family, `Block`, `Paren`, `String8`) carries the byte-offset
+/// `Span` of its originating token so eval-time errors can render
+/// `file:line:col:`. The synthetic variants (`None`, `Logic`, `Func`) are
 /// produced at runtime by natives and have no source position; their
 /// `span()` returns `None`.
 #[derive(Clone, Debug)]
@@ -269,8 +269,9 @@ pub enum Value {
     /// detects `scheme://...` inside a word run); carries the byte-offset span
     /// of the whole token. `url` is the raw url text including the scheme.
     Url { url: Rc<str>, span: Span },
-    /// `binary!` (optional in brief; included for completeness). Synthetic.
-    String8(Vec<u8>),
+    /// `binary!` literal (`#{hex}` form). Source-origin (the lexer scans the
+    /// `#{...}` run); carries the byte-offset span of the whole token.
+    String8 { bytes: Vec<u8>, span: Span },
     /// A caught error value (M16). Produced by `try` when an error is raised
     /// inside its block; carries the error message body. Synthetic — no source
     /// span of its own (the originating error's span is not preserved across
@@ -326,8 +327,8 @@ impl ObjectDef {
 impl Value {
     /// Span of this value in the original source. Every source-origin variant
     /// (`Integer`/`Float`/`String`/word-family/`Block`/`Paren`/`Path`/
-    /// `Refinement`) carries its token span; synthetic variants
-    /// (`None`/`Logic`/`Func`/`String8`) return `None`.
+    /// `Refinement`/`String8`) carries its token span; synthetic variants
+    /// (`None`/`Logic`/`Func`) return `None`.
     pub fn span(&self) -> Option<Span> {
         match self {
             Value::Integer { span, .. }
@@ -346,13 +347,11 @@ impl Value {
             | Value::SetPath { span, .. }
             | Value::Refinement { span, .. }
             | Value::File { span, .. }
-            | Value::Url { span, .. } => Some(*span),
-            Value::None
-            | Value::Logic(_)
-            | Value::Func(_)
-            | Value::String8(_)
-            | Value::Error(_)
-            | Value::Object(_) => None,
+            | Value::Url { span, .. }
+            | Value::String8 { span, .. } => Some(*span),
+            Value::None | Value::Logic(_) | Value::Func(_) | Value::Error(_) | Value::Object(_) => {
+                None
+            }
         }
     }
 
@@ -510,6 +509,20 @@ impl Value {
         Value::Error(Rc::new(ErrorValue {
             message: message.into(),
         }))
+    }
+
+    /// Constructor shorthand for a binary! literal with a zero span
+    /// (test/REPL use).
+    pub fn binary(bytes: Vec<u8>) -> Self {
+        Value::String8 {
+            bytes,
+            span: Span::default(),
+        }
+    }
+
+    /// Back-compat alias for `Value::binary`.
+    pub fn string8(bytes: Vec<u8>) -> Self {
+        Self::binary(bytes)
     }
 
     /// Constructor shorthand for an object wrapping `obj_def`.
@@ -823,6 +836,19 @@ mod tests {
     }
 
     #[test]
+    fn value_binary_constructor() {
+        match Value::binary(vec![0xDE, 0xAD]) {
+            Value::String8 { bytes, .. } => assert_eq!(bytes, vec![0xDE, 0xAD]),
+            other => panic!("expected String8, got {other:?}"),
+        }
+        // alias
+        match Value::string8(vec![0xBE, 0xEF]) {
+            Value::String8 { bytes, .. } => assert_eq!(bytes, vec![0xBE, 0xEF]),
+            other => panic!("expected String8, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn span_returns_some_for_source_origin_variants() {
         let s = Span::new(10, 20);
         macro_rules! check {
@@ -896,6 +922,10 @@ mod tests {
             url: Rc::from("u"),
             span: s
         });
+        check!(Value::String8 {
+            bytes: vec![1, 2, 3],
+            span: s
+        });
     }
 
     #[test]
@@ -903,7 +933,6 @@ mod tests {
         assert!(Value::None.span().is_none());
         assert!(Value::Logic(true).span().is_none());
         assert!(Value::Func(Rc::new(FuncDef::default())).span().is_none());
-        assert!(Value::String8(vec![1, 2]).span().is_none());
         assert!(Value::error("x").span().is_none());
         assert!(Value::object(ObjectDef::new()).span().is_none());
     }
@@ -959,6 +988,7 @@ mod tests {
             Value::Refinement { sym, .. } => Value::Refinement { sym, span: s },
             Value::File { path, .. } => Value::File { path, span: s },
             Value::Url { url, .. } => Value::Url { url, span: s },
+            Value::String8 { bytes, .. } => Value::String8 { bytes, span: s },
             other => other,
         }
     }

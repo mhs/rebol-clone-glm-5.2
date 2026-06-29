@@ -22,6 +22,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Float { f: x, .. }, Value::Integer { n: y, .. }) => *x == (*y as f64),
         (Value::String { s: x, .. }, Value::String { s: y, .. }) => x == y,
         (Value::Char { c: x, .. }, Value::Char { c: y, .. }) => x == y,
+        (Value::String8 { bytes: x, .. }, Value::String8 { bytes: y, .. }) => x == y,
         (Value::None, Value::None) => true,
         (Value::Logic(x), Value::Logic(y)) => x == y,
         (Value::Error(a), Value::Error(b)) => a.message == b.message,

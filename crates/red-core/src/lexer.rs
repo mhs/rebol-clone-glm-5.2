@@ -33,6 +33,11 @@ pub enum TokenKind {
     /// char, a `^`-escape (`^-` tab, `^/` newline, `^@` null, `^M-C` meta,
     /// `^^` literal caret, `^"` literal quote), or `^(NN)` codepoint hex.
     Char(char),
+    /// `#{hex}` — a binary! literal. Produced by `#{` followed by a run of
+    /// hex digits (whitespace-skipping per Red is not implemented — digits
+    /// must be contiguous) and a closing `}`. An odd digit count is
+    /// zero-padded on the high nibble (Red behavior).
+    Binary(Rc<[u8]>),
     LBracket,
     RBracket,
     LParen,
@@ -62,6 +67,8 @@ pub enum LexError {
     /// `#"...` hit EOF before the closing `"`, or contained a malformed
     /// `^`-escape or `^(NN)` codepoint.
     InvalidChar { span: Span, chars: String },
+    /// `#{...}` hit EOF before the closing `}`, or contained a non-hex digit.
+    InvalidBinary { span: Span, chars: String },
 }
 
 impl LexError {
@@ -72,7 +79,8 @@ impl LexError {
             | LexError::InvalidNumber { span, .. }
             | LexError::InvalidWord { span }
             | LexError::UnbalancedBrace { span, .. }
-            | LexError::InvalidChar { span, .. } => *span,
+            | LexError::InvalidChar { span, .. }
+            | LexError::InvalidBinary { span, .. } => *span,
         }
     }
 }
@@ -92,6 +100,9 @@ impl std::fmt::Display for LexError {
             }
             LexError::InvalidChar { chars, .. } => {
                 write!(f, "invalid char literal: {chars:?}")
+            }
+            LexError::InvalidBinary { chars, .. } => {
+                write!(f, "invalid binary literal: {chars:?}")
             }
         }
     }
@@ -185,10 +196,21 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             continue;
         }
 
-        // Char literal: `#"..."` form. A bare `#` not followed by `"` falls
-        // through to `scan_word` (preserving back-compat with `#foo` words).
+        // Char literal: `#"..."` form. A bare `#` not followed by `"` or `{`
+        // falls through to `scan_word` (preserving back-compat with `#foo` words).
         if c == b'#' && bytes.get(i + 1) == Some(&b'"') {
             let (end, kind) = scan_char(src, &mut i)?;
+            out.push(Token {
+                kind,
+                span: Span::new(start, end),
+            });
+            continue;
+        }
+
+        // Binary literal: `#{hex}` form. A bare `#` not followed by `{`
+        // falls through to `scan_word`.
+        if c == b'#' && bytes.get(i + 1) == Some(&b'{') {
+            let (end, kind) = scan_binary(src, &mut i)?;
             out.push(Token {
                 kind,
                 span: Span::new(start, end),
@@ -385,6 +407,56 @@ fn scan_char(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError> {
     }
     *i += 1; // consume closing `"`
     Ok((*i, TokenKind::Char(c)))
+}
+
+/// `#{hex}` — a binary! literal. Reads hex digits (contiguous, no internal
+/// whitespace — Red allows whitespace inside the braces but the POC keeps it
+/// strict) until the closing `}`. An odd digit count is zero-padded on the
+/// high nibble (Red behavior: `#{ABC}` → bytes `[0x0A, 0xBC]`).
+///
+/// EOF before `}` or a non-hex digit → `InvalidBinary`.
+fn scan_binary(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError> {
+    let start = *i;
+    let bytes = src.as_bytes();
+    // Consume `#{`.
+    *i += 2;
+    let mut hex = String::new();
+    while *i < bytes.len() {
+        let c = bytes[*i];
+        if c == b'}' {
+            *i += 1; // consume `}`
+            let mut bytes_out: Vec<u8> = Vec::with_capacity(hex.len() / 2 + 1);
+            let mut padded = hex.clone();
+            if padded.len() % 2 == 1 {
+                // Odd digit count → prepend a `0` to the high nibble.
+                padded.insert(0, '0');
+            }
+            let mut j = 0;
+            while j + 1 < padded.len() {
+                let pair = &padded[j..j + 2];
+                let b = u8::from_str_radix(pair, 16).map_err(|_| LexError::InvalidBinary {
+                    span: Span::new(start, *i),
+                    chars: padded[j..j + 2].to_string(),
+                })?;
+                bytes_out.push(b);
+                j += 2;
+            }
+            return Ok((*i, TokenKind::Binary(Rc::from(bytes_out.as_slice()))));
+        }
+        if !c.is_ascii_hexdigit() {
+            return Err(LexError::InvalidBinary {
+                span: Span::new(start, *i),
+                chars: format!("{:?}", c as char),
+            });
+        }
+        hex.push(c as char);
+        *i += 1;
+    }
+    // EOF before `}`.
+    Err(LexError::InvalidBinary {
+        span: Span::new(start, bytes.len()),
+        chars: src[start..].to_string(),
+    })
 }
 
 /// Decode a single "char unit" starting at `*i` inside a `#"..."` literal.
@@ -950,8 +1022,64 @@ mod tests {
 
     #[test]
     fn char_literal_does_not_affect_bare_hash_word() {
-        // A bare `#` not followed by `"` should fall through to word scan.
+        // A bare `#` not followed by `"` or `{` should fall through to word scan.
         assert!(matches!(one("#foo"), TokenKind::Word(_)));
+    }
+
+    #[test]
+    fn binary_literal_even_hex() {
+        assert_eq!(
+            one("#{48656C6C6F}"),
+            TokenKind::Binary(Rc::from(&[0x48, 0x65, 0x6C, 0x6C, 0x6F][..]))
+        );
+        assert_eq!(one("#{00}"), TokenKind::Binary(Rc::from(&[0x00][..])));
+        assert_eq!(one("#{FF}"), TokenKind::Binary(Rc::from(&[0xFF][..])));
+    }
+
+    #[test]
+    fn binary_literal_odd_hex_zero_pads_high_nibble() {
+        // `#{ABC}` (3 hex digits) → `[0x0A, 0xBC]` (high nibble zero-padded).
+        assert_eq!(
+            one("#{ABC}"),
+            TokenKind::Binary(Rc::from(&[0x0A, 0xBC][..]))
+        );
+        assert_eq!(one("#{1}"), TokenKind::Binary(Rc::from(&[0x01][..])));
+        assert_eq!(one("#{F}"), TokenKind::Binary(Rc::from(&[0x0F][..])));
+    }
+
+    #[test]
+    fn binary_literal_lowercase_hex_accepted() {
+        assert_eq!(
+            one("#{deadbeef}"),
+            TokenKind::Binary(Rc::from(&[0xDE, 0xAD, 0xBE, 0xEF][..]))
+        );
+    }
+
+    #[test]
+    fn binary_literal_empty() {
+        assert_eq!(one("#{}"), TokenKind::Binary(Rc::from(&[][..])));
+    }
+
+    #[test]
+    fn binary_literal_unterminated() {
+        let err = lex("#{00").unwrap_err();
+        assert!(matches!(err, LexError::InvalidBinary { .. }));
+    }
+
+    #[test]
+    fn binary_literal_non_hex_char() {
+        let err = lex("#{XY}").unwrap_err();
+        assert!(matches!(err, LexError::InvalidBinary { .. }));
+        let err = lex("#{12 G4}").unwrap_err();
+        assert!(matches!(err, LexError::InvalidBinary { .. }));
+    }
+
+    #[test]
+    fn binary_literal_span_covers_full_token() {
+        let toks = lex("#{42}").unwrap();
+        assert_eq!(toks.len(), 1);
+        // Span covers `#{42}` (5 bytes).
+        assert_eq!(toks[0].span, Span::new(0, 5));
     }
 
     #[test]

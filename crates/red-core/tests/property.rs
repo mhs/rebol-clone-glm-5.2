@@ -3,7 +3,6 @@
 //!
 //! Excluded variants (documented POC gaps):
 //! - `Func` — molds as `#[function]`, not reparseable.
-//! - `String8` — molds as `#{hex}`, not reparseable.
 //! - `Error` — molds as `make error! "..."`, not reparseable (the `make`
 //!   native runs at eval time, not parse time).
 //! - `NaN`/`inf` floats — no lexer literal for them.
@@ -48,6 +47,12 @@ fn gen_value(_depth: u32) -> BoxedStrategy<Value> {
                 c,
                 span: Span::new(0, 0),
             }
+        }),
+        // M41: binary! literals — short byte vectors that mold to `#{HEX}` and
+        // reparse through the new lexer rule.
+        prop::collection::vec(any::<u8>(), 0..8).prop_map(|bytes| Value::String8 {
+            bytes,
+            span: Span::new(0, 0),
         }),
         // Word family.
         "[a-z][a-z0-9]{0,8}".prop_map(|s: String| Value::Word {

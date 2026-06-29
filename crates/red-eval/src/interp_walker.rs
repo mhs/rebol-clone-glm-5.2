@@ -335,7 +335,7 @@ fn eval_prefix(
         | Value::Integer { .. }
         | Value::Float { .. }
         | Value::String { .. }
-        | Value::String8(_)
+        | Value::String8 { .. }
         | Value::LitWord { .. }
         | Value::Block { .. }
         | Value::Func(_)

@@ -197,11 +197,20 @@ fn to_float(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value,
     })
 }
 
-/// `to-string value` — Red's `to-string` is `form`: human-readable, no
-/// quoting/escaping. Returns a `string!`.
+/// `to-string value` — Red's `to-string` is `form` for most types, but
+/// decodes UTF-8 bytes for `binary!` (M41 — Red parity).
 fn to_string(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(arity_err(args, "to-string", 1, args.len()));
+    }
+    // `to-string` of a binary! decodes UTF-8 bytes (Red behavior). Error on
+    // invalid UTF-8 sequences.
+    if let Value::String8 { bytes, span } = &args[0] {
+        let s = std::str::from_utf8(bytes).map_err(|_| EvalError::Native {
+            message: "to-string: invalid UTF-8 in binary!".into(),
+            span: *span,
+        })?;
+        return Ok(Value::string(std::rc::Rc::from(s)));
     }
     Ok(Value::string(std::rc::Rc::from(
         form_to_string(&args[0]).as_str(),
@@ -405,6 +414,7 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
         "file!" | "file" => make_file(spec)?,
         "url!" | "url" => make_url(spec)?,
         "char!" | "char" => make_char(spec)?,
+        "binary!" | "binary" => make_binary(spec)?,
         "object!" | "object" => return crate::object::make_object(spec, env),
         "function!" | "function" => {
             // Original behavior: spec is a packed `[[spec][body]]` block.
@@ -612,6 +622,58 @@ fn make_char(spec: &Value) -> Result<Value, EvalError> {
     }
 }
 
+/// `make binary! <spec>` — construct a `binary!` value (M41).
+/// - `binary!` → identity
+/// - `string!` → UTF-8 bytes
+/// - `integer!` → big-endian 8 bytes
+/// - `block!`/`paren!` → bytes from each element (each int mod 256; chars →
+///   their codepoint byte; strings → their UTF-8 bytes concatenated)
+fn make_binary(spec: &Value) -> Result<Value, EvalError> {
+    match spec {
+        Value::String8 { bytes, .. } => Ok(Value::binary(bytes.clone())),
+        Value::String { s, .. } => Ok(Value::binary(s.as_bytes().to_vec())),
+        Value::Integer { n, .. } => Ok(Value::binary(n.to_be_bytes().to_vec())),
+        Value::Block { series, .. } | Value::Paren { series, .. } => {
+            let data = series.data.borrow();
+            let mut out: Vec<u8> = Vec::new();
+            for v in data.iter().skip(series.index) {
+                match v {
+                    Value::Integer { n, .. } => out.push((*n & 0xFF) as u8),
+                    Value::Char { c, .. } => {
+                        let mut buf = [0u8; 4];
+                        let s = c.encode_utf8(&mut buf);
+                        out.extend_from_slice(s.as_bytes());
+                    }
+                    Value::String { s, .. } => out.extend_from_slice(s.as_bytes()),
+                    Value::String8 { bytes, .. } => out.extend_from_slice(bytes),
+                    other => {
+                        return Err(EvalError::TypeError {
+                            expected: "integer!, char!, string!, or binary!",
+                            found: type_name(other),
+                            span: other.span_or_default(),
+                        })
+                    }
+                }
+            }
+            Ok(Value::binary(out))
+        }
+        other => Err(EvalError::TypeError {
+            expected: "binary!, string!, integer!, or block!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
+/// `to-binary value` — coerce to `binary!`. Same shape as `make_binary` but
+/// a conversion (no capacity-hint form for `integer!`).
+fn to_binary(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "to-binary", 1, args.len()));
+    }
+    make_binary(&args[0])
+}
+
 // ---------------------------------------------------------------------------
 // to <type> <value>
 // ---------------------------------------------------------------------------
@@ -640,6 +702,7 @@ fn to_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
         "file!" | "file" => to_file(one, &RefineArgs::empty(), env),
         "url!" | "url" => to_url(one, &RefineArgs::empty(), env),
         "char!" | "char" => to_char(one, &RefineArgs::empty(), env),
+        "binary!" | "binary" => to_binary(one, &RefineArgs::empty(), env),
         other => Err(EvalError::Native {
             message: format!("to: {other:?} type not supported in POC"),
             span: args[0].span_or_default(),
@@ -702,6 +765,7 @@ pub fn register_convert_natives(env: &mut Env) {
     reg(env, "to-file", to_file as NF, 1);
     reg(env, "to-url", to_url as NF, 1);
     reg(env, "to-char", to_char as NF, 1);
+    reg(env, "to-binary", to_binary as NF, 1);
 
     // make / to (arity 2)
     reg(env, "make", make_native as NF, 2);
@@ -1053,11 +1117,85 @@ mod tests {
         assert_eq!(mold_to_string(&val("form 42")), "\"42\"");
     }
 
+    // --- to-binary / make binary! (M41) ---
+
+    #[test]
+    fn binary_literal_molds_to_hex_uppercase() {
+        // Source round-trip: lex → parse → mold.
+        assert_eq!(mold_to_string(&val("#{48656C6C6F}")), "#{48656C6C6F}");
+        assert_eq!(mold_to_string(&val("#{00FF}")), "#{00FF}");
+    }
+
+    #[test]
+    fn to_binary_from_string() {
+        // `"hi"` UTF-8 bytes = 0x68 0x69.
+        assert_eq!(mold_to_string(&val("to-binary \"hi\"")), "#{6869}");
+    }
+
+    #[test]
+    fn to_binary_from_binary_is_identity() {
+        assert_eq!(mold_to_string(&val("to-binary #{0102}")), "#{0102}");
+    }
+
+    #[test]
+    fn to_binary_from_integer_is_big_endian_8() {
+        // `1` → big-endian i64 = eight bytes, only the last non-zero.
+        let v = val("to-binary 1");
+        match v {
+            Value::String8 { bytes, .. } => {
+                assert_eq!(bytes.len(), 8);
+                assert_eq!(bytes[7], 1);
+            }
+            other => panic!("expected String8, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn make_binary_from_block_of_ints() {
+        // Each int mod 256.
+        assert_eq!(mold_to_string(&val("make binary! [65 66 67]")), "#{414243}");
+        assert_eq!(
+            mold_to_string(&val("make binary! [0 255 256]")),
+            "#{00FF00}"
+        );
+    }
+
+    #[test]
+    fn make_binary_from_block_with_chars_and_strings() {
+        // `#"A"` → 0x41; `"xy"` → 0x78 0x79.
+        assert_eq!(
+            mold_to_string(&val(r#"make binary! [#"A" "xy"]"#)),
+            "#{417879}"
+        );
+    }
+
+    #[test]
+    fn to_string_from_binary_decodes_utf8() {
+        // `#{6869}` decodes to `"hi"`.
+        assert_eq!(mold_to_string(&val("to-string #{6869}")), "\"hi\"");
+    }
+
+    #[test]
+    fn to_string_from_binary_invalid_utf8_errors() {
+        // Lone 0xFF is not valid UTF-8.
+        let r = run_capture_val("to-string #{FF}");
+        assert!(r.is_err(), "expected UTF-8 decode error");
+    }
+
+    #[test]
+    fn to_binary_via_to_native() {
+        assert_eq!(mold_to_string(&val("to binary! \"hi\"")), "#{6869}");
+    }
+
+    #[test]
+    fn make_binary_via_make_native() {
+        assert_eq!(mold_to_string(&val("make binary! \"hi\"")), "#{6869}");
+    }
+
     // --- round-trip ---
     // Each `to-*` round-trips through `to-string` for in-range inputs (and
     // back through the matching constructor where defined). `to-logic` is
     // intentionally lossy (many values map to `true`) so it's excluded.
-
     #[test]
     fn to_integer_round_trip() {
         assert_eq!(mold_to_string(&val("to-integer to-string 42")), "42");

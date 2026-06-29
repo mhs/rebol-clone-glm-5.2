@@ -77,23 +77,29 @@ fn io_err(from: &Value, path: &Path, ctx: &str, e: std::io::Error) -> EvalError 
 // ---------------------------------------------------------------------------
 
 /// `read file` / `read url` → `string!`. With `/lines` returns a `block!` of
-/// lines (no trailing newlines). `/binary` is stubbed (deferred to M21 with
-/// String8).
+/// lines (no trailing newlines). `/binary` returns a `binary!` of the raw
+/// file bytes (M41 — de-stubbed).
 fn read(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(arity_err(args, "read", 1, args.len()));
     }
-    if refs.has(&Symbol::new("binary")) {
+    let binary = refs.has(&Symbol::new("binary"));
+    let lines = refs.has(&Symbol::new("lines"));
+    if binary && lines {
         return Err(native_err(
             &args[0],
-            "read/binary not supported in POC (binary! type deferred)",
+            "read: /binary and /lines are mutually exclusive",
         ));
     }
-    let lines = refs.has(&Symbol::new("lines"));
     match &args[0] {
         Value::File { path, span } => {
             let _ = span;
             let p = resolve_path(path, _env);
+            if binary {
+                let bytes =
+                    std::fs::read(&p).map_err(|e| io_err(&args[0], &p, "cannot read", e))?;
+                return Ok(Value::String8 { bytes, span: *span });
+            }
             let contents =
                 std::fs::read_to_string(&p).map_err(|e| io_err(&args[0], &p, "cannot read", e))?;
             if lines {
@@ -110,6 +116,12 @@ fn read(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eval
         Value::Url { url, span } => {
             let _ = span;
             let body = fetch_url(url).map_err(|e| native_err(&args[0], e))?;
+            if binary {
+                return Ok(Value::String8 {
+                    bytes: body.into_bytes(),
+                    span: *span,
+                });
+            }
             if lines {
                 Ok(Value::block(Series::new(
                     body.lines().map(|l| Value::string(Rc::from(l))).collect(),
@@ -151,19 +163,44 @@ fn fetch_url(url: &str) -> Result<String, String> {
 /// replacing any existing contents. Refinements:
 /// - `/append` — append instead of truncate.
 /// - `/lines`  — `content` is a block of strings; join with newlines.
-/// - `/binary` — stubbed (deferred to M21).
+/// - `/binary` — `content` is a `binary!` (or coerced to bytes); writes the
+///   raw bytes to the file (M41 — de-stubbed).
 fn write(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "write", 2, args.len()));
     }
-    if refs.has(&Symbol::new("binary")) {
-        return Err(native_err(
-            &args[0],
-            "write/binary not supported in POC (binary! type deferred)",
-        ));
-    }
     let (path, _span) = expect_file(&args[0])?;
     let p = resolve_path(path, env);
+
+    // /binary: accept a binary!, string!, or coerce via `form`. Bytes are
+    // written verbatim — no newline joins, no `form` text.
+    if refs.has(&Symbol::new("binary")) {
+        let bytes: Vec<u8> = match &args[1] {
+            Value::String8 { bytes, .. } => bytes.clone(),
+            Value::String { s, .. } => s.as_bytes().to_vec(),
+            other => {
+                return Err(EvalError::TypeError {
+                    expected: "binary! or string!",
+                    found: type_name(other),
+                    span: other.span_or_default(),
+                });
+            }
+        };
+        if refs.has(&Symbol::new("append")) {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&p)
+                .map_err(|e| io_err(&args[0], &p, "cannot write", e))?;
+            f.write_all(&bytes)
+                .map_err(|e| io_err(&args[0], &p, "cannot write", e))?;
+        } else {
+            std::fs::write(&p, &bytes).map_err(|e| io_err(&args[0], &p, "cannot write", e))?;
+        }
+        return Ok(Value::None);
+    }
+
     let content = if refs.has(&Symbol::new("lines")) {
         // Block of strings → newline-joined.
         match &args[1] {
@@ -985,5 +1022,83 @@ mod tests {
     fn read_url_wrong_scheme_errors() {
         let err = run_capture_val("read file://localhost/x").unwrap_err();
         assert!(err.contains("not supported"), "got: {err}");
+    }
+
+    // --- M41: read/binary + write/binary ---
+
+    #[test]
+    fn read_binary_returns_binary_value() {
+        // Fixture file `hello.txt` contains "hello world\n".
+        let v = val("read/binary %tests/fixtures/hello.txt");
+        match v {
+            Value::String8 { bytes, .. } => {
+                assert_eq!(bytes, b"hello world\n".to_vec());
+            }
+            other => panic!("expected String8, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn write_binary_then_read_binary_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bin.dat");
+        let pstr = path.to_string_lossy().to_string();
+        // Write raw bytes via a binary! literal (`48656C6C6F` = "Hello").
+        // (Escape `{{`/`}}` for Rust's format! macro so the `#{...}` reaches
+        // Red intact.)
+        run_capture_val(&format!("write/binary %{} #{{48656C6C6F}}", pstr)).unwrap();
+        let v = val(&format!("read/binary %{}", pstr));
+        match v {
+            Value::String8 { bytes, .. } => {
+                assert_eq!(bytes, b"Hello".to_vec());
+            }
+            other => panic!("expected String8, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn write_binary_append_appends_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.bin");
+        let pstr = path.to_string_lossy().to_string();
+        run_capture_val(&format!("write/binary %{} #{{41}}", pstr)).unwrap();
+        run_capture_val(&format!("write/append/binary %{} #{{42}}", pstr)).unwrap();
+        let v = val(&format!("read/binary %{}", pstr));
+        match v {
+            Value::String8 { bytes, .. } => {
+                assert_eq!(bytes, vec![0x41, 0x42]);
+            }
+            other => panic!("expected String8, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn write_binary_from_string_writes_utf8_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.bin");
+        let pstr = path.to_string_lossy().to_string();
+        run_capture_val(&format!("write/binary %{} \"hi\"", pstr)).unwrap();
+        let v = val(&format!("read/binary %{}", pstr));
+        match v {
+            Value::String8 { bytes, .. } => {
+                assert_eq!(bytes, b"hi".to_vec());
+            }
+            other => panic!("expected String8, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn write_binary_with_non_binary_value_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("e.bin");
+        let pstr = path.to_string_lossy().to_string();
+        let r = run_capture_val(&format!("write/binary %{} 42", pstr));
+        assert!(r.is_err(), "expected type error");
+    }
+
+    #[test]
+    fn read_binary_and_binary_lines_mutually_exclusive() {
+        let r = run_capture_val("read/binary/lines %tests/fixtures/hello.txt");
+        assert!(r.is_err(), "expected error from /binary + /lines");
     }
 }

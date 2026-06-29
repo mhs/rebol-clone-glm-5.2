@@ -1291,9 +1291,15 @@ mod tests {
 
     #[test]
     fn atan2_basic() {
-        assert!(approx(as_f64(&val("atan2 1 1")), std::f64::consts::FRAC_PI_4));
+        assert!(approx(
+            as_f64(&val("atan2 1 1")),
+            std::f64::consts::FRAC_PI_4
+        ));
         assert!(approx(as_f64(&val("atan2 0 1")), 0.0));
-        assert!(approx(as_f64(&val("atan2 1 0")), std::f64::consts::FRAC_PI_2));
+        assert!(approx(
+            as_f64(&val("atan2 1 0")),
+            std::f64::consts::FRAC_PI_2
+        ));
     }
 
     #[test]

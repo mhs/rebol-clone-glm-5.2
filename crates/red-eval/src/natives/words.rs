@@ -283,7 +283,7 @@ pub(crate) fn binary_predicate(
     _r: &RefineArgs,
     _e: &mut Env,
 ) -> Result<Value, EvalError> {
-    pred1(args, "binary?", |v| matches!(v, Value::String8(_)))
+    pred1(args, "binary?", |v| matches!(v, Value::String8 { .. }))
 }
 
 /// `error?` — true for `error!` (`Value::Error`). The variant exists (M16
@@ -442,11 +442,11 @@ pub(crate) fn types_of(args: &[Value], _r: &RefineArgs, _e: &mut Env) -> Result<
             | Value::LitPath { .. }
             | Value::SetPath { .. }
             | Value::String { .. }
-            | Value::String8(_)
+            | Value::String8 { .. }
             | Value::File { .. }
             | Value::Url { .. }
     );
-    let is_any_string = matches!(v, Value::String { .. } | Value::String8(_));
+    let is_any_string = matches!(v, Value::String { .. } | Value::String8 { .. });
 
     if is_number {
         out.push(Value::word("number!"));
