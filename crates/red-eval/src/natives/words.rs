@@ -296,6 +296,18 @@ pub(crate) fn error_predicate(
     pred1(args, "error?", |v| matches!(v, Value::Error(_)))
 }
 
+/// `attempted?` — M42 alias of `error?`. True if the value is an `error!`
+/// (i.e. `attempt`-shaped: a prior call returned an error value). Red
+/// parity; `none?` is the conventional `attempt`-failure check, but Red
+/// also exposes `attempted?` for explicit error-value testing.
+pub(crate) fn attempted_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "attempted?", |v| matches!(v, Value::Error(_)))
+}
+
 pub(crate) fn word_predicate(
     args: &[Value],
     _r: &RefineArgs,
@@ -506,6 +518,7 @@ pub(crate) fn register_word_predicate_natives(env: &mut Env) {
     reg(env, "none?", none_predicate);
     reg(env, "binary?", binary_predicate);
     reg(env, "error?", error_predicate);
+    reg(env, "attempted?", attempted_predicate);
 
     // Word-family predicates.
     reg(env, "word?", word_predicate);

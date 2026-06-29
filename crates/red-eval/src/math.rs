@@ -21,7 +21,7 @@
 
 use std::cell::Cell;
 
-use red_core::value::{FuncDef, Symbol, Value};
+use red_core::value::{ErrorValue, FuncDef, Symbol, Value};
 use red_core::{CompileErrorKind, Env, EvalError, NativeFn, RefineArgs};
 
 use crate::natives::{arity_err, type_name};
@@ -52,6 +52,29 @@ fn num_type_err(v: &Value) -> EvalError {
         found: type_name(v),
         span: v.span_or_default(),
     }
+}
+
+/// M42: build a structured `math` error (`type: 'math`, `code: 400`) for a
+/// division/modulo by zero. The `op` string fills the message body.
+fn math_by_zero(args: &[Value], op: &str) -> EvalError {
+    let span = args[0].span_or_default();
+    let near = if span.is_default() {
+        None
+    } else {
+        Some(Value::Block {
+            series: red_core::value::Series::new(Vec::new()),
+            span,
+        })
+    };
+    EvalError::Raised(std::rc::Rc::new(ErrorValue::new_structed(
+        format!("math error: {op} by zero"),
+        Some(400),
+        Some(Symbol::new("math")),
+        Vec::new(),
+        near,
+        None,
+        None,
+    )))
 }
 
 /// M38: char codepoint extracted from a `char!` value, for char arithmetic
@@ -158,10 +181,30 @@ fn num_binop(
         (Num::Int(x), Num::Int(y)) => match f_int(x, y) {
             Some(r) => Ok(Value::integer(r)),
             // `f_int` returns None to signal a domain error (e.g. div-by-zero).
-            None => Err(EvalError::Native {
-                message: format!("math error: {op} by zero"),
-                span: args[0].span_or_default(),
-            }),
+            // M42: raise a structured `math` error with a numeric code so
+            // `try [1 / 0]` produces an error with `type: 'math`.
+            None => {
+                let span = args[0].span_or_default();
+                let near = if span.is_default() {
+                    None
+                } else {
+                    Some(Value::Block {
+                        series: red_core::value::Series::new(Vec::new()),
+                        span,
+                    })
+                };
+                Err(EvalError::Raised(std::rc::Rc::new(
+                    ErrorValue::new_structed(
+                        format!("math error: {op} by zero"),
+                        Some(400),
+                        Some(Symbol::new("math")),
+                        Vec::new(),
+                        near,
+                        None,
+                        None,
+                    ),
+                )))
+            }
         },
         (Num::Int(x), Num::Float(y)) => Ok(Value::float(f_float(x as f64, y))),
         (Num::Float(x), Num::Int(y)) => Ok(Value::float(f_float(x, y as f64))),
@@ -252,37 +295,25 @@ pub(crate) fn modulo(
     match (a, b) {
         (Num::Int(x), Num::Int(y)) => {
             if y == 0 {
-                return Err(EvalError::Native {
-                    message: "math error: integer modulo by zero".into(),
-                    span: args[0].span_or_default(),
-                });
+                return Err(math_by_zero(args, "integer modulo"));
             }
             Ok(Value::integer(x % y))
         }
         (Num::Int(x), Num::Float(y)) => {
             if y == 0.0 {
-                return Err(EvalError::Native {
-                    message: "math error: float modulo by zero".into(),
-                    span: args[0].span_or_default(),
-                });
+                return Err(math_by_zero(args, "float modulo"));
             }
             Ok(Value::float((x as f64) % y))
         }
         (Num::Float(x), Num::Int(y)) => {
             if y == 0 {
-                return Err(EvalError::Native {
-                    message: "math error: float modulo by zero".into(),
-                    span: args[0].span_or_default(),
-                });
+                return Err(math_by_zero(args, "float modulo"));
             }
             Ok(Value::float(x % (y as f64)))
         }
         (Num::Float(x), Num::Float(y)) => {
             if y == 0.0 {
-                return Err(EvalError::Native {
-                    message: "math error: float modulo by zero".into(),
-                    span: args[0].span_or_default(),
-                });
+                return Err(math_by_zero(args, "float modulo"));
             }
             Ok(Value::float(x % y))
         }

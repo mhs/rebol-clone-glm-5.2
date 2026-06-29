@@ -81,8 +81,22 @@ impl std::error::Error for Error {}
 /// non-default span (i.e. a real source position). Synthetic errors with a
 /// zero span (or `EmptyInput`) omit the location and render just
 /// `*** Error: <msg>`.
+///
+/// M42: structured `EvalError::Raised` errors with a `type` word render as
+/// `*** Error: [loc: ]<type> error: <message>` (e.g. `math error: ...`).
+/// Message-only errors keep the plain `*** Error: <msg>` form.
 pub fn render_error(file: Option<&str>, src: &str, err: &Error) -> String {
-    let body = err.to_string();
+    // M42: structured errors render `<type> error: <message>` as the body.
+    let body = match err {
+        Error::Eval(EvalError::Raised(ev)) if ev.kind.is_some() => {
+            format!(
+                "{} error: {}",
+                ev.kind.as_ref().unwrap().as_str(),
+                ev.message
+            )
+        }
+        _ => err.to_string(),
+    };
     let Some(span) = err.span() else {
         return format!("*** Error: {body}");
     };

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::context::Context;
-use crate::value::{FuncDef, Series, Span, Symbol, Value};
+use crate::value::{ErrorValue, FuncDef, Series, Span, Symbol, Value};
 use crate::vm_ir::CompiledBlock;
 
 /// Bytecode compiler / VM-invariant failure kinds. Surfaced via
@@ -190,6 +190,11 @@ pub struct Env {
     /// Invalidated by `invalidate_native_index` whenever `natives` is mutated
     /// (currently only at `register_natives` time, before any VM run).
     pub natives_by_idx: Option<Rc<Vec<Rc<FuncDef>>>>,
+    /// M42: parallel `Vec<Symbol>` of native names, indexed identically to
+    /// `natives_by_idx`. Built lazily alongside `natives_by_idx` so the VM
+    /// can enrich raised errors with `where: <native name>` without a
+    /// reverse lookup into the `natives` HashMap.
+    pub native_names_by_idx: Option<Rc<Vec<Symbol>>>,
     /// M30.1.C: reusable scratch `Vec` for the VM's `frames` stack. Drained
     /// by `vm::run` via `std::mem::take` on entry, cleared + drained back on
     /// exit. Eliminates 1 heap allocation per `dispatch_block` call (was
@@ -259,6 +264,7 @@ impl Env {
             func_cache: HashMap::new(),
             block_cache: HashMap::new(),
             natives_by_idx: None,
+            native_names_by_idx: None,
             vm_frames_pool: Vec::new(),
             vm_stack_pool: Vec::new(),
             vm_locals_pool: Vec::new(),
@@ -322,6 +328,7 @@ impl Env {
     /// at startup, before any VM run).
     pub fn invalidate_native_index(&mut self) {
         self.natives_by_idx = None;
+        self.native_names_by_idx = None;
     }
 
     /// M31: enable per-instr VM tracing to `writer`. The VM appends one line
@@ -384,6 +391,13 @@ pub enum EvalError {
     Quit(i32),
     /// Generic native-reported error with a message.
     Native { message: String, span: Span },
+    /// M42: a structured error value raised by `cause-error` or synthesized
+    /// by the VM/walker when a `Native` error propagates. `try`/`attempt`/
+    /// `catch` unwrap this into a `Value::Error`. Carries the full Red field
+    /// set (code/type/args/near/where/by) via `ErrorValue`. The `near` field
+    /// provides the span (via its value's span) when set; otherwise `span()`
+    /// returns `None` and `render_error` omits the `file:line:col:` prefix.
+    Raised(Rc<ErrorValue>),
     /// M31: bytecode compiler or VM dispatch invariant violated. Carries the
     /// structured `CompileErrorKind` (so callers can match on it) and the
     /// offending span. Replaces the prior `EvalError::Native { message:
@@ -430,6 +444,7 @@ impl fmt::Display for EvalError {
             EvalError::Quit(code) => write!(f, "quit with exit code {code}"),
             EvalError::Native { message, .. } => write!(f, "{message}"),
             EvalError::Compile { kind, .. } => write!(f, "compile error: {kind}"),
+            EvalError::Raised(ev) => write!(f, "{}", ev.message),
         }
     }
 }
@@ -446,6 +461,7 @@ impl EvalError {
             | EvalError::Arity { span, .. }
             | EvalError::Native { span, .. }
             | EvalError::Compile { span, .. } => Some(*span),
+            EvalError::Raised(ev) => ev.near.as_ref().and_then(|v| v.span()),
             EvalError::Return(_)
             | EvalError::Break(_)
             | EvalError::Continue

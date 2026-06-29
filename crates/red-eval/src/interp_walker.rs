@@ -471,7 +471,13 @@ fn dispatch_call_with_refs(
     };
     let (args, refs) = collect_call_args(sym, &fd, leading_refs, data, i, env, span)?;
     let f = fd.native.unwrap();
-    f(&args, &refs, env)
+    // M42: enrich `Native`/`TypeError`/etc. errors into `Raised` with the
+    // native name (`where`) and call-site span (`near`). Centralizes
+    // structured-error construction so `try`/`catch` see a uniform payload.
+    match f(&args, &refs, env) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(crate::natives::enrich_error(e, Some(sym.clone()), span)),
+    }
 }
 
 /// A function-headed path (`copy/part [1 2 3] 2`) dispatches as a refined

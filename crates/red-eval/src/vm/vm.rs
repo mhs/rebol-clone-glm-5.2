@@ -38,6 +38,7 @@ use red_core::{CompileErrorKind, Context, Env, EvalError, RefineArgs};
 
 use crate::binding::{bind_function_body, deep_clone_series};
 use crate::interp::{call_user_func, eval_get_path, set_path_value};
+use crate::natives::enrich_error;
 use crate::natives::extract_spec;
 use crate::vm::compiler::{compile_block_for_func_body, stub_block, NativeRegistry};
 use crate::vm::lex::Scope;
@@ -86,7 +87,7 @@ const _: () = assert!(
 /// discarded here — M29 wires the VM into `run_source*` for CLI exit-code
 /// propagation).
 pub fn run(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
-    let natives_by_idx = build_natives_by_idx(env);
+    let (natives_by_idx, native_names_by_idx) = build_natives_by_idx(env);
     // M30.1.C: drain the reusable scratch Vecs from `env` instead of
     // allocating fresh ones. Each `dispatch_block`→`vm::run` call previously
     // allocated 2 Vecs (`frames` + `stack`); for a 1M-iteration `repeat`,
@@ -101,6 +102,7 @@ pub fn run(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
         frames: frames_pool,
         stack: stack_pool,
         natives_by_idx,
+        native_names_by_idx,
         ref_marks: Vec::new(),
         pending_refs: Vec::new(),
         cached_block: None,
@@ -140,7 +142,7 @@ pub fn run(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
 /// semantics (one entry per expression). Used by the `reduce` native in VM
 /// mode (M26).
 pub fn run_reduce(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
-    let natives_by_idx = build_natives_by_idx(env);
+    let (natives_by_idx, native_names_by_idx) = build_natives_by_idx(env);
     // M30.1.C: reuse the scratch Vecs (same drain/restore as `run`).
     let frames_pool = std::mem::take(&mut env.vm_frames_pool);
     let stack_pool = std::mem::take(&mut env.vm_stack_pool);
@@ -151,6 +153,7 @@ pub fn run_reduce(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalErro
         frames: frames_pool,
         stack: stack_pool,
         natives_by_idx,
+        native_names_by_idx,
         ref_marks: Vec::new(),
         pending_refs: Vec::new(),
         cached_block: None,
@@ -187,18 +190,22 @@ pub fn run_reduce(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalErro
 /// iterations = 100M refcount ops). Invalidated by `invalidate_native_index`
 /// when `env.natives` is mutated (at `register_natives` time, before any VM
 /// run).
-fn build_natives_by_idx(env: &mut Env) -> Rc<Vec<Rc<FuncDef>>> {
-    if let Some(cached) = &env.natives_by_idx {
-        // One Rc bump — no `Vec` alloc, no per-native `Rc::clone`.
-        return Rc::clone(cached);
+fn build_natives_by_idx(env: &mut Env) -> (Rc<Vec<Rc<FuncDef>>>, Rc<Vec<Symbol>>) {
+    if let (Some(funcs), Some(names)) = (&env.natives_by_idx, &env.native_names_by_idx) {
+        // One Rc bump each — no `Vec` alloc, no per-native `Rc::clone`.
+        return (Rc::clone(funcs), Rc::clone(names));
     }
-    let mut out: Vec<Rc<FuncDef>> = Vec::with_capacity(env.natives.len());
-    for fd in env.natives.values() {
-        out.push(Rc::clone(fd));
+    let mut funcs: Vec<Rc<FuncDef>> = Vec::with_capacity(env.natives.len());
+    let mut names: Vec<Symbol> = Vec::with_capacity(env.natives.len());
+    for (name, fd) in env.natives.iter() {
+        funcs.push(Rc::clone(fd));
+        names.push(name.clone());
     }
-    let rc = Rc::new(out);
-    env.natives_by_idx = Some(Rc::clone(&rc));
-    rc
+    let funcs_rc = Rc::new(funcs);
+    let names_rc = Rc::new(names);
+    env.natives_by_idx = Some(Rc::clone(&funcs_rc));
+    env.native_names_by_idx = Some(Rc::clone(&names_rc));
+    (funcs_rc, names_rc)
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +220,10 @@ struct Vm<'env> {
     /// M30: `Rc`-cloned from `Env::natives_by_idx` (one Rc bump per `vm::run`,
     /// not one `Vec` alloc + N `Rc::clone`s).
     natives_by_idx: Rc<Vec<Rc<FuncDef>>>,
+    /// M42: parallel native names, indexed identically to `natives_by_idx`.
+    /// Used to enrich `EvalError::Native` errors with `where: <native name>`
+    /// before re-raising as `EvalError::Raised`.
+    native_names_by_idx: Rc<Vec<Symbol>>,
     /// `(refinement_name, stack_height_at_mark)` for the currently-open
     /// `MarkRefine`/`EndRefine` region. `EndRefine` pops the topmost entry,
     /// collects `stack[height..]` into a `Vec<Value>`, truncates the stack,
@@ -1000,7 +1011,18 @@ impl<'env> Vm<'env> {
                 self.frame_gen = self.frame_gen.wrapping_add(1);
                 return Err(EvalError::Quit(code));
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                // M42: enrich `Native`/`TypeError`/`Arity`/`UnboundWord`
+                // errors into a structured `EvalError::Raised` with the
+                // native name (`where`) and call-site span (`near`). This
+                // centralizes error-structure construction so `try`/`catch`
+                // see a uniform `Raised` payload. Already-`Raised` errors
+                // propagate unchanged (they may carry richer fields from
+                // `cause-error` or math-specific classification).
+                let native_name = self.native_names_by_idx.get(native_idx).cloned();
+                let enriched = enrich_error(e, native_name, span);
+                return Err(enriched);
+            }
         }
         Ok(())
     }

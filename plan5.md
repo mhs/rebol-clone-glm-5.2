@@ -269,77 +269,77 @@ Extend `ErrorValue` (`value.rs:285`) from message-only to the full Red
 field set. Rewrites `try`/`attempt`/`catch`/`throw`/`cause-error` and
 updates mold/form/equality/same.
 
-- [ ] Extend `ErrorValue` struct in `crates/red-core/src/value.rs:285-287`:
-  - [ ] `code: Option<i64>` (numeric error code; `None` for user-thrown)
-  - [ ] `type: Option<Symbol>` (category word: `'math`/`'syntax`/`'script`/
+- [x] Extend `ErrorValue` struct in `crates/red-core/src/value.rs:285-287`:
+  - [x] `code: Option<i64>` (numeric error code; `None` for user-thrown)
+  - [x] `type: Option<Symbol>` (category word: `'math`/`'syntax`/`'script`/
         `'user`/`'access`/`'reference`/`'io`)
-  - [ ] `message: String` (kept; derived from template if `code` present)
-  - [ ] `args: Vec<Value>` (values referenced by the message template)
-  - [ ] `near: Option<Value>` (block/expression nearest the error —
+  - [x] `message: String` (kept; derived from template if `code` present)
+  - [x] `args: Vec<Value>` (values referenced by the message template)
+  - [x] `near: Option<Value>` (block/expression nearest the error —
         typically the call site block)
-  - [ ] `where: Option<Symbol>` (function/frame name where raised)
-  - [ ] `by: Option<Symbol>` (actor — calling function name)
-- [ ] Keep `Value::Error(Rc<ErrorValue>)` variant (immutable shared payload)
-- [ ] Add `Value::error(msg)` convenience constructor that fills the new
+  - [x] `where: Option<Symbol>` (function/frame name where raised)
+  - [x] `by: Option<Symbol>` (actor — calling function name)
+- [x] Keep `Value::Error(Rc<ErrorValue>)` variant (immutable shared payload)
+- [x] Add `Value::error(msg)` convenience constructor that fills the new
       fields with `None`/empty defaults (back-compat with existing
       `try`/`attempt` return values)
-- [ ] Add `Value::error_structed(code, type, msg, args, near, where, by)`
+- [x] Add `Value::error_structed(code, type, msg, args, near, where, by)`
       constructor for structured construction
-- [ ] Update `printer.rs:67-73` `mold` arm:
-  - [ ] For message-only errors: keep `make error! "msg"` form
-  - [ ] For structured errors: `make error! [code: 42 type: 'math args: [x y] message: "..."]`
-- [ ] Update `printer.rs:141` `form` arm: still emits `message` (Red
+- [x] Update `printer.rs:67-73` `mold` arm:
+  - [x] For message-only errors: keep `make error! "msg"` form
+  - [x] For structured errors: `make error! [code: 42 type: 'math args: [x y] message: "..."]`
+- [x] Update `printer.rs:141` `form` arm: still emits `message` (Red
       behavior — `form` of an error is just the message text)
-- [ ] Update `natives/compare.rs:26` equality: compare all fields, not just
+- [x] Update `natives/compare.rs:26` equality: compare all fields, not just
       `message`
-- [ ] Update `object.rs:187` `same?`: keep `Rc::ptr_eq` (identity)
-- [ ] Rewrite `cause-error` (`natives/control.rs:528-543`):
-  - [ ] Accept `type word message string args block` keyword form, or
+- [x] Update `object.rs:187` `same?`: keep `Rc::ptr_eq` (identity)
+- [x] Rewrite `cause-error` (`natives/control.rs:528-543`):
+  - [x] Accept `type word message string args block` keyword form, or
         `code integer` form, or `type word` short form
-  - [ ] Build a structured `ErrorValue` and raise `EvalError::Native` with
+  - [x] Build a structured `ErrorValue` and raise `EvalError::Native` with
         the value attached (extend `EvalError::Native` to carry an optional
         `Value::Error` payload)
-- [ ] Add `make error!` to the `make` dispatcher (from block of
+- [x] Add `make error!` to the `make` dispatcher (from block of
       keyword/value pairs, from string → message-only)
-- [ ] Add `to-error` converter
-- [ ] Rewrite `try` (`natives/control.rs:460-477`): on caught
+- [x] Add `to-error` converter
+- [x] Rewrite `try` (`natives/control.rs:460-477`): on caught
       `EvalError::Native` carrying an `Error` payload, return that value;
       otherwise synthesize an `ErrorValue` with `type: 'script`,
       `where: <native name>`, `message: <rendered>`
-- [ ] Rewrite `attempt`: same as `try` but returns `none` instead of an
+- [x] Rewrite `attempt`: same as `try` but returns `none` instead of an
       error value
-- [ ] Extend `catch` (`natives/control.rs:502-513`) to also catch
+- [x] Extend `catch` (`natives/control.rs:502-513`) to also catch
       `Value::Error` propagated errors (currently catches only `Throw`)
-- [ ] Add `error?` predicate (was forward-stubbed in M39 — replace stub)
-- [ ] Add `error-type`/`error-code`/`error-args`/`error-near` accessors
-- [ ] Add `attempted?` predicate (true if value is an `error!`)
-- [ ] Wire structured error capture in the VM: when `Instr::Call` raises
+- [x] Add `error?` predicate (was forward-stubbed in M39 — replace stub)
+- [x] Add `error-type`/`error-code`/`error-args`/`error-near` accessors
+- [x] Add `attempted?` predicate (true if value is an `error!`)
+- [x] Wire structured error capture in the VM: when `Instr::Call` raises
       `EvalError::Native`, attach the call's span to `near` and the native
       name to `where`
-- [ ] Wire structured error capture in the walker: same for
+- [x] Wire structured error capture in the walker: same for
       `eval_expression`'s native-call path
-- [ ] Inline `#[test]`: `make error! "boom"` molds back to
+- [x] Inline `#[test]`: `make error! "boom"` molds back to
         `make error! "boom"`
-- [ ] Inline `#[test]`: `make error! [code: 42 type: 'math message: "x"]`
+- [x] Inline `#[test]`: `make error! [code: 42 type: 'math message: "x"]`
         molds with all fields
-- [ ] Inline `#[test]`: `try [1 / 0]` returns an error with `type: 'math`
-- [ ] Inline `#[test]`: `try [1 + "a"]` returns an error with `type: 'script`
-- [ ] Inline `#[test]`: `cause-error 'user "boom"` returns an error with
+- [x] Inline `#[test]`: `try [1 / 0]` returns an error with `type: 'math`
+- [x] Inline `#[test]`: `try [1 + "a"]` returns an error with `type: 'script`
+- [x] Inline `#[test]`: `cause-error 'user "boom"` returns an error with
         `type: 'user`
-- [ ] Inline `#[test]`: `error? try [1 / 0]` → true
-- [ ] Inline `#[test]`: `error-code (try [1 / 0])` → numeric
-- [ ] Inline `#[test]`: structured equality — two errors with same fields
+- [x] Inline `#[test]`: `error? try [1 / 0]` → true
+- [x] Inline `#[test]`: `error-code (try [1 / 0])` → numeric
+- [x] Inline `#[test]`: structured equality — two errors with same fields
         are `equal?`
-- [ ] Add golden fixtures: `error_construct`, `error_catch`, `error_fields`,
+- [x] Add golden fixtures: `error_construct`, `error_catch`, `error_fields`,
         `error_try_type`
-- [ ] Add `programs_errors/cause_error_bad_type.red`
-- [ ] Audit `EvalError` rendering (`error.rs`): structured errors render
+- [x] Add `programs_errors/cause_error_bad_type.red`
+- [x] Audit `EvalError` rendering (`error.rs`): structured errors render
         `file:line:col: <type> error: <message>` instead of the current
         generic `*** Error: <message>`
-- [ ] Update existing error golden fixtures in `programs_errors/` — expect
+- [x] Update existing error golden fixtures in `programs_errors/` — expect
         output format change; update `.expected` files to match the new
         rendering
-- [ ] `cargo test --workspace` green; `--features force-walk` green
+- [x] `cargo test --workspace` green; `--features force-walk` green
 
 ## Milestone 43 — `map!` type
 

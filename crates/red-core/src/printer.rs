@@ -67,11 +67,60 @@ pub fn mold(value: &Value, out: &mut String) {
         }
         Value::Func(_) => out.push_str("#[function]"),
         Value::Error(err) => {
-            // Mold as `make error! "..."` — reparseable shape (the `make`
-            // native constructs an error value from a string). The message
-            // is quoted/escaped via the standard string mold.
-            out.push_str("make error! ");
-            mold_string(&err.message, out);
+            // M42: structured errors mold as `make error! [code: ... type:
+            // 'word args: [...] message: "..."]` (only non-default fields
+            // emitted). Message-only errors keep the back-compat
+            // `make error! "msg"` form so existing golden fixtures stay green.
+            if err.is_message_only() {
+                out.push_str("make error! ");
+                mold_string(&err.message, out);
+            } else {
+                out.push_str("make error! [");
+                let mut first = true;
+                if let Some(code) = err.code {
+                    use std::fmt::Write;
+                    let _ = write!(out, "{}code: {}", sep(&mut first), code);
+                }
+                if let Some(kind) = &err.kind {
+                    out.push_str(&sep(&mut first));
+                    out.push_str("type: ");
+                    out.push('\'');
+                    out.push_str(kind.as_str());
+                }
+                if !err.args.is_empty() {
+                    out.push_str(&sep(&mut first));
+                    out.push_str("args: [");
+                    let arg_block = Value::Block {
+                        series: crate::value::Series::new(err.args.clone()),
+                        span: crate::value::Span::default(),
+                    };
+                    mold(&arg_block, out);
+                    out.push(']');
+                }
+                {
+                    out.push_str(&sep(&mut first));
+                    out.push_str("message: ");
+                    mold_string(&err.message, out);
+                }
+                if let Some(cause) = &err.cause {
+                    out.push_str(&sep(&mut first));
+                    out.push_str("where: ");
+                    out.push('\'');
+                    out.push_str(cause.as_str());
+                }
+                if let Some(by) = &err.by {
+                    out.push_str(&sep(&mut first));
+                    out.push_str("by: ");
+                    out.push('\'');
+                    out.push_str(by.as_str());
+                }
+                if let Some(near) = &err.near {
+                    out.push_str(&sep(&mut first));
+                    out.push_str("near: ");
+                    mold(near, out);
+                }
+                out.push(']');
+            }
         }
         Value::Path { parts, .. } => mold_path_parts(parts, None, None, out),
         Value::GetPath { parts, .. } => mold_path_parts(parts, Some(':'), None, out),
@@ -249,6 +298,19 @@ fn form_path_parts(parts: &[Value], prefix: Option<char>, suffix: Option<char>, 
     }
     if let Some(s) = suffix {
         out.push(s);
+    }
+}
+
+/// M42 helper: emit a leading space separator for `make error! [...]` field
+/// runs. The first call returns `""` so the first field has no leading space;
+/// subsequent calls return `" "` so fields are space-separated. The closure
+/// captures `&mut first` to flip the flag.
+fn sep(first: &mut bool) -> String {
+    if *first {
+        *first = false;
+        String::new()
+    } else {
+        " ".to_string()
     }
 }
 

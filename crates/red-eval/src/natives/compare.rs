@@ -25,7 +25,26 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::String8 { bytes: x, .. }, Value::String8 { bytes: y, .. }) => x == y,
         (Value::None, Value::None) => true,
         (Value::Logic(x), Value::Logic(y)) => x == y,
-        (Value::Error(a), Value::Error(b)) => a.message == b.message,
+        (Value::Error(a), Value::Error(b)) => {
+            // M42: structural equality — compare all fields. `args`/`near`
+            // carry `Value`s (no `PartialEq` impl), so compare them via
+            // `values_equal` recursively.
+            a.message == b.message
+                && a.code == b.code
+                && a.kind == b.kind
+                && a.cause == b.cause
+                && a.by == b.by
+                && a.args.len() == b.args.len()
+                && a.args
+                    .iter()
+                    .zip(b.args.iter())
+                    .all(|(x, y)| values_equal(x, y))
+                && match (&a.near, &b.near) {
+                    (None, None) => true,
+                    (Some(x), Some(y)) => values_equal(x, y),
+                    _ => false,
+                }
+        }
         (Value::Object(a), Value::Object(b)) => {
             // Shallow value equality: same words, same slot values.
             let a = a.borrow();

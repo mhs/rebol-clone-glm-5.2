@@ -3,8 +3,11 @@
 //!
 //! Excluded variants (documented POC gaps):
 //! - `Func` — molds as `#[function]`, not reparseable.
-//! - `Error` — molds as `make error! "..."`, not reparseable (the `make`
-//!   native runs at eval time, not parse time).
+//! - `Error` — molds as `make error! "..."` (or `make error! [...]` for
+//!   structured errors), which parses to a block of words (the `make`
+//!   native runs at eval time, not parse time). Round-trip would require
+//!   the parser to fold `make error!` into an `Error` value, which is out
+//!   of scope for the printer property test.
 //! - `NaN`/`inf` floats — no lexer literal for them.
 //! - Series with `index != 0` — mold renders from the cursor, so a positioned
 //!   series doesn't round-trip to its head form.

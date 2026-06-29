@@ -24,6 +24,8 @@
 //! `pub(crate)` so the rest of the crate (`math.rs`, `parse.rs`, `vm::*`,
 //! …) can keep importing them as `crate::natives::{truthy, …}`.
 
+use std::rc::Rc;
+
 use red_core::value::{Symbol, Value};
 use red_core::EvalError;
 
@@ -36,8 +38,72 @@ mod registry;
 mod words;
 
 pub(crate) use compare::values_equal;
+pub(crate) use control::parse_error_block_public;
 pub(crate) use func::{extract_spec, func_native, FuncSpec};
 pub use registry::{install_constants, register_natives};
+
+// ---------------------------------------------------------------------------
+// M42: structured error enrichment
+// ---------------------------------------------------------------------------
+
+/// Wrap a catchable `EvalError` into an `EvalError::Raised` carrying a
+/// structured `ErrorValue`. Used by the VM `Call` arm and the walker's
+/// native-call path so that `try`/`catch` see a uniform `Raised` payload.
+///
+/// - `EvalError::Raised` passes through unchanged (already structured — may
+///   carry richer fields from `cause-error` or math-specific classification).
+/// - `EvalError::Native { message, span }` → synthesized with
+///   `type: 'script`, `where: native_name`, `near: span-block`.
+/// - `EvalError::TypeError`/`Arity`/`UnboundWord`/`Compile` → synthesized
+///   with `type: 'script`, `where: native_name`, `near: span-block`, and
+///   the rendered message body.
+/// - Control-flow unwinds (`Return`/`Break`/`Continue`/`Throw`/`Quit`)
+///   pass through unchanged.
+pub(crate) fn enrich_error(
+    e: EvalError,
+    native_name: Option<Symbol>,
+    span: red_core::value::Span,
+) -> EvalError {
+    match e {
+        // Already structured — pass through.
+        raised @ EvalError::Raised(_) => raised,
+        // Control flow — pass through.
+        flow @ (EvalError::Return(_)
+        | EvalError::Break(_)
+        | EvalError::Continue
+        | EvalError::Throw(_)
+        | EvalError::Quit(_)) => flow,
+        // Specific error variants — pass through so callers/tests can match
+        // on them. `try` synthesizes these into a structured `ErrorValue`
+        // with `type: 'script` via its fallback arm.
+        specific @ (EvalError::UnboundWord { .. }
+        | EvalError::TypeError { .. }
+        | EvalError::Arity { .. }
+        | EvalError::Compile { .. }) => specific,
+        // Generic `Native` errors — synthesize a structured `ErrorValue` with
+        // `type: 'script`, `where: native_name`, `near: span-block`.
+        EvalError::Native { message, .. } => {
+            use red_core::value::ErrorValue;
+            let near = if span.is_default() {
+                None
+            } else {
+                Some(Value::Block {
+                    series: red_core::value::Series::new(Vec::new()),
+                    span,
+                })
+            };
+            EvalError::Raised(Rc::new(ErrorValue::new_structed(
+                message,
+                None,
+                Some(Symbol::new("script")),
+                Vec::new(),
+                near,
+                native_name,
+                None,
+            )))
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Shared helpers (used by every sub-module + across the crate)
@@ -924,5 +990,79 @@ mod tests {
         );
         // None matches only `none!` (no umbrella).
         assert_eq!(mold_to_string(&val("types-of none")), "[none!]");
+    }
+
+    // --- M42 error value tests ---
+
+    #[test]
+    fn m42_make_error_string_molds_back() {
+        assert_eq!(
+            mold_to_string(&val("make error! \"boom\"")),
+            "make error! \"boom\""
+        );
+    }
+
+    #[test]
+    fn m42_make_error_structured_molds_all_fields() {
+        let out = mold_to_string(&val("make error! [code: 42 type: 'math message: \"x\"]"));
+        assert!(out.contains("code: 42"), "got: {out}");
+        assert!(out.contains("type: 'math"), "got: {out}");
+        assert!(out.contains("message: \"x\""), "got: {out}");
+    }
+
+    #[test]
+    fn m42_try_div_zero_returns_math_error() {
+        let v = val("try [1 / 0]");
+        assert!(matches!(v, Value::Error(_)));
+        let ev = match v {
+            Value::Error(ev) => ev,
+            _ => unreachable!(),
+        };
+        assert_eq!(ev.kind.as_ref().map(|s| s.as_str()), Some("math"));
+    }
+
+    #[test]
+    fn m42_try_type_error_returns_script_error() {
+        let v = val("try [1 + \"a\"]");
+        assert!(matches!(v, Value::Error(_)));
+        let ev = match v {
+            Value::Error(ev) => ev,
+            _ => unreachable!(),
+        };
+        assert_eq!(ev.kind.as_ref().map(|s| s.as_str()), Some("script"));
+    }
+
+    #[test]
+    fn m42_cause_error_with_type() {
+        let v = val("try [cause-error 'user \"boom\"]");
+        let ev = match v {
+            Value::Error(ev) => ev,
+            _ => unreachable!(),
+        };
+        assert_eq!(ev.kind.as_ref().map(|s| s.as_str()), Some("user"));
+        assert_eq!(ev.message, "boom");
+    }
+
+    #[test]
+    fn m42_error_predicate_true_for_try_error() {
+        assert_eq!(mold_to_string(&val("error? try [1 / 0]")), "true");
+        assert_eq!(mold_to_string(&val("error? 5")), "false");
+    }
+
+    #[test]
+    fn m42_error_code_numeric_for_div_zero() {
+        let v = val("error-code (try [1 / 0])");
+        assert!(matches!(v, Value::Integer { .. }));
+    }
+
+    #[test]
+    fn m42_structured_equality() {
+        // Two structured errors with same fields should be equal?.
+        let src = r#"
+            a: make error! [code: 42 type: 'math message: "x"]
+            b: make error! [code: 42 type: 'math message: "x"]
+            a = b
+        "#;
+        assert_eq!(mold_to_string(&val(src)), "true");
     }
 }

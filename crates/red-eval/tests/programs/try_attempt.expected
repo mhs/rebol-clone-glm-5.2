@@ -1,4 +1,4 @@
-make error! "expected integer! or float!, found string!"
+make error! [type: 'script message: "expected integer! or float!, found string!"]
 none
 3
 3

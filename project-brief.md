@@ -150,7 +150,7 @@ enum Value {
     File { path: Rc<str>, span: Span },                  // %foo/bar     — M20
     Url { url: Rc<str>, span: Span },                    // http://…     — M20
     String8(Vec<u8>),                        // binary! (POC stub — deferred)
-    Error(Rc<ErrorValue>),                   // caught error value — M16
+    Error(Rc<ErrorValue>),                   // caught error value — M16 (M42: full field set)
     Object(Rc<RefCell<ObjectDef>>),          // make object! — M18 (synthetic, no span)
 }
 
@@ -244,12 +244,12 @@ binding, not just dynamic lookup.
 - **Closures** (`closure!`) deferred; `func` uses shallow copy of args on
   each call.
 - Known gap (v0.3): `char!`, `map!`, `pair!`, `tuple!`, `date!`, `bitset!`,
-  full `binary!` (only the `String8` stub exists), modules/`import`, the
-  structured error model (code/type/args — basic `Value::Error` IS in v0.2),
+  full `binary!` (only the `String8` stub exists), modules/`import`,
   `compose`, the full port model, trig math, and `parse` advanced rules
-  (`collect`/`keep`/`match`/`case` flag) remain deferred. Block-integer
-  SetPath (`b/2: 99`) is also unreachable from source (lexer can't tokenize
-  `2:`). See `plan2.md`.
+  (`collect`/`keep`/`match`/`case` flag) remain deferred. The structured
+  error model (`code`/`type`/`args`/`near`/`where`/`by`) IS in v0.4 (M42).
+  Block-integer SetPath (`b/2: 99`) is also unreachable from source (lexer
+  can't tokenize `2:`). See `plan2.md`.
 
 ### Spans
 Each `Block`/`Paren` retains the span of its `[...]`/`(...)` delimiters;
@@ -547,4 +547,5 @@ A small `tests/common/mod.rs` helper in each crate walks a directory and generat
 - Block-integer SetPath (`b/2: 99`) is unreachable from source (lexer gap);
   object-field SetPath works.
 - Basic error-as-value (`Value::Error` + `try`/`catch`/`throw`) IS in v0.2;
-  the structured error model (code/type/args) is deferred.
+  the structured error model (`code`/`type`/`args`/`near`/`where`/`by`)
+  landed in v0.4 (M42).

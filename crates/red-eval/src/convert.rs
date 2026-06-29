@@ -415,6 +415,7 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
         "url!" | "url" => make_url(spec)?,
         "char!" | "char" => make_char(spec)?,
         "binary!" | "binary" => make_binary(spec)?,
+        "error!" | "error" => return make_error(spec),
         "object!" | "object" => return crate::object::make_object(spec, env),
         "function!" | "function" => {
             // Original behavior: spec is a packed `[[spec][body]]` block.
@@ -665,6 +666,40 @@ fn make_binary(spec: &Value) -> Result<Value, EvalError> {
     }
 }
 
+/// `make error! <value>` — M42. Two forms:
+/// - `make error! "msg"` → message-only `ErrorValue`.
+/// - `make error! [code: 42 type: 'math message: "..." args: [...]]` →
+///   structured `ErrorValue` (delegates to `parse_error_block` in
+///   `control.rs` via a shared helper to avoid duplication).
+fn make_error(spec: &Value) -> Result<Value, EvalError> {
+    match spec {
+        Value::String { s, .. } => Ok(Value::error(s.to_string())),
+        Value::Block { series, .. } | Value::Paren { series, .. } => {
+            let ev = crate::natives::parse_error_block_public(series, spec.span_or_default())?;
+            Ok(Value::Error(std::rc::Rc::new(ev)))
+        }
+        // Allow molding an existing error through `make error! err` (id).
+        Value::Error(_) => Ok(spec.clone()),
+        other => Err(EvalError::TypeError {
+            expected: "string! or block!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
+/// `to-error value` — M42. Coerce to `error!`. From a string → message-only;
+/// from an existing `error!` → identity; from a block → parse keyword pairs.
+fn to_error(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let spec = args.first().ok_or_else(|| EvalError::Arity {
+        native: Symbol::new("to-error"),
+        expected: 1,
+        got: 0,
+        span: Span::default(),
+    })?;
+    make_error(spec)
+}
+
 /// `to-binary value` — coerce to `binary!`. Same shape as `make_binary` but
 /// a conversion (no capacity-hint form for `integer!`).
 fn to_binary(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
@@ -703,6 +738,7 @@ fn to_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
         "url!" | "url" => to_url(one, &RefineArgs::empty(), env),
         "char!" | "char" => to_char(one, &RefineArgs::empty(), env),
         "binary!" | "binary" => to_binary(one, &RefineArgs::empty(), env),
+        "error!" | "error" => to_error(one, &RefineArgs::empty(), env),
         other => Err(EvalError::Native {
             message: format!("to: {other:?} type not supported in POC"),
             span: args[0].span_or_default(),
@@ -766,6 +802,7 @@ pub fn register_convert_natives(env: &mut Env) {
     reg(env, "to-url", to_url as NF, 1);
     reg(env, "to-char", to_char as NF, 1);
     reg(env, "to-binary", to_binary as NF, 1);
+    reg(env, "to-error", to_error as NF, 1);
 
     // make / to (arity 2)
     reg(env, "make", make_native as NF, 2);
@@ -773,6 +810,87 @@ pub fn register_convert_natives(env: &mut Env) {
 
     // form (arity 1)
     reg(env, "form", form_native as NF, 1);
+
+    // M42 error accessors (arity 1): return the field or `none`.
+    reg(env, "error-type", error_type_native as NF, 1);
+    reg(env, "error-code", error_code_native as NF, 1);
+    reg(env, "error-args", error_args_native as NF, 1);
+    reg(env, "error-near", error_near_native as NF, 1);
+}
+
+/// `error-type err` → the `type` word (as a `LitWord`), or `none`.
+fn error_type_native(args: &[Value], _r: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "error-type", 1, args.len()));
+    }
+    match &args[0] {
+        Value::Error(ev) => match &ev.kind {
+            Some(sym) => Ok(Value::LitWord {
+                sym: sym.clone(),
+                span: Span::default(),
+            }),
+            None => Ok(Value::None),
+        },
+        other => Err(EvalError::TypeError {
+            expected: "error!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
+/// `error-code err` → the numeric code as an `integer!`, or `none`.
+fn error_code_native(args: &[Value], _r: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "error-code", 1, args.len()));
+    }
+    match &args[0] {
+        Value::Error(ev) => match ev.code {
+            Some(n) => Ok(Value::integer(n)),
+            None => Ok(Value::None),
+        },
+        other => Err(EvalError::TypeError {
+            expected: "error!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
+/// `error-args err` → the `args` block, or empty block.
+fn error_args_native(args: &[Value], _r: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "error-args", 1, args.len()));
+    }
+    match &args[0] {
+        Value::Error(ev) => Ok(Value::Block {
+            series: Series::new(ev.args.clone()),
+            span: Span::default(),
+        }),
+        other => Err(EvalError::TypeError {
+            expected: "error!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
+/// `error-near err` → the `near` value, or `none`.
+fn error_near_native(args: &[Value], _r: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "error-near", 1, args.len()));
+    }
+    match &args[0] {
+        Value::Error(ev) => match &ev.near {
+            Some(v) => Ok(v.clone()),
+            None => Ok(Value::None),
+        },
+        other => Err(EvalError::TypeError {
+            expected: "error!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -88,7 +88,15 @@ pub struct RefineArgs {
 }
 // API: RefineArgs::empty(), from_pairs(Vec), has(&Symbol) -> bool, get(&Symbol) -> Option<&[Value]>
 
-pub struct ErrorValue { pub message: String }   // M16; fuller error model (code/type/args) deferred
+pub struct ErrorValue {                          // M42: full Red field set
+    pub message: String,                          // derived/user message body
+    pub code: Option<i64>,                        // numeric error code
+    pub kind: Option<Symbol>,                     // category word ('math/'script/'user/'io/…)
+    pub args: Vec<Value>,                         // values referenced by the template
+    pub near: Option<Value>,                      // call-site block/expression
+    pub cause: Option<Symbol>,                    // function/frame name where raised
+    pub by: Option<Symbol>,                       // actor — calling function name
+}
 
 pub struct ObjectDef {                          // M18
     pub ctx: Rc<Context>,
@@ -406,6 +414,7 @@ pub enum EvalError {
     Throw(Value),                  // M16: `throw` / `catch` unwind
     Quit(i32),                     // M16: `exit` / `quit` unwind (process exit code)
     Native { message: String, span: Span },
+    Raised(Rc<ErrorValue>),         // M42: structured error (cause-error / synthesized)
 }
 ```
 
@@ -416,7 +425,8 @@ is just `pub use red_core::{Binding, CallFrame, Context, Env, EvalError,
 FuncDef, NativeFn, RefineArgs};`.
 
 `EvalError::span()` returns `Some(span)` for `UnboundWord`/`TypeError`/
-`Arity`/`Native` and `None` for every control-flow unwind (`Return`/`Break`/
+`Arity`/`Native`/`Compile`, the `near` value's span for `Raised` (if set),
+and `None` for every control-flow unwind (`Return`/`Break`/
 `Continue`/`Throw`/`Quit`). `EvalError::Display` renders just the message
 body (no `*** Error:` prefix, no location). The `render_error(file:
 Option<&str>, src: &str, err: &Error)` function in `red-core/src/error.rs`
@@ -846,20 +856,31 @@ main levers:
 - **No precedence parsing**: Red is prefix/eager, so the parser has no
   expression grammar — every value is one token (or one bracketed group).
 - **Printer round-trip gaps (POC)**: `Func` molds as `#[function]`,
-  `String8` as `#{hex}`, `Error` as `make error! "..."`, and `NaN`/`inf`
-  floats have no lexer literal — none reparse. The property test in
-  `red-core/tests/property.rs` excludes these variants (and `Object`,
-  which is not source-origin). Positioned series (`index != 0`) also
-  don't round-trip to their head form (mold renders from the cursor).
+  `String8` as `#{hex}`, `Error` as `make error! "..."` (message-only) or
+  `make error! [code: ... type: ... message: "..."]` (structured), and
+  `NaN`/`inf` floats have no lexer literal — none reparse as `Value`s
+  directly (the `make` native runs at eval time, not parse time). The
+  property test in `red-core/tests/property.rs` excludes these variants
+  (and `Object`, which is not source-origin). Positioned series
+  (`index != 0`) also don't round-trip to their head form (mold renders
+  from the cursor).
 - **v0.4 additions** (M38, landed): `char!` type (`Value::Char`,
   `#"..."` literals, `char?`/`to-char`/`make char!`, char arithmetic,
   string char pick/poke). Block-integer SetPath (`b/2: 99`) and string
   char poke (`s/2: #"X"`) now work (integer SetPath lexing + compiler
   `SetPath` Const bug fix). `append`/`insert` accept `string!`/`char!`.
+- **v0.4 additions** (M42, landed): first-class `error!` values.
+  `ErrorValue` extended to the full Red field set (`message`/`code`/`type`/
+  `args`/`near`/`where`/`by`); new `EvalError::Raised(Rc<ErrorValue>)`
+  transport; `try`/`attempt`/`catch` rewritten to unwrap structured
+  payloads; `cause-error` accepts 1/2/4-arg + block forms; `make error!`
+  + `to-error` + `error-type`/`error-code`/`error-args`/`error-near`
+  accessors + `attempted?` predicate; VM/walker auto-enrich `Native`
+  errors with `where`/`near` via `enrich_error`; `render_error` emits
+  `<type> error: <message>` for structured errors.
 - **Deferred to v0.4+** (acknowledged, not built): `map!`,
   `pair!`, `tuple!`, `date!`, `bitset!`, full `binary!` (only the `String8`
-  stub exists), modules/`import`, the structured error model
-  (code/type/args — basic `Value::Error` IS in v0.2), `compose`, the full
+  stub exists), modules/`import`, `compose`, the full
   port model, trig math, and `parse` advanced rules
   (`collect`/`keep`/`match`/`case` flag).
 - **Instrumentation (`stats` feature)**: `red-eval/stats` re-exports

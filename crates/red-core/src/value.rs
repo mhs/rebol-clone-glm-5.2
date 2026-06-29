@@ -283,11 +283,84 @@ pub enum Value {
     Object(Rc<RefCell<ObjectDef>>),
 }
 
-/// Payload of a `Value::Error`. POC keeps just the message body; a fuller
-/// error model (code/type/args) is deferred to v0.3 per `plan2.md`.
+/// Payload of a `Value::Error`. M42 extends the prior message-only stub to
+/// the full Red field set: `code`/`type`/`args`/`near`/`where`/`by`. The
+/// `message` field is kept (derived from the template when `code` is set,
+/// or the user-supplied string otherwise) so `form` of an error stays just
+/// the message text.
+///
+/// `PartialEq` is intentionally NOT derived: `args`/`near` carry `Value`s,
+/// which have no `PartialEq` impl (equality lives in `red-eval::compare`).
+/// Structural equality for `Value::Error` is hand-rolled in `compare.rs`.
 #[derive(Clone, Debug)]
 pub struct ErrorValue {
     pub message: String,
+    /// Numeric error code; `None` for user-thrown errors with no code.
+    pub code: Option<i64>,
+    /// Category word: `'math`/`'syntax`/`'script`/`'user`/`'access`/
+    /// `'reference`/`'io`. `None` for message-only errors.
+    pub kind: Option<Symbol>,
+    /// Values referenced by the message template (e.g. the offending
+    /// operands). May be empty.
+    pub args: Vec<Value>,
+    /// Block/expression nearest the error — typically the call site. Stored
+    /// as a `Value` (usually a `Block` or `None` when not captured).
+    pub near: Option<Value>,
+    /// Function/frame name where the error was raised. `None` when not
+    /// captured.
+    pub cause: Option<Symbol>,
+    /// Actor — the calling function name. `None` when not captured.
+    pub by: Option<Symbol>,
+}
+
+impl ErrorValue {
+    /// Build a message-only error value (all structured fields `None`/empty).
+    /// Back-compat with the M16 `Value::error(msg)` shape.
+    pub fn new_message(message: impl Into<String>) -> Self {
+        ErrorValue {
+            message: message.into(),
+            code: None,
+            kind: None,
+            args: Vec::new(),
+            near: None,
+            cause: None,
+            by: None,
+        }
+    }
+
+    /// Build a structured error value with all fields. `message` is the
+    /// user-visible body; the other fields populate the structured slots.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_structed(
+        message: impl Into<String>,
+        code: Option<i64>,
+        kind: Option<Symbol>,
+        args: Vec<Value>,
+        near: Option<Value>,
+        cause: Option<Symbol>,
+        by: Option<Symbol>,
+    ) -> Self {
+        ErrorValue {
+            message: message.into(),
+            code,
+            kind,
+            args,
+            near,
+            cause,
+            by,
+        }
+    }
+
+    /// True if every structured field is `None`/empty — i.e. this is a
+    /// message-only error that molds as `make error! "msg"`.
+    pub fn is_message_only(&self) -> bool {
+        self.code.is_none()
+            && self.kind.is_none()
+            && self.args.is_empty()
+            && self.near.is_none()
+            && self.cause.is_none()
+            && self.by.is_none()
+    }
 }
 
 /// An object: an ordered word→value context plus an optional prototype
@@ -503,12 +576,28 @@ impl Value {
         }
     }
 
-    /// Constructor shorthand for an error value carrying `message` (zero span,
-    /// synthetic).
+    /// Constructor shorthand for a message-only error value (zero span,
+    /// synthetic). Back-compat with the M16 shape; M42 adds the structured
+    /// fields via [`Value::error_structed`].
     pub fn error(message: impl Into<String>) -> Self {
-        Value::Error(Rc::new(ErrorValue {
-            message: message.into(),
-        }))
+        Value::Error(Rc::new(ErrorValue::new_message(message)))
+    }
+
+    /// Constructor shorthand for a structured error value. Fills the
+    /// M42 field set (`code`/`type`/`args`/`near`/`where`/`by`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn error_structed(
+        message: impl Into<String>,
+        code: Option<i64>,
+        kind: Option<Symbol>,
+        args: Vec<Value>,
+        near: Option<Value>,
+        cause: Option<Symbol>,
+        by: Option<Symbol>,
+    ) -> Self {
+        Value::Error(Rc::new(ErrorValue::new_structed(
+            message, code, kind, args, near, cause, by,
+        )))
     }
 
     /// Constructor shorthand for a binary! literal with a zero span
