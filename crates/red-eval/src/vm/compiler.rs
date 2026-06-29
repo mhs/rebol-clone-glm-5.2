@@ -697,9 +697,10 @@ fn compile_prefix(
             c.emit(Instr::Const(idx));
         }
 
-        // SetPath `obj/field: value` — compile RHS, then `SetPath`.
+        // SetPath `obj/field: value` — push path, compile RHS, then `SetPath`.
         Value::SetPath { .. } => {
             let path_idx = c.push_const(cur.clone());
+            c.emit(Instr::Const(path_idx));
             // RHS is the next expression.
             if *i >= data.len() {
                 return Err(CompileError {
@@ -711,9 +712,6 @@ fn compile_prefix(
             // `SetPath` pops the path and the RHS; the written value remains
             // on the stack (matches the walker, which returns the RHS).
             c.emit(Instr::SetPath);
-            // The path Const was pushed but consumed by SetPath; mark it used
-            // by emitting nothing further — the RHS value is the result.
-            let _ = path_idx; // (path Const is consumed by the SetPath handler in M25)
         }
 
         // Paren: compiled eagerly in place (its series is code, not data).

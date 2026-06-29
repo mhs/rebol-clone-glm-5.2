@@ -214,6 +214,27 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
         if c.is_ascii_digit() || (c == b'-' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit())
         {
             let (end, kind) = scan_number(src, &mut i)?;
+            // M38 follow-up: integer SetPath. `2:` lexes as `Integer(2)` +
+            // `SetWord("2")` with overlapping spans (mirrors `obj/field:`
+            // which lexes as `Refinement(field)` + `SetWord(field)`). The
+            // parser folds the run into a `SetPath` via span-overlap
+            // detection. Only a single trailing `:` triggers this (`::`
+            // falls through). Floats are excluded (Red has no float set-path).
+            if let TokenKind::Integer(n) = kind {
+                if i < bytes.len() && bytes[i] == b':' && bytes.get(i + 1) != Some(&b':') {
+                    out.push(Token {
+                        kind: TokenKind::Integer(n),
+                        span: Span::new(start, end),
+                    });
+                    let setword_span = Span::new(start, end + 1);
+                    i += 1; // consume the `:`
+                    out.push(Token {
+                        kind: TokenKind::SetWord(Symbol::new(&src[start..end])),
+                        span: setword_span,
+                    });
+                    continue;
+                }
+            }
             out.push(Token {
                 kind,
                 span: Span::new(start, end),

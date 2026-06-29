@@ -427,6 +427,19 @@ fn append(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Ev
     if args.len() != 2 {
         return Err(arity(args, "append", 2, args.len()));
     }
+    // M38 follow-up: string! series. Strings are immutable `Rc<str>` so we
+    // build a new string (documented POC gap: no positioned-string series,
+    // so the mutation is NOT visible to aliases — use `s: append s value`).
+    if let Value::String { s, span } = &args[0] {
+        let only = refs.has(&Symbol::new("only"));
+        let mut out = String::with_capacity(s.len() + 4);
+        out.push_str(s);
+        append_to_string(&mut out, &args[1], only)?;
+        return Ok(Value::String {
+            s: Rc::from(out.as_str()),
+            span: *span,
+        });
+    }
     let (series, span, is_paren) = extract_series(&args[0])?;
     let only = refs.has(&Symbol::new("only"));
     if only {
@@ -435,6 +448,31 @@ fn append(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Ev
         append_value(&series, &args[1]);
     }
     Ok(mk_series(series, span, is_paren))
+}
+
+/// Append `value` to a string buffer. A `char!` pushes its codepoint; a
+/// `string!` concatenates; a `block!`/`paren!` splices (each element must
+/// be a `char!` or `string!`). `/only` prevents block splicing (pushes the
+/// block's `form` as a string fragment instead). Other types error.
+fn append_to_string(out: &mut String, value: &Value, only: bool) -> Result<(), EvalError> {
+    match value {
+        Value::Char { c, .. } => out.push(*c),
+        Value::String { s, .. } => out.push_str(s),
+        Value::Block { series, .. } | Value::Paren { series, .. } if !only => {
+            let data = series.data.borrow();
+            for v in data.iter().skip(series.index) {
+                append_to_string(out, v, false)?;
+            }
+        }
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "char!, string!, or block! of chars/strings",
+                found: type_name(other),
+                span: other.span_or_default(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Append `value` to `series`'s shared storage. A block value is spliced
@@ -453,10 +491,21 @@ fn append_value(series: &Series, value: &Value) {
     }
 }
 
-/// `insert series value` — insert `value` at the cursor.
+/// `insert series value` — insert `value` at the cursor. For strings (no
+/// cursor in POC), inserts at the head.
 fn insert(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity(args, "insert", 2, args.len()));
+    }
+    // M38 follow-up: string! series. No cursor → insert at head.
+    if let Value::String { s, span } = &args[0] {
+        let mut out = String::with_capacity(s.len() + 4);
+        append_to_string(&mut out, &args[1], false)?;
+        out.push_str(s);
+        return Ok(Value::String {
+            s: Rc::from(out.as_str()),
+            span: *span,
+        });
     }
     let (series, span, is_paren) = extract_series(&args[0])?;
     series

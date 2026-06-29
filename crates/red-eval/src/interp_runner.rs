@@ -634,6 +634,47 @@ mod tests {
     }
 
     #[test]
+    fn string_char_poke_via_set_path() {
+        // M38 follow-up: `s/2: #"X"` now works (integer SetPath lexes).
+        assert_eq!(mold_to_string(&run("s: \"abc\" s/2: #\"X\" s")), "\"aXc\"");
+        assert_eq!(mold_to_string(&run("s: \"abc\" s/-1: #\"Z\" s")), "\"abZ\"");
+    }
+
+    #[test]
+    fn block_integer_set_path() {
+        // M38 follow-up: `b/2: 99` now works (integer SetPath lexes).
+        assert_eq!(mold_to_string(&run("b: [1 2 3] b/2: 99 b")), "[1 99 3]");
+    }
+
+    #[test]
+    fn append_string_with_string() {
+        assert_eq!(mold_to_string(&run("append \"foo\" \"bar\"")), "\"foobar\"");
+    }
+
+    #[test]
+    fn append_string_with_char() {
+        assert_eq!(mold_to_string(&run("append \"foo\" #\"s\"")), "\"foos\"");
+    }
+
+    #[test]
+    fn append_string_with_block_splice() {
+        assert_eq!(
+            mold_to_string(&run("append \"foo\" [#\"a\" #\"b\"]")),
+            "\"fooab\""
+        );
+    }
+
+    #[test]
+    fn insert_string_with_string() {
+        assert_eq!(mold_to_string(&run("insert \"foo\" \"bar\"")), "\"barfoo\"");
+    }
+
+    #[test]
+    fn insert_string_with_char() {
+        assert_eq!(mold_to_string(&run("insert \"foo\" #\"X\"")), "\"Xfoo\"");
+    }
+
+    #[test]
     fn object_path_with_block_field_then_index() {
         // `obj/items/2` — object field is a block, then integer index.
         let src = "o: make object! [items: [10 20 30]] o/items/2";

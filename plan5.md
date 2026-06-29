@@ -102,40 +102,35 @@ real string char pick/poke replacing the integer-cast stubs.
 - [x] Inline `#[test]`: `#"^-"` → tab, `#"^(41)"` → `'A'`
 - [x] Inline `#[test]`: `mold(CHAR_A) == "#\"a\""`
 - [x] Inline `#[test]`: `"hello"/1` → `Value::Char('e')` (was `Integer(101)`)
-- [ ] Inline `#[test]`: poke a char into a string round-trips
-      **(blocked: `s/2: #"X"` set-path with integer index is unreachable
-      from source — lexer can't tokenize `2:`. See M38 follow-up task
-      "Lexer: integer SetPath" below.)**
+- [x] Inline `#[test]`: poke a char into a string round-trips
+      **(unblocked: M38 follow-up "Lexer: integer SetPath" landed —
+      `s/2: #"X"` now works in both VM and walker modes)**
 - [x] Inline `#[test]`: `char? #"a"` → true; `char? 5` → false
 - [x] Inline `#[test]`: `#"a" + 1` → `#"b"`; `#"b" - #"a"` → `1`
 - [x] Add golden fixtures: `char_literal` (lex round-trip), `char_pick`,
-      `char_arith` (char_poke deferred — same lexer gap)
+      `char_arith`, `char_poke` (unblocked by M38 follow-up)
 - [x] Add `programs_errors/char_bad_escape.red` for unterminated `#"`
 - [x] Update `red-core/tests/property.rs` to include `Char` in the
       round-trip proptest (mold → parse → mold)
 - [x] `cargo test --workspace` green; `--features force-walk` green;
       `cargo clippy --workspace --all-targets -- -D warnings` clean
 
-### M38 follow-up tasks (deferred)
+### M38 follow-up tasks (done)
 
-- [ ] **Lexer: integer SetPath** — extend `scan_refinement` (or
-      `scan_number`) so `2:` tokenizes as `Integer(2)` + `SetWord("2")`
-      (or a new `TokenKind::SetInteger`). Unblocks `b/2: 99` (block-integer
-      set-path) and `s/2: #"X"` (string char poke via set-path). Currently
-      `2:` lexes as a single `Integer` token and the trailing `:` is a
-      separate word-classification error. The `poke_string_char` helper
-      and `set_path_value` intercept are already implemented in
-      `interp_walker.rs` and will activate once the lexer emits the right
-      tokens. (Architecture notes the block-integer SetPath gap; the char
-      poke case is a new wrinkle surfaced by M38.)
-- [ ] **`append`/`insert` accept `string!` and `char!`** — currently
-      `append "foo" "bar"` errors with `expected series!, found string!`
-      because `append`'s `extract_series` only accepts `Block`/`Paren`.
-      Extend `append` (and `insert`/`change`) to accept a `string!` series:
-      append a `string!` (concatenate) or a `char!` (push codepoint). Mirror
-      Red's behavior: `append "foo" "bar"` → `"foobar"`;
-      `append "foo" #"s"` → `"foos"`. May need a positioned-string series
-      type or a value-rebuild (strings are immutable `Rc<str>`).
+- [x] **Lexer: integer SetPath** — `scan_number` now emits `Integer(n)` +
+      `SetWord("n")` (overlapping spans) when a digit run is immediately
+      followed by a single `:`. The parser's existing span-overlap SetPath
+      detection folds the run into a `SetPath` with an `Integer` final part.
+      Also fixed a pre-existing compiler bug: `Instr::Const(path_idx)` was
+      never emitted in the `SetPath` arm (only object-headed SetPaths worked
+      because they route through the walker via `needs_rebind`). Unblocks
+      `b/2: 99` and `s/2: #"X"`.
+- [x] **`append`/`insert` accept `string!` and `char!`** — `append` on a
+      `string!` builds a new string (char → push codepoint; string →
+      concatenate; block → splice chars/strings). `insert` on a `string!`
+      inserts at the head (no cursor in POC). Documented limitation: strings
+      are immutable `Rc<str>` so the mutation is not visible to aliases —
+      use `s: append s value` to update.
 
 ## Milestone 39 — `compose` + missing type predicates
 

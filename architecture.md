@@ -529,13 +529,18 @@ walks to the second-to-last part, then writes the evaluated RHS into the
 final field (object slot) or index (`poke`).
 
 **POC caveats:**
-- **String char pick** (`"abc"/2`): returns the codepoint as an `integer!`,
-  not a `char!` — `char!` is deferred to v0.3. String char *poke* errors.
-- **Block-integer SetPath** (`b/2: 99`): the evaluator supports writing via
-  an integer index, but it's **unreachable from source** because the lexer
-  can't tokenize `2:` (a digit run immediately followed by `:`). The lexer
-  would need a `SetInteger`/`Integer`+`SetWord` split to enable this.
-  Object-field set-paths (`obj/field: …`) work fine.
+- **String char pick** (`"abc"/2`): returns a `char!` (M38). String char
+  *poke* (`s/2: #"X"`) also works (M38 follow-up: the lexer now emits
+  `Integer(n)` + `SetWord("n")` with overlapping spans for `2:`, and the
+  parser folds the run into a `SetPath` with an `Integer` final part;
+  `set_path_value` rebuilds the immutable `Rc<str>` and writes the new
+  string back to the head word's binding).
+- **Block-integer SetPath** (`b/2: 99`): works as of M38 follow-up. The
+  lexer emits `Integer(n)` + `SetWord("n")` (overlapping spans) for a
+  digit run followed by a single `:`; the parser folds via the existing
+  span-overlap SetPath detection. (Previously unreachable — a pre-existing
+  compiler bug where `Instr::Const(path_idx)` was never emitted in the
+  `SetPath` arm was also fixed.)
 - **Path-conversion natives** (in `path.rs`, registered alongside the path
   machinery): `path?`, `get-path?`, `lit-path?`, `to-path`, `to-get-path`,
   `to-lit-path`. (`set-path?` is intentionally omitted.)
@@ -846,13 +851,17 @@ main levers:
   `red-core/tests/property.rs` excludes these variants (and `Object`,
   which is not source-origin). Positioned series (`index != 0`) also
   don't round-trip to their head form (mold renders from the cursor).
-- **Deferred to v0.3+** (acknowledged, not built): `char!`, `map!`,
+- **v0.4 additions** (M38, landed): `char!` type (`Value::Char`,
+  `#"..."` literals, `char?`/`to-char`/`make char!`, char arithmetic,
+  string char pick/poke). Block-integer SetPath (`b/2: 99`) and string
+  char poke (`s/2: #"X"`) now work (integer SetPath lexing + compiler
+  `SetPath` Const bug fix). `append`/`insert` accept `string!`/`char!`.
+- **Deferred to v0.4+** (acknowledged, not built): `map!`,
   `pair!`, `tuple!`, `date!`, `bitset!`, full `binary!` (only the `String8`
   stub exists), modules/`import`, the structured error model
   (code/type/args — basic `Value::Error` IS in v0.2), `compose`, the full
   port model, trig math, and `parse` advanced rules
-  (`collect`/`keep`/`match`/`case` flag). Block-integer SetPath
-  (`b/2: 99`) is also unreachable from source due to a lexer gap.
+  (`collect`/`keep`/`match`/`case` flag).
 - **Instrumentation (`stats` feature)**: `red-eval/stats` re-exports
   `red-core/stats`, which adds two counters to `Env` gated by
   `#[cfg(feature = "stats")]` — zero-cost in release builds when off (the
