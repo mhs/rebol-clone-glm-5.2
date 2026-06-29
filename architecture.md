@@ -103,6 +103,33 @@ pub struct ObjectDef {                          // M18
     pub parent: Option<Rc<RefCell<ObjectDef>>>,
     pub self_word: Symbol,                      // seeded with Symbol::new("self")
 }
+
+pub enum MapKey {                               // M43 — hashable subset of Value
+    Sym(Symbol), Int(i64), Str(Rc<str>), Char(char), Bool(bool), None,
+}
+// MapKey::from_value(&Value) -> Option<MapKey>  (None for unhashable: blocks/objects/funcs/...)
+// MapKey::to_value() -> Value                   (Sym → bare Word)
+
+pub struct MapDef {                             // M43 — insertion-ordered, heterogeneous keys
+    pub entries: RefCell<IndexMap<MapKey, Value>>,  // indexmap dep
+}
+// API: new(), get(&MapKey), set(MapKey, Value), remove(&MapKey), len(),
+//      keys() -> Vec<Value>, values() -> Vec<Value>
+
+pub struct BitsetDef {                          // M46 — bit-packed byte set
+    pub bits: RefCell<Vec<u64>>,
+    pub len: usize,                             // logical bit count (rounded to 64 in storage)
+}
+// API: new(len), set(byte), clear(byte), test(byte), union/intersect/difference/
+//      complement, from_chars(&str), from_range(byte, byte)
+
+pub struct DateValue {                          // M45 — single variant covers date-only / date+time / date+time+zone
+    pub dt: chrono::NaiveDateTime,
+    pub zone: Option<i32>,                      // minutes east of UTC; None = zone-naive (matches Red's date!/zone)
+}
+// API: from_local(dt, zone), date_only(d), has_time(), to_offset_utc(),
+//      fixed_offset(), to_zoned(), now_local(), today_local(), to_utc(),
+//      from_epoch(secs), from_system_time_local(st)
 ```
 
 ### Value variants (v0.2)
@@ -123,17 +150,23 @@ pub enum Value {
     Refinement { sym: Symbol, span: Span },              // /foo         — M13
     File { path: Rc<str>, span: Span },                  // %foo/bar     — M20
     Url { url: Rc<str>, span: Span },                    // http://…     — M20
-    String8(Vec<u8>),                                     // binary! (POC stub)
-    Error(Rc<ErrorValue>),                                // caught error value — M16
+    String8 { bytes: Vec<u8>, span: Span },              // binary! `#{hex}` — M41 (was a stub)
+    Error(Rc<ErrorValue>),                                // caught error value — M16 (M42: full field set)
     Object(Rc<RefCell<ObjectDef>>),                      // make object! — M18 (synthetic, no span)
+    Char { c: char, span: Span },                        // #"a" / #"^-" / #"^(41)" — M38
+    Map(Rc<RefCell<MapDef>>),                            // make map! — M43 (synthetic, no span)
+    Pair { x: Rc<Value>, y: Rc<Value>, span: Span },     // 100x200     — M44
+    Tuple { bytes: Rc<[u8]>, span: Span },               // 255.0.0     — M44 (3 or 4 bytes)
+    Date { dt: Rc<DateValue>, span: Span },              // 29-Jun-2024/12:30:00+5:30 — M45
+    Bitset(Rc<RefCell<BitsetDef>>),                      // charset "ABC" — M46 (synthetic, no span)
 }
 ```
 
 Every source-origin variant (`Integer`/`Float`/`String`/word-family/`Block`/`Paren`/
-`Path`/`GetPath`/`LitPath`/`SetPath`/`Refinement`/`File`/`Url`) carries the byte-offset
-`Span` of its originating token so eval-time errors can render `file:line:col:`.
-Synthetic variants (`None`/`Logic`/`Func`/`String8`/`Error`/`Object`) are produced at
-runtime and carry no span.
+`Path`/`GetPath`/`LitPath`/`SetPath`/`Refinement`/`File`/`Url`/`Char`/`String8`/
+`Pair`/`Tuple`/`Date`) carries the byte-offset `Span` of its originating token so
+eval-time errors can render `file:line:col:`. Synthetic variants (`None`/`Logic`/
+`Func`/`Error`/`Object`/`Map`/`Bitset`) are produced at runtime and carry no span.
 
 `Value`, `Context`, `Env`, `EvalError` defined as in the brief. Span flow is
 covered above — synthetic variants omit the span and fall back to `Span::new(0,0)`
@@ -155,13 +188,13 @@ pub enum TokenKind {
     Refinement(Symbol),   // /foo — M13
     File(Rc<str>),         // %foo/bar — M20
     Url(Rc<str>),          // scheme://… detected inside a word run — M20
+    Char(char),            // #"a" / #"^-" / #"^(41)" — M38
+    Binary(Rc<[u8]>),      // #{hex} — M41
+    Pair(i64, i64),        // 100x200 — M44 (also Float×Float via scan_pair)
+    Tuple(Rc<[u8]>),       // 255.0.0 / 128.64.32.128 — M44
+    Date(Rc<DateValue>),   // 29-Jun-2024[/12:30:00[+5:30]] / 12:30:00-04:00 — M45
     LBracket, RBracket,
     LParen,  RParen,
-}
-
-pub struct Token {
-    pub kind: TokenKind,
-    pub span: Span,
 }
 
 pub enum LexError {
@@ -169,6 +202,17 @@ pub enum LexError {
     InvalidNumber { span: Span, chars: String },
     InvalidWord { span: Span },
     UnbalancedBrace { span: Span, depth: i32 },
+    InvalidChar { span: Span, chars: String },        // M38 — unterminated #"..." or bad escape
+    InvalidBinary { span: Span, chars: String },      // M41 — non-hex in #{...} or unterminated
+    InvalidPair { span: Span, chars: String },        // M44 — malformed NxM
+    InvalidTuple { span: Span, chars: String },       // M44 — malformed R.G.B
+    InvalidDate { span: Span, chars: String },        // M45 — bad DD-Mon-YYYY / out-of-range
+    InvalidZone { span: Span, chars: String },        // M45 — bad ±HH:MM suffix
+}
+
+pub struct Token {
+    pub kind: TokenKind,
+    pub span: Span,
 }
 ```
 
@@ -199,7 +243,30 @@ fn lex(src: &str) -> Result<Vec<Token>, LexError>:
 ### Per-token scanners
 
 - `scan_number`: read run of `[0-9]`, then optional `.` + digits → Float, else
-  Integer. Reject `1.2.3`. Honor `e`/`E` exponent for floats.
+  Integer. Reject `1.2.3`. Honor `e`/`E` exponent for floats. **M38 follow-up:**
+  a digit run immediately followed by a single `:` emits `Integer(n)` + an
+  overlapping-span `SetWord("n")` so the parser folds `b/2:` / `s/2:` into a
+  `SetPath` with an `Integer` final part (unblocks block-integer and string-char
+  poke). **M44:** the main scan loop's digit branch peeks the full non-delimiter
+  run *before* dispatching to `scan_number` — an `x` between digit-led runs
+  routes to `scan_pair`; 2+ dots between digit-only runs routes to `scan_tuple`.
+  (`scan_number`'s 2nd-dot `InvalidNumber` error becomes unreachable for 2-3-dot
+  runs but remains for defensive coverage.)
+- `scan_char` (`#"..."` — M38): single char, caret escape (`^-` tab, `^/`
+  newline, `^@` null, `^M` CR, `^^` literal caret, `^"` literal quote), or
+  `^(NN)` codepoint hex. Error `InvalidChar` on unterminated `#"` or bad escape.
+- `scan_binary` (`#{hex}` — M41): hex digits (contiguous, no internal
+  whitespace) until `}`. Odd digit count → high nibble zero-padded (`#{ABC}`
+  → `[0x0A, 0xBC]`). Error `InvalidBinary` on non-hex or unterminated.
+- `scan_pair` (`NxM` — M44): two integers or floats separated by `x`
+  (e.g. `100x200`, `1.5x2.5`). Error `InvalidPair` on malformed forms.
+- `scan_tuple` (`R.G.B[.A]` — M44): 3 or 4 dot-joined integers 0-255.
+  Error `InvalidTuple` on out-of-range or malformed forms.
+- `scan_date` (`DD-Mon-YYYY` / `YYYY-MM-DD` — M45): with optional `/HH:MM:SS[.mmm]`
+  time suffix and optional `+HH:MM`/`-HH:MM`/`+HHMM`/`+HH`/`Z` zone suffix.
+  `DD/MM/YYYY` is **not** supported (`/` is a delimiter). ISO `T` separator
+  (uppercase only — lowercase `t` appears in month abbreviations like `Oct`).
+  Errors: `InvalidDate` / `InvalidZone`.
 - `scan_quoted` (`"..."`): read until unescaped `"`. Escape table: `\"`, `\\`,
   `\n`, `\t`, `\r`; **unknown escapes are kept verbatim with the backslash**
   (e.g. `"\q"` yields `\q`). No `^H`-style caret escapes — those are deferred.
@@ -532,6 +599,25 @@ parser when a word is immediately followed by `/word` tokens. Evaluation:
   the tail: `Word` → object field select; `Integer` → 1-based `pick`
   (negative from tail, out-of-range → `none`); `Paren` → evaluated in
   place as the selector (`b/(1 + 1)`).
+- **Map-headed** (`m/word`, `m/2`, `m/"str"`, `m/#"c"` — M43) — the tail
+  part is converted to a `MapKey` (`Word`→`Sym`, `Integer`→`Int`, `String`→
+  `Str`, `Char`→`Char`) and `MapDef::get` is called. Word keys also try the
+  string form if the `Sym` lookup misses (so `m/foo` finds a `Str("foo")`
+  key). `SetPath` (`m/word: value`) calls `MapDef::set`.
+- **Pair-headed** (`p/x`, `p/y` — M44) — returns the `x`/`y` component.
+  `SetPath` rebuilds an immutable `Pair` with the new component.
+- **Tuple-headed** (`t/r`/`t/g`/`t/b`/`t/a` — M44) — returns the byte at
+  the named slot. `SetPath` rebuilds an immutable `Tuple`.
+- **Date-headed** (`d/year`/`month`/`day`/`time`/`weekday`/`yearday`/`week`/
+  `zone` — M45) — returns the named component as an `Integer` (or `none`
+  for `time`/`zone` on a date-only value). `date/zone:` **relabels** the
+  offset only (does not shift `dt`); accepts a time-shaped date, integer
+  (minutes), or `none`. `to-utc` is the shift-and-relabel convenience.
+- **Literal-headed** (`100x200/x`, `255.0.0/r` — M44) — `parse_value` calls
+  `assemble_path` for `Pair`/`Tuple` heads (and `Block` heads); the head
+  value is the data itself (no word resolution), the tail walks via
+  `walk_data_path`. Also enables 0-refinement native paths like `now/year`
+  (call the 0-arity func, then walk the data path).
 
 Per-step errors (missing field, type mismatch) localize to the offending
 part's own span, not the whole path's. `SetPath` (`obj/field: value`)
@@ -878,11 +964,72 @@ main levers:
   accessors + `attempted?` predicate; VM/walker auto-enrich `Native`
   errors with `where`/`near` via `enrich_error`; `render_error` emits
   `<type> error: <message>` for structured errors.
-- **Deferred to v0.4+** (acknowledged, not built): `map!`,
-  `pair!`, `tuple!`, `date!`, `bitset!`, full `binary!` (only the `String8`
-  stub exists), modules/`import`, `compose`, the full
-  port model, trig math, and `parse` advanced rules
-  (`collect`/`keep`/`match`/`case` flag).
+- **v0.4 additions** (M40, landed): trig + transcendentals in `math.rs` —
+  `sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`sqrt`/`exp`/`log-e`/`ln`/
+  `log-10`/`log-2`/`degrees`/`radians`. All promote `Integer` → `Float`;
+  result is always `Float`. `sqrt` of negative and `log-*` of non-positive
+  raise `EvalError::Native` with span. `pi`/`e` constants installed in
+  `install_constants` alongside `true`/`false`/`none`/`newline`.
+- **v0.4 additions** (M41, landed): real `binary!` — `Value::String8` is
+  now `{ bytes: Vec<u8>, span: Span }` (struct-with-span, source-origin).
+  `#{hex}` lexer rule; `binary?`/`to-binary`/`make binary!`; byte-indexed
+  `pick`/`poke`/`copy`/`find`/`append`/`insert`; `length?` on `binary!`;
+  `read/binary`/`write/binary` de-stubbed; `to-string` from `binary!`
+  (UTF-8 decode); equality arm in `compare.rs`.
+- **v0.4 additions** (M43, landed): `map!` — `Value::Map(Rc<RefCell<MapDef>>)`
+  backed by `indexmap::IndexMap<MapKey, Value>` (insertion-ordered,
+  heterogeneous keys: `Sym`/`Int`/`Str`/`Char`/`Bool`/`None`). `make map!`
+  from block of pairs / object / nested pairs; `map?`/`to-map`; path
+  resolution (`map/word`/`map/integer`/`map/string`/`map/char` + set-paths);
+  `select`/`find`/`put`/`extend`/`copy`/`keys-of`/`values-of`/`length?`/
+  `empty?`/`clear`; deep equality; `Rc`-identity `same?`. `indexmap` joins
+  `red-core`'s deps (first non-std dep besides `chrono`).
+- **v0.4 additions** (M44, landed): `pair!` (`100x200` / `1.5x2.5`) and
+  `tuple!` (`255.0.0` / `128.64.32.128` RGBA) — immutable value types.
+  Lexer's `detect_pair_tuple` pre-dispatch routes `NxM` → `scan_pair`,
+  `N.M[.K]` → `scan_tuple`. Componentwise arithmetic (`pair + pair`,
+  `tuple + tuple`, `pair * int`, `pair / int`); `negate`/`abs`/`min`/`max`
+  on `pair!`; `tuple + tuple`/`tuple - tuple`/`tuple * float` clamped to
+  0-255. Path access: `pair/x`/`pair/y`, `tuple/r`/`g`/`b`/`a` (+ set-paths
+  that rebuild the immutable value). `make pair!`/`make tuple!`; `to-pair`/
+  `to-tuple`; `pair?`/`tuple?`; `=`/`<>` only (no ordering). REPL block-cache
+  ABA fix landed (clears `env.block_cache` per line — was a latent M27 bug
+  surfaced by M44's shifted native indices).
+- **v0.4 additions** (M45, landed): `date!`/`time!`/`now` with timezone
+  support. `Value::Date { dt: Rc<DateValue>, span: Span }` — single variant
+  covers date-only / date+time / date+time+zone. `DateValue { dt:
+  NaiveDateTime, zone: Option<i32> }` (minutes east of UTC; `None` =
+  zone-naive — matches Red's internal `date!/zone`). Lexer: `DD-Mon-YYYY`
+  / `YYYY-MM-DD` / `HH:MM:SS[.mmm]` / combined `DD-Mon-YYYY/HH:MM:SS` /
+  ISO `YYYY-MM-DDTHH:MM:SS` / zone suffix `+HH:MM`/`-HH:MM`/`+HHMM`/`+HH`/
+  `Z`. `DD/MM/YYYY` **not** supported (`/` is a delimiter — documented
+  limitation). `now` (local + local UTC offset) / `today` / `to-utc` /
+  `to-date` (from string / `[y m d]` / `[y m d h mi s]` / epoch int) /
+  `make date!`. Arithmetic: `date + integer` (days), `date - date`
+  (zone-adjusted day diff), `date + time`. Accessors: `year`/`month`/`day`/
+  `time`/`weekday`/`yearday`/`week`/`zone` (+ `date/zone:` relabel, no
+  shift). `modified?` returns a timezone-aware `date!` (was epoch-seconds
+  stub). `chrono` joins `red-core`'s deps. Timezone model: **fixed UTC
+  offsets only** — no named zones, no DST (matches Red parity).
+- **v0.4 additions** (M46, landed): `bitset!` (`Value::Bitset(Rc<
+  RefCell<BitsetDef>>)`, bit-packed `Vec<u64>`). `charset "ABC"` /
+  `make bitset! [...]` (ranges `#"a" - #"z"`, unions); `union`/`intersect`/
+  `difference`/`complement`/`extract?` (membership); `bitset?`/`to-bitset`.
+  Molds as `make bitset! "ABC"` (string form when all set bits are printable
+  ASCII) or `make bitset! #{hex}` (raw bit pattern, sparse/control-bit
+  fallback). `parse` dialect completed: `/case` refinement, `bitset!` rule
+  (matches any char in set, advances 1), `collect 'word`/`collect into`,
+  `keep` (value / `'word` / `(expr)`), `match` (returns matched value),
+  `into 'word rule`, `fail`, `break`, `if (expr)`, `not rule`, `??` debug,
+  `accept value`, `reject`, `ahead rule`, `behind rule`. `rule_extent` and
+  `rule_one` extended for each new keyword.
+- **Deferred to v0.5+** (acknowledged, not built): modules/`import`/
+  `export`, closures (`closure!`), full port model, `any*?` family beyond
+  what ships here, `tag!`, `ref!`, `image!`, `vector!`, `hash!`, `regex!`,
+  `logic!`/`bitset!` advanced ops, `object!` `on-change` reactive slots,
+  `routine!` FFI, named timezones (`chrono-tz`), `compose/deep` with
+  nested paren eval beyond current impl (compose is in v0.4 — that note is
+  stale; compose is fully landed).
 - **Instrumentation (`stats` feature)**: `red-eval/stats` re-exports
   `red-core/stats`, which adds two counters to `Env` gated by
   `#[cfg(feature = "stats")]` — zero-cost in release builds when off (the

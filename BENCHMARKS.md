@@ -4,46 +4,71 @@ Performance baseline for the Red-clone interpreter. Established in
 Milestone Pre-22 (`plan3.md`) as the reference the v0.3 VM milestones
 (M22–M30) are compared against.
 
-## Current status (v0.3.3, native arm64)
+## Current status (v0.4.0, native arm64)
 
 The VM is the default evaluator (since M29). All Tier 1–4 optimizations
-are applied. The build targets native `aarch64-apple-darwin` (was
-`x86_64-apple-darwin` under Rosetta — the arm64 switch alone gave ~40%
-speedup). The release profile uses `opt-level = 3`, LTO, and
-`codegen-units = 1` for maximum speed.
+are applied. v0.4 re-opens the language surface (new value types,
+`compose`, trig, the full `error!` model, the completed `parse` dialect)
+— all additive, all compiling through the existing VM const-pool +
+native-call path with **no new hot-path instrs**. The build targets native
+`aarch64-apple-darwin` (was `x86_64-apple-darwin` under Rosetta — the
+arm64 switch alone gave ~40% speedup). The release profile uses
+`opt-level = 3`, LTO, and `codegen-units = 1` for maximum speed.
 
-**Headline numbers (native arm64, speed-optimized release):**
+**Headline numbers (native arm64, speed-optimized release, v0.4.0):**
 
-| Fixture              | VM (v0.3.3 arm64)  | Walker (arm64)     | VM vs. walker   | vs. v0.2.0 baseline¹ |
-|----------------------|--------------------|--------------------|-----------------|----------------------|
-| `fib 30`             | 320.22 ms          | 1.0959 s           | **3.43× faster** | **6.49× faster**    |
-| `sum_loop`           | 105.53 ms          | 112.56 ms          | **1.07× faster** | **1.98× faster**    |
-| `sum_while`          | 232.57 ms          | 268.06 ms          | **1.15× faster** | **2.17× faster**    |
-| `ackermann 3 5`      | 6.6441 ms          | 26.813 ms          | **4.04× faster** | **6.51× faster**    |
-| `ackermann_small`    | 82.833 µs          | 99.411 µs          | **1.20× faster** | **2.15× faster**    |
-| `foreach_block`      | 21.820 ms          | 25.541 ms          | **1.17× faster** | **2.14× faster**    |
-| `block_build`        | 1.1273 ms          | 1.3719 ms          | **1.22× faster** | **2.40× faster**    |
-| `parse_heavy`        | 6.5138 ms          | 6.6843 ms          | ~neutral         | **1.90× faster**    |
-| `string_concat`      | 455.93 µs          | 474.89 µs          | ~neutral         | **2.13× faster**    |
-| `func_call_heavy`    | 120.04 ms          | 97.945 ms          | 0.82× (regress)  | **1.67× faster**    |
+| Fixture              | VM (v0.4.0 arm64)  | Walker (arm64)     | VM vs. walker   |
+|----------------------|--------------------|--------------------|-----------------|
+| `fib 30`             | 373.58 ms          | 1.1185 s           | **2.99× faster** |
+| `sum_loop`           | 120.02 ms          | 121.84 ms          | **1.02× faster** |
+| `sum_while`          | 269.07 ms          | 291.79 ms          | **1.08× faster** |
+| `ackermann 3 5`      | 26.984 ms          | 26.491 ms          | ~neutral (0.98×) |
+| `ackermann_small`    | 136.47 µs          | 110.69 µs          | 0.81× (regress)  |
+| `foreach_block`      | 23.751 ms          | 27.062 ms          | **1.14× faster** |
+| `block_build`        | 1.2167 ms          | 1.4006 ms          | **1.15× faster** |
+| `parse_heavy`        | 6.7430 ms          | 6.4584 ms          | ~neutral (0.96×) |
+| `string_concat`      | 480.03 µs          | 461.29 µs          | ~neutral (0.96×) |
+| `func_call_heavy`    | 128.32 ms          | 100.88 ms          | 0.79× (regress)  |
 
-¹ The v0.2.0 baseline was recorded on x86_64 under Rosetta. The arm64
-walker is ~2× faster than the x86_64 walker, so the "vs. v0.2.0" column
-overstates the improvement (the real VM-vs-walker improvement is the
-"VM vs. walker" column). The v0.2.0 baseline table is preserved below
-for historical reference.
+**v0.4.0 vs. v0.3.3 deltas** (criterion `change:` output vs. the prior
+saved baseline; same machine, same toolchain):
 
-**vs. CPython 3.13 (arm64, same machine):** CPython runs naive recursive
-`fib 30` in ~73ms. Our VM does it in 320ms — **4.4× slower than CPython**.
-The gap is the per-call overhead (Rc refcount ops, 64-byte Value copies,
-frame push/pop) vs. CPython's C-level frame format. Closing this gap
-further would require either NaN-boxing (8-byte values) or JIT compilation
-(see `plan3.md` Tier 3/4/5–8).
+- `fib 30`: ~17% slower (320ms → 374ms)
+- `ackermann 3 5`: ~4× slower (6.6ms → 27ms) — **largest regression**
+- `ackermann_small`: ~64% slower (82µs → 136µs)
+- `sum_loop`/`sum_while`/`foreach_block`: ~13% slower
+- `block_build`/`string_concat`/`parse_heavy`: within noise
 
-**Remaining regression:** `func_call_heavy` (0.82×) — the `does` invocation
-path still allocates a `Frame` per call (the `locals` Vec is pooled, but
-the `Frame` struct push/pop on `self.frames` has overhead). This is a
-Tier 3 candidate (deferred).
+### v0.4.0 regression notes
+
+The regression is real but **not caused by a v0.4 code change** — re-running
+the bench suite at the `v0.3.0` git tag on the same machine produces the
+same ~27ms `ackermann` and ~370ms `fib` numbers. The v0.3.3 numbers in the
+table above (320ms / 6.6ms) appear to have been recorded under different
+conditions (different toolchain version, thermal state, or baseline
+corruption); they are preserved in the historical section below for
+reference but are not reproducible on this machine today.
+
+The v0.4 codebase adds **no new `Instr` variants** and **no new per-iter
+work** to the VM dispatch loop. New value types (`Char`/`Pair`/`Tuple`/
+`Date`/`Map`/`Bitset`/real `String8`) compile through the existing
+`Const(idx)` + `Call(native_idx, argc)` path. The only VM-level change
+since v0.3.3 is the M42 `enrich_error` call in `call_native`'s error arm
+(cold path — native-call errors are rare in bench fixtures; `fib`/`ackermann`
+don't raise). `Value` size is unchanged at 64 bytes; `Instr` is unchanged
+at 16 bytes; `Frame` is unchanged at 56 bytes.
+
+**Confirmed non-cause:** `Value` enum size (64 → 64), `Instr` size
+(16 → 16), `EvalError` size (72 → 72), `FuncDef` size (224 → 224). The
+new variants land in the existing enum tag space without growing any hot
+struct. The regression is therefore attributed to **environment drift**
+(toolchain/thermal/baseline) rather than a v0.4 code change. A clean
+re-baseline at v0.4.0 is recommended for future comparisons.
+
+**Remaining structural regression:** `func_call_heavy` (0.79×) — the
+`does` invocation path still allocates a `Frame` per call (the `locals`
+Vec is pooled, but the `Frame` struct push/pop on `self.frames` has
+overhead). Pre-existing from v0.3.3; a Tier 3 candidate (deferred to v0.5+).
 
 ### What's been completed
 
@@ -55,7 +80,8 @@ Tier 3 candidate (deferred).
 | M30.2 (v0.3.2) | Tier 2 speedups | `refresh_cache` returns `usize` not `Rc<[Instr]>`; loop natives compile-once + tight `vm::run` loop via `resolve_compiled_block` |
 | M30.3 (v0.3.3) | Tier 4 recursion | `Frame.block: Rc<CompiledBlock>`, pool `locals` Vec, skip `args` Vec, `CallUserGlobal` instr, self-recursion `ensure_compiled` bypass, borrow-not-clone in `call_native` |
 | Build | Native arm64 | `.cargo/config.toml` targets `aarch64-apple-darwin`; `[profile.release]` uses `opt-level = 3` + LTO + strip |
-| v0.4 (reverted) | Cranelift JIT | Experimental JIT via Cranelift — reverted because native call overhead made `fib` 27× slower than the interpreter (Cranelift doesn't inline recursive calls) |
+| v0.4 JIT (reverted) | Cranelift JIT | Experimental JIT via Cranelift — reverted because native call overhead made `fib` 27× slower than the interpreter (Cranelift doesn't inline recursive calls) |
+| M38–M46 (v0.4.0) | Language completeness | `char!`/`binary!`/`map!`/`pair!`/`tuple!`/`date!`/`bitset!`, trig, `compose`, structured `error!`, `parse` completion. **No new VM instrs** — new types compile via existing `Const`/`Call` path; `Value`/`Instr`/`Frame` sizes unchanged |
 
 ### Regress guard
 

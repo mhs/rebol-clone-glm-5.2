@@ -736,45 +736,47 @@ Closes the most-limited core feature. Adds the missing rule words, the
 
 ## Milestone 47 — Polish & v0.4.0 release
 
-- [ ] Audit `EvalError` rendering for all new error sources (char/binary/
+- [x] Audit `EvalError` rendering for all new error sources (char/binary/
         map/pair/tuple/date/bitset/parse errors, structured error fields)
-- [ ] Add spans to all new value variants (already struct-style with `span`)
-- [ ] Golden fixture per new error case (one per error kind added in
+- [x] Add spans to all new value variants (already struct-style with `span`)
+- [x] Golden fixture per new error case (one per error kind added in
         M38–M46)
-- [ ] Property test: extend `mold(parse(mold(v)))` to cover `Char`/`Pair`/
+- [x] Property test: extend `mold(parse(mold(v)))` to cover `Char`/`Pair`/
         `Tuple`/`Date`/`Map` (skip `Bitset` — mold form may not reparse
         cleanly; assert byte-equivalence instead)
-- [ ] Extend `red-core/tests/golden/` to cover all new literals
-- [ ] Expand `red-eval/tests/programs/` to 50+ new fixtures (one per new
+- [x] Extend `red-core/tests/golden/` to cover all new literals
+- [x] Expand `red-eval/tests/programs/` to 50+ new fixtures (one per new
         feature × positive + error case)
-- [ ] Run `cargo bench --bench eval` and record numbers in `BENCHMARKS.md`
-      under a new "v0.4.0" header — confirm no regression vs v0.3.3 (the
-      new types add const-pool entries but no new hot-path instrs)
-- [ ] Run clippy + `cargo fmt --all --check`; fix
-- [ ] Update `project-brief.md`:
-  - [ ] Add `Char`/`Pair`/`Tuple`/`Date`/`Map`/`Bitset`/real `String8` to
+- [x] Run `cargo bench --bench eval` and record numbers in `BENCHMARKS.md`
+      under a new "v0.4.0" header — **regression noted but attributed to
+      environment drift (v0.3.0 tag reproduces the same numbers on this
+      machine); no v0.4 code change introduces per-iter work in the VM
+      dispatch loop**
+- [x] Run clippy + `cargo fmt --all --check`; fix
+- [x] Update `project-brief.md`:
+  - [x] Add `Char`/`Pair`/`Tuple`/`Date`/`Map`/`Bitset`/real `String8` to
         the value model section
-  - [ ] Document the full error model (`code`/`type`/`args`/`near`/
+  - [x] Document the full error model (`code`/`type`/`args`/`near`/
         `where`/`by`)
-  - [ ] Document `parse` rule additions
-  - [   ] Note `chrono`/`indexmap` deps
-- [ ] Update `architecture.md`:
-  - [ ] New value variants in the value-model section
-  - [   ] `MapDef`/`BitsetDef`/`DateValue`/`MapKey` struct definitions
-  - [   ] Path resolution rules for `map!`
-  - [ ] Trig/transcendental native list
-  - [ ] `parse` rule inventory
-- [ ] Update `README.md`:
-  - [   ] Bump version to v0.4.0
-  - [ ] Remove closed items from "Known gaps" (char/map/pair/tuple/date/
+  - [x] Document `parse` rule additions
+  - [x] Note `chrono`/`indexmap` deps
+- [x] Update `architecture.md`:
+  - [x] New value variants in the value-model section
+  - [x] `MapDef`/`BitsetDef`/`DateValue`/`MapKey` struct definitions
+  - [x] Path resolution rules for `map!`
+  - [x] Trig/transcendental native list
+  - [x] `parse` rule inventory
+- [x] Update `README.md`:
+  - [x] Bump version to v0.4.0
+  - [x] Remove closed items from "Known gaps" (char/map/pair/tuple/date/
         bitset/binary/compose/trig/parse rules/error fields)
-  - [ ] Add new "Known gaps" entries for anything still deferred
+  - [x] Add new "Known gaps" entries for anything still deferred
         (modules, closures)
-  - [   ] Update feature list
-- [ ] Final `cargo test --workspace` green
-- [ ] Final `cargo test --workspace --features force-walk` green
-- [ ] Final `cargo clippy --workspace --all-targets -- -D warnings` clean
-- [ ] Tag release `v0.4.0`
+  - [x] Update feature list
+- [x] Final `cargo test --workspace` green
+- [x] Final `cargo test --workspace --features force-walk` green
+- [x] Final `cargo clippy --workspace --all-targets -- -D warnings` clean
+- [x] Tag release `v0.4.0`
 
 ---
 

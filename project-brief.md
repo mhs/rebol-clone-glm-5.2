@@ -149,9 +149,15 @@ enum Value {
     Refinement { sym: Symbol, span: Span },              // /foo         — M13
     File { path: Rc<str>, span: Span },                  // %foo/bar     — M20
     Url { url: Rc<str>, span: Span },                    // http://…     — M20
-    String8(Vec<u8>),                        // binary! (POC stub — deferred)
+    String8 { bytes: Vec<u8>, span: Span },              // binary! #{hex} — M41 (was a stub)
     Error(Rc<ErrorValue>),                   // caught error value — M16 (M42: full field set)
     Object(Rc<RefCell<ObjectDef>>),          // make object! — M18 (synthetic, no span)
+    Char { c: char, span: Span },            // #"a" / #"^-" / #"^(41)" — M38
+    Map(Rc<RefCell<MapDef>>),                // make map! — M43 (synthetic, no span)
+    Pair { x: Rc<Value>, y: Rc<Value>, span: Span },     // 100x200     — M44
+    Tuple { bytes: Rc<[u8]>, span: Span },   // 255.0.0 / 128.64.32.128 — M44
+    Date { dt: Rc<DateValue>, span: Span },  // 29-Jun-2024/12:30:00+5:30 — M45
+    Bitset(Rc<RefCell<BitsetDef>>),          // charset "ABC" — M46 (synthetic, no span)
 }
 
 struct ObjectDef {
@@ -159,6 +165,18 @@ struct ObjectDef {
     parent: Option<Rc<RefCell<ObjectDef>>>,
     self_word: Symbol,
 }
+
+// v0.4 (M43): map! — insertion-ordered heterogeneous key→value table.
+enum MapKey { Sym(Symbol), Int(i64), Str(Rc<str>), Char(char), Bool(bool), None }
+struct MapDef { entries: RefCell<IndexMap<MapKey, Value>> }   // indexmap dep
+
+// v0.4 (M45): date!/time! — single variant covers date-only / date+time /
+// date+time+zone. Timezone model: fixed UTC offsets only (minutes east of
+// UTC); None = zone-naive. No named zones, no DST (matches Red parity).
+struct DateValue { dt: NaiveDateTime, zone: Option<i32> }
+
+// v0.4 (M46): bitset! — bit-packed byte set for parse charset matching.
+struct BitsetDef { bits: RefCell<Vec<u64>>, len: usize }
 ```
 
 `Symbol` = an `Rc<str>` newtype (the `string_cache` crate was tried early on
@@ -167,11 +185,17 @@ but dropped in favor of the simpler `Rc<str>`; no profiling need surfaced).
 `Context` is defined in `red-core/src/context.rs` (an ordered
 `Symbol -> slot index` map plus a `Vec<RefCell<Value>>` of slots). Note the
 split: `context.rs` holds **only** `Context`; `Binding`, `FuncDef`,
-`Symbol`, `Series`, `Value`, `ErrorValue`, and `ObjectDef` all live in
-`value.rs`. `Env`, `CallFrame`, `EvalError`, `NativeFn`, and `RefineArgs`
-live in `red-core/src/env.rs` (so red-core's printer/parser can mention
-`EvalError` without a red-eval dependency). `red-eval/src/context.rs` is a
-9-line `pub use` re-export of all those names.
+`Symbol`, `Series`, `Value`, `ErrorValue`, `ObjectDef`, `MapDef`, `MapKey`,
+`BitsetDef`, and `DateValue` all live in `value.rs`. `Env`, `CallFrame`,
+`EvalError`, `NativeFn`, and `RefineArgs` live in `red-core/src/env.rs` (so
+red-core's printer/parser can mention `EvalError` without a red-eval
+dependency). `red-eval/src/context.rs` is a 9-line `pub use` re-export of all
+those names.
+
+`red-core` depends on `indexmap` (for `MapDef`'s insertion-ordered map, M43)
+and `chrono` (for `DateValue` / `now` / timezone offsets, M45) — the first
+non-std deps in `red-core` (zero-dep was never a documented design goal;
+`red-eval` already pulled `ureq`).
 
 ## Red blocks — semantics notes
 
@@ -243,13 +267,16 @@ binding, not just dynamic lookup.
   `same?`/`not-same?`.
 - **Closures** (`closure!`) deferred; `func` uses shallow copy of args on
   each call.
-- Known gap (v0.3): `char!`, `map!`, `pair!`, `tuple!`, `date!`, `bitset!`,
-  full `binary!` (only the `String8` stub exists), modules/`import`,
-  `compose`, the full port model, trig math, and `parse` advanced rules
-  (`collect`/`keep`/`match`/`case` flag) remain deferred. The structured
-  error model (`code`/`type`/`args`/`near`/`where`/`by`) IS in v0.4 (M42).
-  Block-integer SetPath (`b/2: 99`) is also unreachable from source (lexer
-  can't tokenize `2:`). See `plan2.md`.
+- Known gap (v0.4): modules / `import` / `export` and closures (`closure!`)
+  remain the two conspicuous v0.5 candidates. Named timezones (`chrono-tz`)
+  are deferred to v0.5+ if ever needed. `DD/MM/YYYY` is not supported (`/`
+  is a lexer delimiter — use `DD-Mon-YYYY` or `YYYY-MM-DD`). `pair!`/`tuple!`
+  `same?` returns `false` (immutable value types; use `=` for structural
+  equality). `tag!`/`ref!`/`image!`/`vector!`/`hash!`/`regex!`, advanced
+  `bitset!`/`logic!` ops, `object!` `on-change` reactive slots, `routine!` FFI,
+  and the full port model remain deferred. The structured error model
+  (`code`/`type`/`args`/`near`/`where`/`by`) IS in v0.4 (M42). Block-integer
+  SetPath (`b/2: 99`) works (M38 follow-up). See `plan5.md`.
 
 ### Spans
 Each `Block`/`Paren` retains the span of its `[...]`/`(...)` delimiters;
@@ -328,18 +355,32 @@ parse [1 2 3] [1 2 3]              ; => true
 parse "hello world" [copy name to " " skip copy rest to end]
 ```
 
-POC rule set (matcher subset):
-- Literal values (string/integer/word) — match against input.
-- `skip`, `to`, `thru`, `end`, `none`.
-- `any`, `some`, `opt`, `while`.
-- `|` (alternative).
-- `copy word rule` (capture sub-match), `set word rule` (single value).
-- `[...]` grouping (sub-rules).
-- `(...)` (Red code side-effect, evaluated via `eval`).
-- Return `logic!` (matched/not).
+POC rule set (matcher subset + v0.4 completions):
+ - Literal values (string/integer/word) — match against input.
+ - `skip`, `to`, `thru`, `end`, `none`.
+ - `any`, `some`, `opt`, `while`.
+ - `|` (alternative).
+ - `copy word rule` (capture sub-match), `set word rule` (single value).
+ - `[...]` grouping (sub-rules).
+ - `(...)` (Red code side-effect, evaluated via `eval`).
+ - Return `logic!` (matched/not).
+ - **v0.4 additions (M46):** `bitset!` as a rule (matches any char in set,
+   advances 1); `/case` refinement (case-sensitive string matching);
+   `collect 'word rule` / `collect into 'word rule` (accumulate matched
+   values into a block, bind word); `keep value` / `keep 'word` /
+   `keep (expr)` (push into current collect target); `match value` (like
+   literal match but returns the matched value); `into 'word rule` (parse
+   a sub-series, bind result); `fail` (always fails — opposite of `none`);
+   `break` (exit the current `parse` entirely, return true); `if (expr)`
+   (succeed iff expr is truthy, no advance); `not rule` (succeeds iff
+   sub-rule fails, no advance); `??` (debug — print current input position
+   to stderr); `accept value` (succeed immediately, return value);
+   `reject` (fail immediately); `ahead rule` (lookahead, no advance);
+   `behind rule` (reverse lookahead).
 
-Deferred: `collect`/`keep`/`match`/`gather`, rule compilation, BNF-style
-grammar extraction, error rule blocks, `case` flag. Just the matcher.
+Deferred: rule compilation, BNF-style grammar extraction, error rule blocks,
+`gather`. The matcher + v0.4 rule set is complete enough for typical
+parser-construction use.
 
 ### Other dialects (illustrative, NOT implemented)
 - `load` dialect — already the parser; not a runtime dialect.
@@ -436,15 +477,26 @@ args }`.
 ## Error model
 - `EvalError` enum: `UnboundWord`/`TypeError`/`Arity`/`Native` carry a `Span`;
   `Return`/`Break`/`Continue`/`Throw`/`Quit` are control-flow unwinds (no
-  span). `LexError`/`ParseError` also carry spans. All three are unified
-  under `Error` (Lex/Parse/Eval), defined in `red-core/src/error.rs`.
+  span). **v0.4 (M42):** `Raised(Rc<ErrorValue>)` transports first-class
+  `error!` values with the full Red field set (`message`/`code`/`type`/
+  `args`/`near`/`where`/`by`). `LexError`/`ParseError` also carry spans.
+  All three are unified under `Error` (Lex/Parse/Eval), defined in
+  `red-core/src/error.rs`.
 - `render_error(file, src, err)` produces
   `*** Error: [file:line:col: ]<msg>` using a `LineMap` (in
   `red-core/src/source.rs`) to translate the
   error's byte-offset span into 1-based line/col. The CLI passes the file
-  path + source; the REPL passes `None` + the line buffer.
+  path + source; the REPL passes `None` + the line buffer. **v0.4 (M42):**
+  structured errors with a `type` word render as
+  `*** Error: [loc: ]<type> error: <message>` (e.g. `math error: ...`).
+  The VM and walker auto-enrich `Native` errors with `where`/`near` via
+  `enrich_error`.
 - Tests assert against the message-body substring (error fixtures) or the
   rendered `*** Error:` line (CLI tests).
+- **v0.4 error natives (M42):** `make error!` (from string or block of
+  keyword pairs), `to-error`, `cause-error` (1/2/4-arg + block forms),
+  `error-type`/`error-code`/`error-args`/`error-near` accessors,
+  `attempted?` predicate. `try`/`attempt`/`catch` unwrap structured payloads.
 
 ### Sandbox policy (file & shell I/O — M20)
 - `call`/`shell` natives are **off by default** and raise `EvalError::Native`

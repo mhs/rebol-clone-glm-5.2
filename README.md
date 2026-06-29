@@ -5,22 +5,30 @@ language, implemented in Rust. Red is a homoiconic, block-structured
 descendant of Rebol — code is data, evaluation is prefix-style and eager,
 and "dialects" are blocks interpreted by custom mini-interpreters.
 
-This repo is a **Red subset interpreter** (`v0.3.0`). It implements a usable
+This repo is a **Red subset interpreter** (`v0.4.0`). It implements a usable
 slice of Red — lexer, parser, **bytecode compiler + stack VM** (the default
 since v0.3), tree-walking evaluator (retained as the `--walk` fallback), full
-series model, real word binding, functions, the `parse` dialect, **objects**,
-**real paths**, **refinements**, type conversions, string/control-flow/math
-natives, file & shell I/O, and a REPL. The build history is tracked in
-[`plan.md`](./plan.md) (v0.1), [`plan2.md`](./plan2.md) (v0.2), and
-[`plan3.md`](./plan3.md) (v0.3 — VM + performance).
+series model, real word binding, functions, the `parse` dialect (with
+`collect`/`keep`/`match`/lookahead/`/case`/`bitset!` charset), **objects**,
+**real paths**, **refinements**, the full type-conversion/string/control-flow/
+math surfaces (incl. trig + transcendentals), file & shell I/O, **first-class
+`error!` values** with the full Red field set, the v0.4 value types
+(`char!`/`binary!`/`map!`/`pair!`/`tuple!`/`date!`/`bitset!`), `compose`, and a
+REPL. The build history is tracked in [`plan.md`](./plan.md) (v0.1),
+[`plan2.md`](./plan2.md) (v0.2), [`plan3.md`](./plan3.md) (v0.3 — VM +
+performance), and [`plan5.md`](./plan5.md) (v0.4 — language completeness).
 
 ## Status
 
-- **Tagged:** `v0.3.0`
+- **Tagged:** `v0.4.0`
 - **Workspace:** three crates — `red-core` (value model + lexer + parser + printer + VM IR types),
   `red-eval` (compiler + VM + tree-walker + natives + `parse`), `red-cli` (binary + REPL).
   A `fuzz/` crate (nightly-only, `libfuzzer-sys`) is excluded from the default workspace.
 - **Default evaluator:** bytecode VM (`EvalMode::Vm`). `--walk` on the CLI or the `force-walk` cargo feature forces the tree-walker for debugging and parity comparison.
+- **Dependencies:** `red-core` pulls `indexmap` (for `map!`) and `chrono` (for
+  `date!`/`now`/timezone offsets); `red-eval` pulls `ureq` (http/https fetches
+  for `read url!`); `red-cli` pulls `rustyline` (REPL line editing). No async,
+  no proc-macros.
 - **Tests:** `cargo test --workspace` green in VM mode; `--features force-walk` green in Walk mode (parity). Golden fixtures in
   `crates/red-core/tests/golden/` (round-trip), `crates/red-eval/tests/programs/`
   (program execution), `crates/red-eval/tests/programs_errors/` (error
@@ -35,7 +43,7 @@ cargo test  --workspace
 cargo run  -p red-cli -- examples/hello.red     # → Hello, World!
 cargo run  -p red-cli                            # → REPL (no args)
 cargo run  -p red-cli -- --help
-cargo run  -p red-cli -- --version               # → red 0.3.0
+cargo run  -p red-cli -- --version               # → red 0.4.0
 cargo run  -p red-cli -- --allow-shell examples/call.red   # enable call/shell
 cargo run  -p red-cli -- --walk examples/fib.red          # force tree-walker
 cargo run  -p red-cli -- --disasm examples/fib.red        # disassemble (no run)
@@ -43,7 +51,7 @@ cargo run  -p red-cli -- --disasm-func fib examples/fib.red  # disassemble named
 cargo run  -p red-cli -- --trace examples/arith.red       # per-instr VM trace to stderr
 ```
 
-The v0.3 language surface is frozen at v0.2 — no new natives or value types. v0.3 is a **performance release**: the bytecode VM delivers 2–4× speedups on compute-heavy programs (deep recursion, tight loops) while preserving exact observable behavior (golden parity, error parity). See `BENCHMARKS.md` for measurements.
+v0.3 was a **performance release**: the bytecode VM delivers 2–4× speedups on compute-heavy programs (deep recursion, tight loops) over the v0.2 tree-walker, while preserving exact observable behavior (golden parity, error parity). v0.4 re-opens the language surface on top of the unchanged VM — new value types (`char!`/`binary!`/`map!`/`pair!`/`tuple!`/`date!`/`bitset!`), `compose`, trig math, the full `error!` model, and the completed `parse` dialect. All additions are additive: they compile through the existing VM const-pool + native-call path with no new hot-path instrs. See `BENCHMARKS.md` for measurements.
 
 ## What's implemented
 
@@ -62,7 +70,11 @@ The v0.3 language surface is frozen at v0.2 — no new natives or value types. v
 ### Value types
 `None`, `Logic`, `Integer`, `Float`, `String`, `Word`/`SetWord`/`GetWord`/
 `LitWord`, `Block`, `Paren`, `Func`, `Path`/`GetPath`/`LitPath`/`SetPath`,
-`Refinement`, `File`, `Url`, `Object`, `Error`, `String8` (stub).
+`Refinement`, `File`, `Url`, `Object`, `Error`, `Char` (`#"a"`), `String8`
+(real `binary!`, `#{hex}`), `Map` (heterogeneous insertion-ordered keys),
+`Pair` (`100x200`), `Tuple` (`255.0.0` / `128.64.32.128` RGBA), `Date`
+(date-only / date+time / date+time+zone; `29-Jun-2024/12:30:00+5:30`),
+`Bitset` (bit-packed charset for `parse`).
 
 ### Evaluation
 - **Bytecode compiler + stack VM** (v0.3, default): blocks compile to a flat
@@ -91,16 +103,22 @@ The v0.3 language surface is frozen at v0.2 — no new natives or value types. v
   <= >=`, `and or not` (logic + bitwise on integers), `abs`, `negate`,
   `add`/`subtract`/`multiply`/`divide`, `min`, `max`, `round` (`/to`/`/even`),
   `random` (`/seed`/`/only`/`/secure`), `even?`, `odd?`, `complement`,
-  `shift-left`, `shift-right`.
+  `shift-left`, `shift-right`. **Trig + transcendentals (v0.4):** `sin`/`cos`/
+  `tan`/`asin`/`acos`/`atan`/`atan2`, `sqrt`, `exp`, `log-e`/`ln`, `log-10`,
+  `log-2`, `degrees`/`radians`; `pi`/`e` constants. Pair/tuple arithmetic
+  (componentwise: `pair + pair`, `tuple + tuple`, `pair * int`, etc.).
 - **Control flow:** `if`, `either`, `loop`, `repeat`, `until`, `while`,
   `do`, `reduce`, `break`, `continue`, `switch` (`/default`/`/case`), `case`
   (`/default`/`/all`), `default`, `all`, `any`, `try`, `attempt`, `catch`/
-  `throw`, `cause-error`, `function` (auto-locals), `comment`, `exit`/`quit`.
+  `throw`, `cause-error`, `function` (auto-locals), `comment`, `exit`/`quit`,
+  `compose` (`/deep`/`/only` — v0.4).
 - **Series (full model):** `first` `second` `third` `last` `next` `back` `at`
   `skip` `head` `tail` `index?` `length?` `pick` `poke` `select` `find`
   (`/case`/`/part`) `append` (`/only`) `insert` `change` `remove` `clear`
   `take` `copy` (`/part`) `empty?` `block?` `paren?` `series?` `any-block?`
-  `foreach` `forall`.
+  `foreach` `forall`. `binary!` is byte-indexed (`pick`/`poke`/`copy`/`find`/
+  `append`/`insert`); `map!` supports `select`/`find`/`keys-of`/`values-of`/
+  `length?`/`empty?`/`clear`/`put`/`extend`/`copy`.
 - **Functions / binding:** `func`, `does`, `make function!`, `function?`,
   `return`, `bind`, `use`, `in`, `get`, `set`, `value?`. Recursion works;
   closures are explicitly out of scope.
@@ -110,26 +128,60 @@ The v0.3 language surface is frozen at v0.2 — no new natives or value types. v
 - **Strings:** `rejoin`, `reform`, `join`, `split` (`/with`), `trim`
   (`/auto` `/with` `/lines` `/all`), `replace` (`/all`), `uppercase`/
   `lowercase` (`/part`), `suffix?`. `+` concatenates two strings; `find`
-  does substring search; `copy` on a string honors `/part`.
+  does substring search; `copy` on a string honors `/part`. `append`/`insert`
+  on a `string!` accept `char!`/`string!` (v0.4).
 - **Type conversions:** `to-integer`, `to-float`, `to-string`, `to-block`,
   `to-word`/`to-set-word`/`to-get-word`/`to-lit-word`, `to-logic`, `to-file`,
   `to-url`, `to-path`/`to-get-path`/`to-lit-path`, `make`, `to`, `form`.
+  **v0.4 additions:** `to-char`, `to-binary`, `to-map`, `to-pair`, `to-tuple`,
+  `to-date`, `to-bitset`, `to-error`, `to-utc`.
+- **Type predicates (v0.4 fill-in):** `integer?`, `float?`, `number?`,
+  `string?`, `logic?`, `none?`, `char?`, `binary?`, `map?`, `pair?`, `tuple?`,
+  `date?`, `time?`, `bitset?`, `error?`, `word?`, `set-word?`, `get-word?`,
+  `lit-word?`, `refinement?`, `path?`, `get-path?`, `lit-path?`, `any-word?`,
+  `any-path?`, `any-object?`, `function?`, `object?`, `series?`, `block?`,
+  `paren?`, `file?`, `url?`, `same?`, `not-same?`, `value?`. `type?` returns
+  the type word; `types-of` returns the block of matching type words.
 - **Objects:** `make object!`, `object`, `context`, `in`, `words-of`,
   `values-of`, `reflect`, `object?`, `same?`. Prototype inheritance, `self`
   reference, method calls via `o/method` paths.
-- **Paths:** `obj/field`, `block/2`, `string/3`, `obj/field: value`
-  (set-path), `:obj/method` (get-path), `'foo/bar` (lit-path), nested
-  `obj/inner/x`, paren selectors `b/(1 + 1)`.
-- **File & shell I/O:** `read` (`/lines`), `write` (`/lines`/`/append`),
-  `load`, `save`, `exists?`, `size?`, `modified?`, `dir?`, `make-dir`,
+- **Paths:** `obj/field`, `block/2`, `string/3` (returns `char!`), `obj/field:
+  value` (set-path), `:obj/method` (get-path), `'foo/bar` (lit-path), nested
+  `obj/inner/x`, paren selectors `b/(1 + 1)`. **v0.4 additions:** `map/word`,
+  `map/integer`, `map/string`, `map/char` (+ set-paths); `pair/x`/`pair/y`,
+  `tuple/r`/`tuple/g`/`tuple/b`/`tuple/a` (+ set-paths); `date/year`/
+  `month`/`day`/`time`/`weekday`/`yearday`/`week`/`zone` (+ `date/zone:`
+  relabel); literal-headed paths `100x200/x`, `255.0.0/r`.
+- **File & shell I/O:** `read` (`/lines`/`/binary`), `write`
+  (`/lines`/`/append`/`/binary`), `load`, `save`, `exists?`, `size?`,
+  `modified?` (returns `date!` with local timezone — v0.4), `dir?`, `make-dir`,
   `delete`, `rename`, `change-dir`, `what-dir`, `call`/`shell`
   (`--allow-shell` gated), `wait`, `env`/`get-env`/`set-env`, `system/options/args`.
-  `read` of `url!` fetches via `ureq` (http/https).
-- **Dialect:** `parse` — matcher subset over string! and block! inputs:
+  `read` of `url!` fetches via `ureq` (http/https). `read/binary`/`write/binary`
+  de-stubbed in v0.4.
+- **Dialect:** `parse` — over string! and block! inputs. Rule set:
   `skip`, `to`, `thru`, `end`, `none`, `any`, `some`, `opt`, `while`, `|`
   (alternative), `copy 'word rule`, `set 'word rule`, `[...]` grouping,
-  `(...)` Red side-effects. Backtracking via cursor save/restore.
-- **Constants:** `none`, `true`, `false`, `newline` bound in the user context.
+  `(...)` Red side-effects. **v0.4 completions:** `collect 'word` /
+  `collect into 'word`, `keep` (value / `'word` / `(expr)`), `match value`,
+  `into 'word rule`, `fail`, `break`, `if (expr)`, `not rule`, `??` (debug),
+  `accept value`, `reject`, `ahead rule`, `behind rule`, `bitset!` charset
+  matching, `/case` refinement for case-sensitive string matching.
+  Backtracking via cursor save/restore.
+- **Dates (v0.4):** `now` (local time + local UTC offset), `today`,
+  `to-utc`. Date arithmetic: `date + integer` (days), `date - date` (day
+  diff, zone-adjusted), `date + time`. Timezone model: **fixed UTC offsets
+  only** (`±HH:MM` / `Z`); no named zones, no DST.
+- **Errors (v0.4):** first-class `error!` values with the full Red field
+  set — `code`/`type`/`message`/`args`/`near`/`where`/`by`. `make error!`
+  from string or block of keyword pairs; `try`/`attempt`/`catch` unwrap
+  structured payloads; `cause-error` (1/2/4-arg + block forms);
+  `error-type`/`error-code`/`error-args`/`error-near` accessors;
+  `attempted?` predicate.
+- **Bitset (v0.4):** `charset "ABC"`, `make bitset! [...]` (ranges, unions),
+  `union`/`intersect`/`difference`/`complement`/`extract?` (membership test).
+- **Constants:** `none`, `true`, `false`, `newline`, `pi`, `e` bound in the
+  user context.
 
 ### Errors
 Unified `Error` (Lex / Parse / Eval). Every error carries a `Span`; the CLI
@@ -138,7 +190,12 @@ Path-step errors localize to the offending part's span; `load %file` parse
 errors fold the loaded file's `file:line:col:` into the message body.
 `Return`/`Break`/`Continue`/`Throw`/`Quit` are control-flow unwinds caught by
 the function-call shim, loop natives, `catch`, and the script entry point.
-`try`/`attempt` catch errors as `Error` values.
+`try`/`attempt` catch errors as `error!` values. **v0.4 structured errors:**
+`EvalError::Raised(Rc<ErrorValue>)` transports first-class `error!` values with
+the full Red field set (`code`/`type`/`args`/`near`/`where`/`by`); the VM and
+walker auto-enrich `Native` errors with `where`/`near` via `enrich_error`;
+structured errors render as `*** Error: [loc: ]<type> error: <message>` (e.g.
+`math error: divide by zero`).
 
 ## Examples
 
@@ -174,6 +231,14 @@ runnable via `cargo run -p red-cli -- examples/<name>.red`:
 | `calculator.red` | cursor-based `take`/`append` queue calculator with `does` and `func` |
 | `tree-walk.red` | recursive walk of a nested-block tree (leaf count, flatten, depth) |
 | `probe.red` | `probe` debug output |
+| `char.red` | `#"..."` literals, char arithmetic, char pick/poke (v0.4) |
+| `binary.red` | `#{hex}` literals, `to-binary`, `read/binary`/`write/binary` (v0.4) |
+| `compose.red` | `compose`/`compose/deep`/`compose/only` (v0.4) |
+| `dates.red` | `date!`/`time!` literals, `now`/`today`/`to-utc`, zones, date arithmetic (v0.4) |
+| `errors.red` | `make error!`, `try`/`attempt`/`catch`/`cause-error`, structured fields (v0.4) |
+| `maps.red` | `make map!`, heterogeneous keys, path access (v0.4) |
+| `pair-tuple.red` | `pair!`/`tuple!` literals, arithmetic, component paths (v0.4) |
+| `trig.red` | `sin`/`cos`/`sqrt`/`log-*`/`atan2`/`degrees`/`radians`, `pi`/`e` (v0.4) |
 
 ## Repository layout
 
@@ -196,12 +261,11 @@ rebol-clone/
 │       └── tests/cli.rs
 ├── fuzz/                      # cargo-fuzz targets (nightly-only, excluded from workspace)
 ├── examples/                  # sample .red programs
-├── BENCHMARKS.md              # v0.3 VM bench numbers
+├── BENCHMARKS.md              # VM + walker bench numbers (v0.3 → v0.4)
+├── KNOWN_ISSUES.md            # pre-existing bugs + VM/walker divergences
 ├── project-brief.md           # feature scope and design decisions
 ├── architecture.md            # implementation sketch (lexer/parser/compiler/VM/eval internals)
-├── plan.md                    # v0.1 build checklist (complete)
-├── plan2.md                   # v0.2 roadmap (complete)
-└── plan3.md                   # v0.3 VM + performance roadmap
+└── plan*.md                   # per-version build checklists (v0.1 → v0.4)
 ```
 
 ## Design notes
@@ -217,27 +281,29 @@ rebol-clone/
 - **No native pre-binding.** Unbound words at eval time fall back to a
   `HashMap<Symbol, NativeFn>` lookup. Real Red pre-binds native references at
   load; deferred.
+- **v0.4 value types are immutable where Red is immutable** (`char!`/`pair!`/
+  `tuple!`/`date!`/`binary!`/`bitset!`). Set-paths on these return a new value
+  and rebind; aliases don't see updates (mirrors Red semantics). `map!` uses
+  `Rc<RefCell<MapDef>>` for in-place mutation like `object!`.
 
-## Known gaps (v0.3)
+## Known gaps (v0.4)
 
-See [`project-brief.md`](./project-brief.md) and [`plan3.md`](./plan3.md) for
+See [`project-brief.md`](./project-brief.md) and [`plan5.md`](./plan5.md) for
 the authoritative list. Headlines:
 
-- **No closures** — `func` shallow-copies args per call.
-- **No `char!`, `map!`, `pair!`, `tuple!`, `date!`, `bitset!`** (and
-  `binary!`/`String8` is a stub). `now`/string char pick are deferred with
-  `date!`/`char!`.
-- **`parse` matcher subset only** — `collect`/`keep`/`match`/grammar
-  extraction/`case` flag deferred.
-- **No modules / `import` / `export`.**
-- **Error values are partial** — `try`/`attempt` catch errors as `Error`
-  values carrying just the message; a full error model (code/type/args,
-  `make error!` with fields) is deferred to v0.3. `cause-error` is a stub.
-- **No `compose`.**
+- **No closures** — `func` shallow-copies args per call. The `closure!` type
+  is the headline v0.5 candidate alongside modules.
+- **No modules / `import` / `export`** — the other headline v0.5 candidate.
+- **Timezones: fixed UTC offsets only** (`±HH:MM`/`Z`) — no named zones, no
+  DST. Matches Red parity; named-zone support (`chrono-tz`) deferred to v0.5+.
+- **`DD/MM/YYYY` date form not supported** — `/` is a lexer delimiter so the
+  run splits before the date scanner. Use `DD-Mon-YYYY` or `YYYY-MM-DD`.
+- **`pair!`/`tuple!` `same?`** returns `false` (immutable value types; use `=`
+  for structural equality). `same?` is for reference-identity comparisons.
+- **No `tag!`/`ref!`/`image!`/`vector!`/`hash!`/`regex!`**; advanced
+  `bitset!`/`logic!` ops; `object!` `on-change` reactive slots; `routine!` FFI.
 - **Object path method calls** work for `o/method` followed by trailing
   block args; `func/refinement` bound refinement references are deferred.
-- **`read/binary`/`write/binary`** stubbed pending `binary!`.
-- **No trig math** (`sin`/`cos`/`tan`/`sqrt`/`log`).
 - **GUI / `draw` / `vid` / reactive dialects are permanently out of scope.**
 
 ## License
