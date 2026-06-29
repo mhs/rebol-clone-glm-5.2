@@ -635,6 +635,119 @@ pub(crate) fn power(
 }
 
 // ---------------------------------------------------------------------------
+// Trig & transcendentals (M40)
+// ---------------------------------------------------------------------------
+
+/// Promote a single numeric arg to `f64`. Errors via `num_type_err` on
+/// non-numeric input. `name` is the native name used in arity messages.
+fn as_float_arg(args: &[Value], name: &str) -> Result<f64, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, name, 1, args.len()));
+    }
+    Ok(match as_number(&args[0]) {
+        Some(Num::Int(n)) => n as f64,
+        Some(Num::Float(f)) => f,
+        None => return Err(num_type_err(&args[0])),
+    })
+}
+
+fn sine(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "sin")?;
+    Ok(Value::float(f64::sin(x)))
+}
+
+fn cosine(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "cos")?;
+    Ok(Value::float(f64::cos(x)))
+}
+
+fn tangent(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "tan")?;
+    Ok(Value::float(f64::tan(x)))
+}
+
+fn arcsine(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "asin")?;
+    Ok(Value::float(f64::asin(x)))
+}
+
+fn arccosine(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "acos")?;
+    Ok(Value::float(f64::acos(x)))
+}
+
+fn arctangent(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "atan")?;
+    Ok(Value::float(f64::atan(x)))
+}
+
+/// `atan2 y x` — 2-arg arctangent. Note Red's argument order is `(y, x)`,
+/// matching `f64::atan2(y, x)`.
+fn arctangent2(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity_err(args, "atan2", 2, args.len()));
+    }
+    let y = match as_number(&args[0]) {
+        Some(Num::Int(n)) => n as f64,
+        Some(Num::Float(f)) => f,
+        None => return Err(num_type_err(&args[0])),
+    };
+    let x = match as_number(&args[1]) {
+        Some(Num::Int(n)) => n as f64,
+        Some(Num::Float(f)) => f,
+        None => return Err(num_type_err(&args[1])),
+    };
+    Ok(Value::float(f64::atan2(y, x)))
+}
+
+fn sqrt_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "sqrt")?;
+    if x < 0.0 {
+        return Err(native_err(&args[0], "math error: sqrt of negative"));
+    }
+    Ok(Value::float(f64::sqrt(x)))
+}
+
+fn exp_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "exp")?;
+    Ok(Value::float(f64::exp(x)))
+}
+
+fn log_e(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "log-e")?;
+    if x <= 0.0 {
+        return Err(native_err(&args[0], "math error: log-e of non-positive"));
+    }
+    Ok(Value::float(f64::ln(x)))
+}
+
+fn log_10(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "log-10")?;
+    if x <= 0.0 {
+        return Err(native_err(&args[0], "math error: log-10 of non-positive"));
+    }
+    Ok(Value::float(f64::log10(x)))
+}
+
+fn log_2(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "log-2")?;
+    if x <= 0.0 {
+        return Err(native_err(&args[0], "math error: log-2 of non-positive"));
+    }
+    Ok(Value::float(f64::log2(x)))
+}
+
+fn degrees_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "degrees")?;
+    Ok(Value::float(x.to_degrees()))
+}
+
+fn radians_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "radians")?;
+    Ok(Value::float(x.to_radians()))
+}
+
+// ---------------------------------------------------------------------------
 // even? / odd?
 // ---------------------------------------------------------------------------
 
@@ -864,6 +977,44 @@ pub fn register_math_natives(env: &mut Env) {
     reg(env, "complement", complement_native as NF, 1, false);
     reg(env, "shift-left", shift_left as NF, 2, false);
     reg(env, "shift-right", shift_right as NF, 2, false);
+}
+
+/// Register the M40 trig + transcendental natives. All prefix-only, arity 1
+/// except `atan2` (arity 2). Results are always `float!`; integer args are
+/// promoted to float.
+pub fn register_transcendental_natives(env: &mut Env) {
+    use std::rc::Rc;
+
+    let reg = |env: &mut Env, name: &str, f: NF, arity: usize| {
+        let params: Vec<Symbol> = (0..arity)
+            .map(|i| Symbol::new(&format!("__arg{i}")))
+            .collect();
+        env.natives.insert(
+            Symbol::new(name),
+            Rc::new(FuncDef {
+                params,
+                native: Some(f),
+                variadic: false,
+                infix: false,
+                ..Default::default()
+            }),
+        );
+    };
+
+    reg(env, "sin", sine as NF, 1);
+    reg(env, "cos", cosine as NF, 1);
+    reg(env, "tan", tangent as NF, 1);
+    reg(env, "asin", arcsine as NF, 1);
+    reg(env, "acos", arccosine as NF, 1);
+    reg(env, "atan", arctangent as NF, 1);
+    reg(env, "atan2", arctangent2 as NF, 2);
+    reg(env, "sqrt", sqrt_native as NF, 1);
+    reg(env, "exp", exp_native as NF, 1);
+    reg(env, "log-e", log_e as NF, 1);
+    reg(env, "log-10", log_10 as NF, 1);
+    reg(env, "log-2", log_2 as NF, 1);
+    reg(env, "degrees", degrees_native as NF, 1);
+    reg(env, "radians", radians_native as NF, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1105,5 +1256,94 @@ mod tests {
     fn print_modulo_and_power() {
         let out = run_capture("print 7 // 3 print 2 ** 3");
         assert_eq!(s(&out), "1\n8\n");
+    }
+
+    // --- M40 trig & transcendentals ---
+
+    /// Extract an f64 from a `Value::Float` (panics otherwise). Used by the
+    /// trig tests so float-tolerance assertions don't depend on mold format.
+    fn as_f64(v: &Value) -> f64 {
+        match v {
+            Value::Float { f, .. } => *f,
+            Value::Integer { n, .. } => *n as f64,
+            other => panic!("expected number, got {other:?}"),
+        }
+    }
+
+    fn approx(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn trig_basics() {
+        assert!(approx(as_f64(&val("sin 0")), 0.0));
+        assert!(approx(as_f64(&val("cos 0")), 1.0));
+        assert!(approx(as_f64(&val("sin pi / 2")), 1.0));
+        assert!(approx(as_f64(&val("cos pi")), -1.0));
+    }
+
+    #[test]
+    fn inverse_trig() {
+        assert!(approx(as_f64(&val("asin 1")), std::f64::consts::FRAC_PI_2));
+        assert!(approx(as_f64(&val("acos 1")), 0.0));
+        assert!(approx(as_f64(&val("atan 1")), std::f64::consts::FRAC_PI_4));
+    }
+
+    #[test]
+    fn atan2_basic() {
+        assert!(approx(as_f64(&val("atan2 1 1")), std::f64::consts::FRAC_PI_4));
+        assert!(approx(as_f64(&val("atan2 0 1")), 0.0));
+        assert!(approx(as_f64(&val("atan2 1 0")), std::f64::consts::FRAC_PI_2));
+    }
+
+    #[test]
+    fn sqrt_works() {
+        assert!(approx(as_f64(&val("sqrt 16")), 4.0));
+        assert!(approx(as_f64(&val("sqrt 2")), std::f64::consts::SQRT_2));
+        // sqrt of negative errors.
+        assert!(run_capture_val("sqrt -1").is_err());
+    }
+
+    #[test]
+    fn log_and_exp() {
+        assert!(approx(as_f64(&val("log-e e")), 1.0));
+        assert!(approx(as_f64(&val("log-10 1000")), 3.0));
+        assert!(approx(as_f64(&val("log-2 8")), 3.0));
+        assert!(approx(as_f64(&val("exp 1")), std::f64::consts::E));
+        // log of non-positive errors.
+        assert!(run_capture_val("log-e 0").is_err());
+        assert!(run_capture_val("log-10 -5").is_err());
+        assert!(run_capture_val("log-2 0").is_err());
+    }
+
+    #[test]
+    fn degree_radian_conversion() {
+        assert!(approx(as_f64(&val("degrees pi")), 180.0));
+        assert!(approx(as_f64(&val("radians 180")), std::f64::consts::PI));
+        assert!(approx(as_f64(&val("degrees pi / 2")), 90.0));
+    }
+
+    #[test]
+    fn trig_int_promotion() {
+        // Integer arg is promoted to float; result is float.
+        assert!(approx(as_f64(&val("sin 0")), 0.0));
+        assert!(approx(as_f64(&val("sqrt 16")), 4.0));
+        match val("sin 0") {
+            Value::Float { .. } => {}
+            other => panic!("expected float, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trig_type_errors() {
+        // Non-numeric arg → type error.
+        assert!(run_capture_val("sin \"a\"").is_err());
+        assert!(run_capture_val("sqrt true").is_err());
+    }
+
+    #[test]
+    fn pi_and_e_constants() {
+        assert!(approx(as_f64(&val("pi")), std::f64::consts::PI));
+        assert!(approx(as_f64(&val("e")), std::f64::consts::E));
     }
 }

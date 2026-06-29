@@ -175,28 +175,33 @@ Greenfield module. No type dep — operates on `Integer` (promotes to `Float`)
 and `Float`. Adds `pi` as a context-stored constant (alongside `true`/
 `false`/`none`/`newline`).
 
-- [ ] Create `crates/red-eval/src/transcendentals.rs`
-- [ ] Implement `sin`, `cos`, `tan` (radians)
-- [ ] Implement `asin`, `acos`, `atan` (radians)
-- [ ] Implement `atan2` (2-arg: y, x)
-- [ ] Implement `sqrt`, `exp`, `log-e`/`ln`, `log-10`, `log-2`
-- [ ] Implement `degrees`/`radians` conversion natives
-- [ ] Install `pi` and `e` constants in `install_constants`
+- [x] Extend `crates/red-eval/src/math.rs` with a trig + transcendentals
+      section (decision: extend `math.rs` rather than create a new
+      `transcendentals.rs` module — keeps the private `as_number`/
+      `num_type_err`/`arity_err`/`native_err` helpers in scope without
+      re-exports)
+- [x] Implement `sin`, `cos`, `tan` (radians)
+- [x] Implement `asin`, `acos`, `atan` (radians)
+- [x] Implement `atan2` (2-arg: y, x)
+- [x] Implement `sqrt`, `exp`, `log-e`/`ln`, `log-10`, `log-2`
+- [x] Implement `degrees`/`radians` conversion natives
+- [x] Install `pi` and `e` constants in `install_constants`
       (`natives/registry.rs` alongside `true`/`false`)
-- [ ] Register all in `register_math_natives` (or a sibling
-      `register_transcendental_natives` called from `register_natives`)
-- [ ] Error on `sqrt` of negative, `log` of non-positive (return
+- [x] Register all in a sibling `register_transcendental_natives`
+      called from `register_natives` (alongside `register_math_natives`)
+- [x] Error on `sqrt` of negative, `log` of non-positive (return
       `EvalError::Native` with span)
-- [ ] Promote `Integer` arg to `Float` for all trig ops (result always
-      `Float`)
-- [ ] Inline `#[test]`: `sin 0` → `0.0`; `cos 0` → `1.0`
-- [ ] Inline `#[test]`: `sin pi / 2` → `1.0` (within float tolerance)
-- [ ] Inline `#[test]`: `sqrt 16` → `4.0`; `sqrt -1` errors
-- [ ] Inline `#[test]`: `log-e e` → `1.0`; `log-10 1000` → `3.0`
-- [ ] Inline `#[test]`: `atan2 1 1` → `pi / 4` (within tolerance)
-- [ ] Inline `#[test]`: `degrees pi` → `180.0`; `radians 180` → `pi`
-- [ ] Add golden fixtures: `trig_basic`, `trig_log`, `trig_constants`
-- [ ] `cargo test --workspace` green
+- [x] Promote `Integer` arg to `Float` for all trig ops (result always
+      `Float`) — `as_float_arg` helper centralizes the promotion
+- [x] Inline `#[test]`: `sin 0` → `0.0`; `cos 0` → `1.0`
+- [x] Inline `#[test]`: `sin pi / 2` → `1.0` (within float tolerance)
+- [x] Inline `#[test]`: `sqrt 16` → `4.0`; `sqrt -1` errors
+- [x] Inline `#[test]`: `log-e e` → `1.0`; `log-10 1000` → `3.0`
+- [x] Inline `#[test]`: `atan2 1 1` → `pi / 4` (within tolerance)
+- [x] Inline `#[test]`: `degrees pi` → `180.0`; `radians 180` → `pi`
+- [x] Add golden fixtures: `trig_basic`, `trig_log`, `trig_constants`
+- [x] `cargo test --workspace` green; `--features force-walk` green;
+      `cargo clippy --workspace --all-targets -- -D warnings` clean
 
 ## Milestone 41 — Real `binary!` (`String8` promotion)
 
@@ -462,61 +467,118 @@ RGB color (`r`/`g`/`b` bytes, optionally `a` alpha). Both are value types
 - [ ] Update `property.rs` for `Pair`/`Tuple` round-trip
 - [ ] `cargo test --workspace` green; `--features force-walk` green
 
-## Milestone 45 — `date!` / `time!` / `now`
+## Milestone 45 — `date!` / `time!` / `now` (with timezone support)
 
-Adds `chrono` dep to red-core. Lexer for `29-Jun-2024` and `12:30:00`.
-Replaces the `modified?` epoch-seconds stub (`io.rs:313`).
+Adds `chrono` dep to red-core. Lexer for `29-Jun-2024`, `12:30:00`, and the
+timezone offset suffix `±HH:MM`. Replaces the `modified?` epoch-seconds stub
+(`io.rs:313`). Timezone model matches Red parity: **fixed UTC offsets only**
+(no named zones, no DST). Internal representation: `Option<i32>` minutes,
+mirroring Red's `date!/zone` field exactly.
 
 - [ ] Add `chrono = { version = "0.4", default-features = false, features = ["clock"] }`
       to `crates/red-core/Cargo.toml [dependencies]`
 - [ ] Define `DateValue` in `crates/red-core/src/value.rs`:
-  - [ ] `pub struct DateValue { date: chrono::NaiveDate, time: Option<chrono::NaiveTime>, zone: Option<i32> }`
-  - [ ] Or store as a single `chrono::NaiveDateTime` + optional offset
-        — **decision: `NaiveDateTime` + `Option<FixedOffset>`**
-- [ ] Add `Value::Date { dt: Rc<DateValue>, span: Span }` variant
-      (single variant covers both date-only and date+time)
+  - [ ] `pub struct DateValue { dt: chrono::NaiveDateTime, zone: Option<i32> }`
+        (`zone` = minutes east of UTC; `None` = zone-naive; matches Red's
+        internal `date!/zone` representation)
+  - [ ] `to_offset_utc() -> DateTime<Utc>` (apply `zone` to produce an
+        absolute instant; `None` treated as UTC for arithmetic)
+  - [ ] `from_local(dt, zone_minutes) -> Self` constructor
+  - [ ] **decision: `Option<i32>` minutes, not `Option<FixedOffset>`** —
+        matches Red's internal model and the `date/zone` accessor shape;
+        `FixedOffset` is used transiently during `now`/parse/mold only
+- [ ] Add `Value::Date { dt: Rc<DateValue>, span: Span }` variant (single
+      variant covers date-only, date+time, and date+time+zone)
 - [ ] Add `Value::date(dt)` constructor
 - [ ] Extend lexer:
   - [ ] `scan_date`: `DD-Mon-YYYY` (e.g. `29-Jun-2024`), `DD/MM/YYYY`,
         `YYYY-MM-DD`
   - [ ] `scan_time`: `HH:MM:SS`, `HH:MM:SS.mmm`
   - [ ] Combined `DD-Mon-YYYY/HH:MM:SS` (date/time separator `/`)
+  - [ ] **Zone offset suffix**: `+HH:MM`, `-HH:MM`, `+HHMM`, `-HHMM`,
+        `+HH`, and `Z` (alias for `+00:00`); attachable to any date+time
+        form (e.g. `29-Jun-2024/12:30:00+5:30`, `2024-06-29T12:30:00Z`,
+        `12:30:00-04:00`)
   - [ ] Error `InvalidDate` on bad date (e.g. `31-Feb-2024`)
+  - [ ] Error `InvalidZone` on out-of-range offset (|minutes| > 14*60) or
+        malformed suffix
 - [ ] Extend parser with `TokenKind::Date`/`TokenKind::Time` → `Value`
 - [ ] Update `printer.rs`:
-  - [ ] `mold` date-only: `29-Jun-2024`
-  - [ ] `mold` date+time: `29-Jun-2024/12:30:00`
+  - [ ] `mold` date-only: `29-Jun-2024` (no zone emitted)
+  - [ ] `mold` date+time, zone-naive: `29-Jun-2024/12:30:00`
+  - [ ] `mold` date+time, zone UTC: `29-Jun-2024/12:30:00+00:00`
+        (always emit `+HH:MM` two-digit form, never `Z`)
+  - [ ] `mold` date+time, non-UTC zone: `29-Jun-2024/12:30:00-04:00`
   - [ ] `form` same as mold
-- [ ] Add `date?`/`time?` predicates
-- [ ] Add `now` native: returns `Value::Date` with current local time
-- [ ] Add `today` native: returns date-only (midnight)
+- [ ] Add `date?`/`time?` predicates (`time?` = date with a `time` component
+      and `zone != None`; matches Red)
+- [ ] Add `now` native: returns `Value::Date` with current **local** time
+      and the system's **local UTC offset** attached (uses `chrono::Local`;
+      offset may differ between calls during DST transitions — that's the
+      system's behavior, not a Red-parity issue since Red only supports
+      fixed offsets anyway)
+- [ ] Add `today` native: returns date-only at local midnight, `zone: None`
 - [ ] Implement date arithmetic:
-  - [ ] `date + integer` → date + N days
-  - [ ] `date - date` → integer (day difference)
+  - [ ] `date + integer` → date + N days (zone preserved)
+  - [ ] `date - date` → integer (day difference, computed on the absolute
+        instant — zone-adjusted so two dates in different zones compare by
+        wall-clock day, not raw instant)
   - [ ] `date + time` → date+time
+  - [ ] `date + date` errors
 - [ ] Implement date accessors: `date/year`/`month`/`day`/`time`/`weekday`/
-        `yearday`/`week` paths
+        `yearday`/`week`/**`zone`** paths
+  - [ ] `date/zone` returns a `time!`-shaped value (date with zeroed
+        date portion, `time = HH:MM:SS`, `zone = None`) representing the
+        offset duration — sign carried in the time value (negative offsets
+        render as e.g. `-4:00`)
+  - [ ] `date/zone` on a zone-naive date returns `none`
+- [ ] Implement `date/zone:` set-path: **relabels the offset only**, does
+      NOT shift the wall-clock `dt` (matches Red semantics — it's a
+      re-labeling, not a conversion)
+- [ ] Implement `to-utc` native: returns the same instant with `zone` set
+      to `0` (and `dt` recomputed accordingly) — convenience for the
+      "shift and relabel" case that set-path doesn't do
 - [ ] Implement `to-date` (from string parse, from block `[year month day]`,
-        from integer epoch)
+        from block with time `[year month day hour min sec]`, from integer
+        epoch — epoch is UTC, result has `zone = Some(0)`)
 - [ ] Add `make date!` to the `make` dispatcher
-- [ ] Implement `now`/`today`/`date?`/`time?` registration
-- [ ] Replace `io.rs:313` `modified?` epoch-seconds stub: return `Value::Date`
-- [ ] Implement `wait` (already exists — confirm; may already use
-        `std::time::Duration`, no change needed)
+- [ ] Implement `now`/`today`/`date?`/`time?`/`to-utc` registration
+- [ ] Replace `io.rs:313` `modified?` epoch-seconds stub: return
+      `Value::Date` with the file's mtime as **local time + local UTC
+      offset** (uses `chrono::DateTime::<Local>::from(mtime)`); the
+      resulting date is timezone-aware
+- [ ] Implement `wait` (already exists — confirm; uses `std::time::Duration`,
+      no change needed)
 - [ ] Update `type_name` → `"date!"`
 - [ ] Extend `interp_walker.rs` `eval_prefix` self-evaluating arm
 - [ ] Extend `vm/compiler.rs` const-pool arm
-- [ ] Inline `#[test]`: `29-Jun-2024` lexes to `Date`
-- [ ] Inline `#[test]`: `12:30:00` lexes to `Date` (time-only, epoch date)
-- [ ] Inline `#[test]`: `29-Jun-2024 + 1` → `30-Jun-2024`
+- [ ] Inline `#[test]`: `29-Jun-2024` lexes to `Date` (zone-naive)
+- [ ] Inline `#[test]`: `29-Jun-2024/12:30:00+5:30` lexes to `Date` with
+        `zone == Some(330)`
+- [ ] Inline `#[test]`: `2024-06-29T12:30:00Z` lexes to `Date` with
+        `zone == Some(0)`
+- [ ] Inline `#[test]`: `12:30:00-04:00` lexes to `Date` (time-only, epoch
+        date, `zone == Some(-240)`)
+- [ ] Inline `#[test]`: `mold(now-ish local date+time+zone)` round-trips
+        through parse+mold byte-identically (covers the `+HH:MM` form)
+- [ ] Inline `#[test]`: `29-Jun-2024 + 1` → `30-Jun-2024` (zone preserved)
 - [ ] Inline `#[test]`: `30-Jun-2024 - 29-Jun-2024` → `1`
-- [ ] Inline `#[test]`: `now` returns a date with year ≥ 2024
-- [ ] Inline `#[test]`: `modified? %file` returns a `date!`
-- [ ] Inline `#[test]`: `date/year (29-Jun-2024)` → `2024`
-- [ ] Add golden fixtures: `date_literal`, `date_arith`, `now_basic`,
-        `date_paths`
-- [ ] Add `programs_errors/bad_date.red`
-- [ ] Update `property.rs` for `Date` round-trip
+- [ ] Inline `#[test]`: `now` returns a date with `year ≥ 2024` and
+        `now/zone <> none`
+- [ ] Inline `#[test]`: `modified? %file` returns a timezone-aware `date!`
+        (zone field is `Some`)
+- [ ] Inline `#[test]`: `date/zone (29-Jun-2024/12:30:00+5:30)` → `5:30:00`
+        as a `time!`-shaped date
+- [ ] Inline `#[test]`: `date/zone (29-Jun-2024)` → `none`
+- [ ] Inline `#[test]`: `d: 29-Jun-2024/12:30:00+5:30  d/zone: -4:00` →
+        `d` is `29-Jun-2024/12:30:00-04:00` (relabel, no shift)
+- [ ] Inline `#[test]`: `to-utc 29-Jun-2024/12:30:00+5:30` →
+        `29-Jun-2024/07:00:00+00:00` (shift, then relabel to UTC)
+- [ ] Add golden fixtures: `date_literal`, `date_arith`, `date_zone`,
+        `date_zone_setpath`, `now_basic`, `date_paths`, `to_utc`
+- [ ] Add `programs_errors/bad_date.red`, `programs_errors/bad_zone.red`
+- [ ] Update `property.rs` for `Date` round-trip (skip the `now`-derived
+        zone in the proptest — use fixed offsets only)
 - [ ] `cargo test --workspace` green; `--features force-walk` green
 
 ## Milestone 46 — `parse` dialect completion + `bitset!`
@@ -678,11 +740,19 @@ Closes the most-limited core feature. Adds the missing rule words, the
    `make bitset! #{hex}` (the raw bit pattern). The plan prefers the
    string form when all set bits are printable ASCII; falls back to
    `#{hex}` otherwise. Confirm before implementing.
-5. **`date!`/`time!` as separate types or one (M45):** the plan folds them
+5. **`date!`/`time!` + timezone model (M45):** the plan folds date and time
    into a single `Value::Date` variant with an optional time component
    (matches Red's `date!` which can be date-only or date+time). Real Red
    has no separate `time!` type — `time?` is a predicate on `date!`
-   values that have a time component. Confirm before implementing.
+   values that have a time component. **Timezones are fixed UTC offsets
+   only** (`±HH:MM`), matching Red parity — no named zones, no DST.
+   Named-zone support (`chrono-tz`) is deferred to v0.5+ if ever needed;
+   it would require a new `tz!` word type or string convention and adds
+   ~1.2 MB to the binary. The internal zone representation is
+   `Option<i32>` minutes (Red's exact internal form), not
+   `Option<FixedOffset>` — `FixedOffset` is used transiently during
+   parse/mold/`now` only. The `date/zone:` set-path relabels without
+   shifting; `to-utc` is the shift+relabel convenience.
 6. **M48 (modules) deferred to v0.5:** confirmed per user decision.
    Modules / `import` / `export` will be the headline v0.5 feature
    alongside closures (`closure!`).

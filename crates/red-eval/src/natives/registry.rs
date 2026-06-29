@@ -322,6 +322,9 @@ pub fn register_natives(env: &mut Env) {
     // Math + bitwise natives (M17)
     crate::math::register_math_natives(env);
 
+    // Trig + transcendental natives (M40)
+    crate::math::register_transcendental_natives(env);
+
     // Objects & contexts (M18)
     crate::object::register_object_natives(env);
 
@@ -358,6 +361,10 @@ pub fn install_constants(ctx: &Context) {
         Symbol::new("newline"),
         Value::string(std::rc::Rc::from("\n")),
     );
+    // M40: math constants. `pi`/`e` are first-class values (resolved via the
+    // standard word→slot binding pass, no special-casing in the evaluator).
+    ctx.set(Symbol::new("pi"), Value::float(std::f64::consts::PI));
+    ctx.set(Symbol::new("e"), Value::float(std::f64::consts::E));
     install_system(ctx);
 }
 
