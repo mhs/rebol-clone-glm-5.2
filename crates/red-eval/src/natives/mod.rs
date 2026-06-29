@@ -139,6 +139,8 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Float { .. } => "float!",
         Value::String { .. } => "string!",
         Value::Char { .. } => "char!",
+        Value::Pair { .. } => "pair!",
+        Value::Tuple { .. } => "tuple!",
         Value::String8 { .. } => "binary!",
         Value::Word { .. } => "word!",
         Value::SetWord { .. } => "set-word!",
@@ -157,6 +159,7 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Error(_) => "error!",
         Value::Object(_) => "object!",
         Value::Map(_) => "map!",
+        Value::Date { .. } => "date!",
     }
 }
 
@@ -1065,5 +1068,49 @@ mod tests {
             a = b
         "#;
         assert_eq!(mold_to_string(&val(src)), "true");
+    }
+
+    // --- M44 pair! / tuple! tests ---
+
+    #[test]
+    fn m44_pair_predicate() {
+        assert_eq!(mold_to_string(&val("pair? 1x2")), "true");
+        assert_eq!(mold_to_string(&val("pair? 5")), "false");
+    }
+
+    #[test]
+    fn m44_tuple_predicate() {
+        assert_eq!(mold_to_string(&val("tuple? 1.2.3")), "true");
+        assert_eq!(mold_to_string(&val("tuple? 5")), "false");
+    }
+
+    #[test]
+    fn m44_type_of_pair_tuple() {
+        assert_eq!(mold_to_string(&val("type? 1x2")), "pair!");
+        assert_eq!(mold_to_string(&val("type? 1.2.3")), "tuple!");
+    }
+
+    #[test]
+    fn m44_tuple_path_access() {
+        assert_eq!(mold_to_string(&val("255.0.0/r")), "255");
+        assert_eq!(mold_to_string(&val("255.0.0/g")), "0");
+        assert_eq!(mold_to_string(&val("255.0.0/1")), "255");
+        assert_eq!(mold_to_string(&val("255.0.0/2")), "0");
+    }
+
+    #[test]
+    fn m44_pair_path_access() {
+        assert_eq!(mold_to_string(&val("100x200/x")), "100");
+        assert_eq!(mold_to_string(&val("100x200/y")), "200");
+        assert_eq!(mold_to_string(&val("100x200/1")), "100");
+        assert_eq!(mold_to_string(&val("100x200/2")), "200");
+    }
+
+    #[test]
+    fn m44_pair_tuple_equality() {
+        assert_eq!(mold_to_string(&val("1x2 = 1x2")), "true");
+        assert_eq!(mold_to_string(&val("1x2 <> 2x1")), "true");
+        assert_eq!(mold_to_string(&val("255.0.0 = 255.0.0")), "true");
+        assert_eq!(mold_to_string(&val("255.0.0 <> 0.255.0")), "true");
     }
 }

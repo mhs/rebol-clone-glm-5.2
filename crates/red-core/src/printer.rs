@@ -1,7 +1,9 @@
 //! `mold`: value → Red source text. Inverse of the parser; round-trip
 //! property is `mold(parse(s)) == normalize(s)`.
 
-use crate::value::{MapDef, MapKey, ObjectDef, Value};
+use chrono::{Datelike, Timelike};
+
+use crate::value::{DateValue, MapDef, MapKey, ObjectDef, Value};
 
 /// Append the Red source form of `value` to `out`.
 pub fn mold(value: &Value, out: &mut String) {
@@ -16,6 +18,22 @@ pub fn mold(value: &Value, out: &mut String) {
         Value::Float { f, .. } => mold_float(*f, out),
         Value::String { s, .. } => mold_string(s, out),
         Value::Char { c, .. } => mold_char(*c, out),
+        Value::Pair { x, y, .. } => {
+            mold(x, out);
+            out.push('x');
+            mold(y, out);
+        }
+        Value::Tuple { bytes, .. } => {
+            // `255.0.0` (3 bytes RGB) or `128.64.32.128` (4 bytes RGBA).
+            // Dot-joined, no spaces.
+            for (n, b) in bytes.iter().enumerate() {
+                if n > 0 {
+                    out.push('.');
+                }
+                use std::fmt::Write;
+                let _ = write!(out, "{}", b);
+            }
+        }
         Value::String8 { bytes, .. } => {
             // M41: mold as `#{HEX}` (uppercase) — matches Red's binary! form
             // and round-trips through the lexer.
@@ -134,6 +152,7 @@ pub fn mold(value: &Value, out: &mut String) {
         Value::Url { url, .. } => out.push_str(url),
         Value::Object(obj) => mold_object(&obj.borrow(), out),
         Value::Map(m) => mold_map(&m.borrow(), out),
+        Value::Date { dt, .. } => mold_date(dt, out),
     }
 }
 
@@ -166,6 +185,20 @@ pub fn form(value: &Value, out: &mut String) {
         Value::Float { f, .. } => mold_float(*f, out),
         Value::String { s, .. } => out.push_str(s),
         Value::Char { c, .. } => out.push(*c),
+        Value::Pair { x, y, .. } => {
+            form(x, out);
+            out.push('x');
+            form(y, out);
+        }
+        Value::Tuple { bytes, .. } => {
+            for (n, b) in bytes.iter().enumerate() {
+                if n > 0 {
+                    out.push('.');
+                }
+                use std::fmt::Write;
+                let _ = write!(out, "{}", b);
+            }
+        }
         Value::String8 { bytes, .. } => {
             out.push_str("#{");
             for b in bytes {
@@ -203,6 +236,7 @@ pub fn form(value: &Value, out: &mut String) {
             form_object_body(&o, out);
         }
         Value::Map(m) => form_map(&m.borrow(), out),
+        Value::Date { dt, .. } => mold_date(dt, out),
     }
 }
 
@@ -303,6 +337,65 @@ fn form_map(m: &MapDef, out: &mut String) {
         form(v, out);
     }
     out.push(']');
+}
+
+/// M45: mold a `date!` value.
+///
+/// Forms:
+/// - **date-only** (`dt` at midnight, `zone = None`): `29-Jun-2024`.
+/// - **date+time, zone-naive**: `29-Jun-2024/12:30:00`.
+/// - **date+time, UTC** (`zone = Some(0)`): `29-Jun-2024/12:30:00+00:00`.
+/// - **date+time, non-UTC zone**: `29-Jun-2024/12:30:00-04:00`.
+///
+/// Always emits `+HH:MM` two-digit form for the zone, **never `Z`** (per
+/// plan5.md M45). The day-month-year uses Red's `DD-Mon-YYYY` form (month
+/// abbreviated English). Time uses `HH:MM:SS` (optionally `.mmm` if
+/// sub-second; the lexer/parser support `.mmm` but `now`-derived values
+/// typically don't carry nanoseconds in the mold form).
+fn mold_date(d: &DateValue, out: &mut String) {
+    use std::fmt::Write;
+    let date = d.dt.date();
+    // `DD-Mon-YYYY` form. Month is the 3-letter English abbreviation
+    // (matches Red). chrono's `%b` gives `Jun` for June.
+    let _ = write!(
+        out,
+        "{:02}-{}-{}",
+        date.day(),
+        month_abbr(date.month()),
+        date.year()
+    );
+    if d.has_time() || d.zone.is_some() {
+        let t = d.dt.time();
+        out.push('/');
+        let _ = write!(out, "{:02}:{:02}:{:02}", t.hour(), t.minute(), t.second());
+        if let Some(zone) = d.zone {
+            let sign = if zone < 0 { '-' } else { '+' };
+            let m = zone.abs();
+            let _ = write!(out, "{}{:02}:{:02}", sign, m / 60, m % 60);
+        }
+    }
+}
+
+/// 3-letter English month abbreviation (matches Red's `DD-Mon-YYYY` form and
+/// `chrono::%b` for English locale). Hardcoded to avoid locale-dependence in
+/// `chrono`'s `%b` formatting (which uses the system locale on some
+/// platforms).
+fn month_abbr(m: u32) -> &'static str {
+    match m {
+        1 => "Jan",
+        2 => "Feb",
+        3 => "Mar",
+        4 => "Apr",
+        5 => "May",
+        6 => "Jun",
+        7 => "Jul",
+        8 => "Aug",
+        9 => "Sep",
+        10 => "Oct",
+        11 => "Nov",
+        12 => "Dec",
+        _ => "???",
+    }
 }
 
 /// Emit a single map key. When `set_word_form` is true, `Sym` keys render as

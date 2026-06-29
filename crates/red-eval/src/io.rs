@@ -347,8 +347,9 @@ fn size_q(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
     Ok(Value::integer(meta.len() as i64))
 }
 
-/// `modified? file` → `integer!` (seconds since Unix epoch). A real `date!`
-/// type is deferred to v0.3; for now the mtime is returned as epoch seconds.
+/// `modified? file` → `date!` (M45). Returns the file's mtime as a
+/// timezone-aware `date!` (local time + local UTC offset). Uses
+/// `chrono::DateTime::<Local>::from(mtime)`.
 fn modified_q(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(arity_err(args, "modified?", 1, args.len()));
@@ -356,13 +357,40 @@ fn modified_q(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value
     let (path, _span) = expect_file(&args[0])?;
     let p = resolve_path(path, env);
     let meta = std::fs::metadata(&p).map_err(|e| io_err(&args[0], &p, "cannot stat", e))?;
-    let secs = meta
+    let mtime = meta
         .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    Ok(Value::integer(secs))
+        .map_err(|e| io_err(&args[0], &p, "cannot read mtime", e))?;
+    let dv = red_core::DateValue::from_system_time_local(mtime);
+    Ok(Value::date(dv))
+}
+
+/// `now` → `date!` (M45). Returns the current local time with the system's
+/// local UTC offset attached.
+fn now_native(_args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    Ok(Value::date(red_core::DateValue::now_local()))
+}
+
+/// `today` → `date!` (M45). Returns date-only at local midnight, `zone: None`.
+fn today_native(_args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    Ok(Value::date(red_core::DateValue::today_local()))
+}
+
+/// `to-utc date` → `date!` (M45). Shifts the wall-clock `dt` by `-zone`
+/// minutes (so the wall clock shows the UTC time), then sets `zone = Some(0)`.
+/// On a zone-naive date, this is a no-op (zone is already treated as UTC for
+/// arithmetic).
+fn to_utc_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "to-utc", 1, args.len()));
+    }
+    match &args[0] {
+        Value::Date { dt, .. } => Ok(Value::date(dt.to_utc())),
+        other => Err(EvalError::TypeError {
+            expected: "date!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -690,6 +718,11 @@ pub fn register_io_natives(env: &mut Env) {
     reg(env, "exists?", exists_q as NF, 1);
     reg(env, "size?", size_q as NF, 1);
     reg(env, "modified?", modified_q as NF, 1);
+
+    // M45: date/time natives.
+    reg(env, "now", now_native as NF, 0);
+    reg(env, "today", today_native as NF, 0);
+    reg(env, "to-utc", to_utc_native as NF, 1);
 
     // Directory ops.
     reg(env, "dir?", dir_q as NF, 1);

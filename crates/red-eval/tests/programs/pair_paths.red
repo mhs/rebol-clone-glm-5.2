@@ -1,0 +1,10 @@
+Red []
+p: 100x200
+print p/x
+print p/y
+print p/1
+print p/2
+p/x: 5
+print p
+p/2: 7
+print p

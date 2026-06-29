@@ -7,6 +7,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use chrono::{DateTime, FixedOffset, Local, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use indexmap::IndexMap;
 
 use crate::context::Context;
@@ -207,6 +208,20 @@ pub enum Value {
     /// `#"a"` — a char! literal. Source-origin (the lexer scans the `#"-led
     /// form); carries the byte-offset span of the whole token.
     Char { c: char, span: Span },
+    /// `100x200` — a pair! literal. Source-origin (the lexer scans the
+    /// `NxM` form); carries the byte-offset span of the whole token. `x`/`y`
+    /// are `Rc<Value>` so a pair can hold int/int, int/float, float/float.
+    /// Immutable (value-semantics) — set-path returns a new pair.
+    Pair {
+        x: Rc<Value>,
+        y: Rc<Value>,
+        span: Span,
+    },
+    /// `255.0.0` / `128.64.32.128` — a tuple! literal (RGB or RGBA color
+    /// bytes). Source-origin (the lexer scans the `R.G.B[.A]` form); carries
+    /// the byte-offset span of the whole token. 3 or 4 bytes, each 0–255.
+    /// Immutable (value-semantics) — set-path returns a new tuple.
+    Tuple { bytes: Rc<[u8]>, span: Span },
     /// `foo`
     Word {
         sym: Symbol,
@@ -287,6 +302,18 @@ pub enum Value {
     /// are the hashable subset of `Value` (`MapKey`); values are arbitrary.
     /// Synthetic — produced by `make map!`/`to-map`; carries no source span.
     Map(Rc<RefCell<MapDef>>),
+    /// `29-Jun-2024` / `2024-06-29T12:30:00Z` — a `date!` literal (M45).
+    /// Source-origin (the lexer scans the date/time/zone form); carries the
+    /// byte-offset span of the whole token. A single variant covers date-only,
+    /// date+time, and date+time+zone (Red parity — there is no separate
+    /// `time!` type; `time?` is a predicate on `date!`).
+    ///
+    /// The `zone` field is `Option<i32>` minutes east of UTC, mirroring Red's
+    /// internal `date!/zone` representation: `None` = zone-naive (no offset
+    /// emitted on mold); `Some(0)` = UTC (molds as `+00:00`); `Some(330)` =
+    /// `+05:30`. `FixedOffset` is used transiently during parse/mold/`now`
+    /// only — the struct stores raw minutes.
+    Date { dt: Rc<DateValue>, span: Span },
 }
 
 /// Payload of a `Value::Error`. M42 extends the prior message-only stub to
@@ -524,17 +551,203 @@ impl MapDef {
     }
 }
 
+/// A `date!` payload (M45): a wall-clock `NaiveDateTime` plus an optional UTC
+/// offset stored as `Option<i32>` minutes (matching Red's internal
+/// `date!/zone` shape). `None` is zone-naive (no offset emitted on mold);
+/// `Some(0)` is UTC (molds as `+00:00`); `Some(330)` is `+05:30`.
+///
+/// Three logical states all live in this single struct:
+/// - **date-only**: `dt` is at midnight (`00:00:00`), `zone = None`.
+/// - **date+time**: `dt` has a real time component, `zone = None`.
+/// - **date+time+zone**: `dt` has a real time, `zone = Some(_)`.
+///
+/// (Red folds `time!` into `date!` — there is no separate `Value::Time`
+/// variant; `time?` is a predicate on `date!`.)
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DateValue {
+    pub dt: NaiveDateTime,
+    pub zone: Option<i32>,
+}
+
+impl DateValue {
+    /// Build a `DateValue` from local wall-clock `dt` and an optional zone
+    /// (minutes east of UTC). Caller supplies both; no automatic offset
+    /// derivation here.
+    pub fn from_local(dt: NaiveDateTime, zone: Option<i32>) -> Self {
+        DateValue { dt, zone }
+    }
+
+    /// Date-only constructor (midnight, zone-naive).
+    pub fn date_only(d: NaiveDate) -> Self {
+        DateValue {
+            dt: d.and_hms_opt(0, 0, 0).expect("midnight is always valid"),
+            zone: None,
+        }
+    }
+
+    /// True iff the value has a non-midnight time component. (`12:00:00` is
+    /// midnight; `00:00:01` is not.)
+    pub fn has_time(&self) -> bool {
+        self.dt.time() != NaiveTime::default()
+    }
+
+    /// Apply `zone` to produce an absolute UTC instant. Zone-naive (`None`)
+    /// is treated as UTC for arithmetic only (matching plan5.md M45: "None
+    /// treated as UTC for arithmetic").
+    pub fn to_offset_utc(&self) -> DateTime<Utc> {
+        let offset_secs = self.zone.unwrap_or(0) * 60;
+        let utc_naive = self.dt - chrono::Duration::seconds(offset_secs as i64);
+        DateTime::<Utc>::from_naive_utc_and_offset(utc_naive, Utc)
+    }
+
+    /// Construct the `FixedOffset` for `zone` (`None` → UTC). Used transiently
+    /// during mold/parse only.
+    pub fn fixed_offset(&self) -> FixedOffset {
+        FixedOffset::east_opt(self.zone.unwrap_or(0) * 60)
+            .expect("zone minutes in range (lexer enforces |m| <= 14*60)")
+    }
+
+    /// Produce an absolute `DateTime<FixedOffset>` (the wall-clock instant
+    /// with its zone attached). `None` zone → UTC offset.
+    pub fn to_zoned(&self) -> DateTime<FixedOffset> {
+        DateTime::<FixedOffset>::from_naive_utc_and_offset(self.dt, self.fixed_offset())
+    }
+
+    /// `now` constructor: current local time + the system's local UTC offset.
+    /// The offset may differ between calls during DST transitions; that's the
+    /// system's behavior, not a Red-parity issue.
+    pub fn now_local() -> Self {
+        let now = Local::now();
+        let offset = now.offset().local_minus_utc() / 60;
+        DateValue {
+            dt: now.naive_local(),
+            zone: Some(offset),
+        }
+    }
+
+    /// `today` constructor: date-only at local midnight, `zone: None`.
+    pub fn today_local() -> Self {
+        Self::date_only(Local::now().date_naive())
+    }
+
+    /// Helper: `to-utc` shift-and-relabel. Subtracts `zone` minutes from `dt`
+    /// (so the wall clock shows the UTC time), then sets `zone = Some(0)`.
+    pub fn to_utc(&self) -> Self {
+        let offset_secs = self.zone.unwrap_or(0) as i64 * 60;
+        DateValue {
+            dt: self.dt - chrono::Duration::seconds(offset_secs),
+            zone: Some(0),
+        }
+    }
+
+    /// Construct a `DateValue` from Unix epoch seconds (UTC). The result has
+    /// `zone = Some(0)` (UTC). Returns `None` if `secs` is out of range.
+    pub fn from_epoch(secs: i64) -> Option<Self> {
+        let dt = DateTime::<Utc>::from_timestamp(secs, 0)?.naive_utc();
+        Some(DateValue::from_local(dt, Some(0)))
+    }
+
+    /// Construct a `date!` from a `std::time::SystemTime` (e.g. a file's
+    /// mtime), expressed in the **local** timezone with the system's local
+    /// UTC offset attached. Used by `modified?` (M45).
+    pub fn from_system_time_local(st: std::time::SystemTime) -> Self {
+        let dt: DateTime<Local> = st.into();
+        let offset = dt.offset().local_minus_utc() / 60;
+        DateValue::from_local(dt.naive_local(), Some(offset))
+    }
+
+    /// Add `days` to the date portion. Zone is preserved. Used by
+    /// `date + integer` arithmetic (M45).
+    pub fn add_days(&self, days: i64) -> Self {
+        DateValue::from_local(self.dt + chrono::Duration::days(days), self.zone)
+    }
+
+    /// Replace the time component, keeping the date + zone. Used by
+    /// `date + time` arithmetic (M45).
+    pub fn with_time(&self, time: NaiveTime) -> Self {
+        DateValue::from_local(self.dt.date().and_time(time), self.zone)
+    }
+
+    // --- M45 path accessors (`date/year`, `date/zone`, etc.) ---
+
+    pub fn year(&self) -> i32 {
+        use chrono::Datelike;
+        self.dt.year()
+    }
+    pub fn month(&self) -> u32 {
+        use chrono::Datelike;
+        self.dt.month()
+    }
+    pub fn day(&self) -> u32 {
+        use chrono::Datelike;
+        self.dt.day()
+    }
+    pub fn hour(&self) -> u32 {
+        use chrono::Timelike;
+        self.dt.hour()
+    }
+    pub fn minute(&self) -> u32 {
+        use chrono::Timelike;
+        self.dt.minute()
+    }
+    pub fn second(&self) -> u32 {
+        use chrono::Timelike;
+        self.dt.second()
+    }
+    /// ISO weekday (1=Monday .. 7=Sunday).
+    pub fn weekday(&self) -> u32 {
+        use chrono::Datelike;
+        self.dt.weekday().number_from_monday()
+    }
+    /// Day of year (1..=366).
+    pub fn yearday(&self) -> u32 {
+        use chrono::Datelike;
+        self.dt.ordinal()
+    }
+    /// ISO week number (1..=53).
+    pub fn week(&self) -> u32 {
+        use chrono::Datelike;
+        self.dt.iso_week().week()
+    }
+    /// The time component as a `NaiveTime`.
+    pub fn time(&self) -> NaiveTime {
+        self.dt.time()
+    }
+    /// Relabel the zone offset only (does NOT shift the wall-clock `dt`).
+    /// Matches Red's `date/zone:` set-path semantics.
+    pub fn relabel_zone(&self, zone: Option<i32>) -> Self {
+        DateValue::from_local(self.dt, zone)
+    }
+    /// The zone as a `time!`-shaped `DateValue` (date portion zeroed to epoch,
+    /// time = |zone| as HH:MM, sign carried in the time value via negative
+    /// hours). Used by `date/zone` path accessor.
+    pub fn zone_as_time(&self) -> Option<Value> {
+        let z = self.zone?;
+        let abs = z.abs();
+        let h: u32 = (abs / 60) as u32;
+        let m: u32 = (abs % 60) as u32;
+        let time = NaiveTime::from_hms_opt(h, m, 0)?;
+        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)?;
+        Some(Value::date(DateValue::from_local(
+            epoch.and_time(time),
+            None,
+        )))
+    }
+}
+
 impl Value {
     /// Span of this value in the original source. Every source-origin variant
     /// (`Integer`/`Float`/`String`/word-family/`Block`/`Paren`/`Path`/
-    /// `Refinement`/`String8`) carries its token span; synthetic variants
-    /// (`None`/`Logic`/`Func`) return `None`.
+    /// `Refinement`/`String8`/`Pair`/`Tuple`/`Date`) carries its token span;
+    /// synthetic variants (`None`/`Logic`/`Func`) return `None`.
     pub fn span(&self) -> Option<Span> {
         match self {
             Value::Integer { span, .. }
             | Value::Float { span, .. }
             | Value::String { span, .. }
             | Value::Char { span, .. }
+            | Value::Pair { span, .. }
+            | Value::Tuple { span, .. }
             | Value::Word { span, .. }
             | Value::SetWord { span, .. }
             | Value::GetWord { span, .. }
@@ -548,7 +761,8 @@ impl Value {
             | Value::Refinement { span, .. }
             | Value::File { span, .. }
             | Value::Url { span, .. }
-            | Value::String8 { span, .. } => Some(*span),
+            | Value::String8 { span, .. }
+            | Value::Date { span, .. } => Some(*span),
             Value::None
             | Value::Logic(_)
             | Value::Func(_)
@@ -744,6 +958,26 @@ impl Value {
         Self::binary(bytes)
     }
 
+    /// Constructor shorthand for a pair! value with a zero span (test/REPL
+    /// use). Wraps `x`/`y` in `Rc<Value>`.
+    pub fn pair(x: Value, y: Value) -> Self {
+        Value::Pair {
+            x: Rc::new(x),
+            y: Rc::new(y),
+            span: Span::default(),
+        }
+    }
+
+    /// Constructor shorthand for a tuple! value with a zero span
+    /// (test/REPL use). `bytes` must be 3 or 4 elements (RGB or RGBA);
+    /// construction does not enforce this — callers are responsible.
+    pub fn tuple(bytes: Vec<u8>) -> Self {
+        Value::Tuple {
+            bytes: Rc::from(bytes.as_slice()),
+            span: Span::default(),
+        }
+    }
+
     /// Constructor shorthand for an object wrapping `obj_def`.
     pub fn object(obj_def: ObjectDef) -> Self {
         Value::Object(Rc::new(RefCell::new(obj_def)))
@@ -752,6 +986,15 @@ impl Value {
     /// Constructor shorthand for a map wrapping `map_def`.
     pub fn map(map_def: MapDef) -> Self {
         Value::Map(Rc::new(RefCell::new(map_def)))
+    }
+
+    /// Constructor shorthand for a `date!` value with a zero span (test/REPL
+    /// use).
+    pub fn date(dt: DateValue) -> Self {
+        Value::Date {
+            dt: Rc::new(dt),
+            span: Span::default(),
+        }
     }
 }
 
@@ -1060,6 +1303,27 @@ mod tests {
     }
 
     #[test]
+    fn value_map_constructor() {
+        let m = MapDef::new();
+        match Value::map(m) {
+            Value::Map(_) => {}
+            other => panic!("expected Map, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_date_constructor() {
+        let d = DateValue::default();
+        match Value::date(d) {
+            Value::Date { dt, span } => {
+                assert!(span.is_default());
+                assert_eq!(dt.zone, None);
+            }
+            other => panic!("expected Date, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn value_binary_constructor() {
         match Value::binary(vec![0xDE, 0xAD]) {
             Value::String8 { bytes, .. } => assert_eq!(bytes, vec![0xDE, 0xAD]),
@@ -1091,6 +1355,15 @@ mod tests {
             span: s
         });
         check!(Value::Char { c: 'a', span: s });
+        check!(Value::Pair {
+            x: Rc::new(Value::integer(1)),
+            y: Rc::new(Value::integer(2)),
+            span: s
+        });
+        check!(Value::Tuple {
+            bytes: Rc::from(&[1u8, 2, 3][..]),
+            span: s
+        });
         check!(Value::Word {
             sym: Symbol::new("w"),
             binding: Binding::Unbound,
@@ -1150,6 +1423,10 @@ mod tests {
             bytes: vec![1, 2, 3],
             span: s
         });
+        check!(Value::Date {
+            dt: Rc::new(DateValue::default()),
+            span: s
+        });
     }
 
     #[test]
@@ -1187,6 +1464,8 @@ mod tests {
             Value::Float { f, .. } => Value::Float { f, span: s },
             Value::String { s: ss, .. } => Value::String { s: ss, span: s },
             Value::Char { c, .. } => Value::Char { c, span: s },
+            Value::Pair { x, y, .. } => Value::Pair { x, y, span: s },
+            Value::Tuple { bytes, .. } => Value::Tuple { bytes, span: s },
             Value::Word { sym, binding, .. } => Value::Word {
                 sym,
                 binding,
@@ -1213,6 +1492,7 @@ mod tests {
             Value::File { path, .. } => Value::File { path, span: s },
             Value::Url { url, .. } => Value::Url { url, span: s },
             Value::String8 { bytes, .. } => Value::String8 { bytes, span: s },
+            Value::Date { dt, .. } => Value::Date { dt, span: s },
             other => other,
         }
     }

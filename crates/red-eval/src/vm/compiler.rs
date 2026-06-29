@@ -628,7 +628,10 @@ fn compile_prefix(
         Value::Float { .. }
         | Value::String { .. }
         | Value::Char { .. }
+        | Value::Pair { .. }
+        | Value::Tuple { .. }
         | Value::String8 { .. }
+        | Value::Date { .. }
         | Value::LitWord { .. }
         | Value::Block { .. }
         | Value::Func(_)
@@ -1188,6 +1191,13 @@ fn function_path_info(
             _ => None,
         })
         .collect();
+    // M45: if the native has no declared refinements and the path has word
+    // parts in the tail, this is a data-path select on the native's return
+    // value (e.g. `now/year`). Fall back to `GetPath` (runtime resolution)
+    // instead of compiling as a refined call.
+    if fd.refinements.is_empty() && !leading_refs.is_empty() {
+        return None;
+    }
     Some((native_idx, Rc::clone(fd), head_sym, leading_refs))
 }
 

@@ -286,6 +286,47 @@ pub(crate) fn binary_predicate(
     pred1(args, "binary?", |v| matches!(v, Value::String8 { .. }))
 }
 
+/// `pair?` — true for `pair!` (`Value::Pair`). M44.
+pub(crate) fn pair_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "pair?", |v| matches!(v, Value::Pair { .. }))
+}
+
+/// `tuple?` — true for `tuple!` (`Value::Tuple`). M44.
+pub(crate) fn tuple_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "tuple?", |v| matches!(v, Value::Tuple { .. }))
+}
+
+/// `date?` — true for `date!` (`Value::Date`). M45.
+pub(crate) fn date_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "date?", |v| matches!(v, Value::Date { .. }))
+}
+
+/// `time?` — true for `date!` values that have a time component (non-midnight
+/// `dt`) OR a zone (`zone != None`). Matches Red's `time?` semantics broadly:
+/// any `date!` that isn't date-only. M45.
+pub(crate) fn time_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "time?", |v| match v {
+        Value::Date { dt, .. } => dt.has_time() || dt.zone.is_some(),
+        _ => false,
+    })
+}
+
 /// `error?` — true for `error!` (`Value::Error`). The variant exists (M16
 /// basic `try`/`catch`/`throw`); M42 extends the field set, not the variant.
 pub(crate) fn error_predicate(
@@ -517,6 +558,10 @@ pub(crate) fn register_word_predicate_natives(env: &mut Env) {
     reg(env, "logic?", logic_predicate);
     reg(env, "none?", none_predicate);
     reg(env, "binary?", binary_predicate);
+    reg(env, "pair?", pair_predicate);
+    reg(env, "tuple?", tuple_predicate);
+    reg(env, "date?", date_predicate);
+    reg(env, "time?", time_predicate);
     reg(env, "error?", error_predicate);
     reg(env, "attempted?", attempted_predicate);
 

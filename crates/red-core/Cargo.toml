@@ -17,6 +17,9 @@ force-walk = []
 
 [dependencies]
 indexmap = "2"
+# M45: `chrono` for the `date!`/`time!`/`now` types. `clock` enables `Local`
+# (system TZ + offset) for `now`; no `std`/`wasmbind`/`alloc` features needed.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 proptest = "1"

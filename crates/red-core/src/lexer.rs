@@ -6,7 +6,9 @@
 
 use std::rc::Rc;
 
-use crate::value::{Span, Symbol};
+use chrono::{NaiveDate, NaiveTime};
+
+use crate::value::{DateValue, Span, Symbol};
 
 /// One lexical token.
 #[derive(Clone, Debug, PartialEq)]
@@ -38,6 +40,20 @@ pub enum TokenKind {
     /// must be contiguous) and a closing `}`. An odd digit count is
     /// zero-padded on the high nibble (Red behavior).
     Binary(Rc<[u8]>),
+    /// `100x200` — a pair! literal. Stored as the two raw component substrings
+    /// (each parses as int or float); the parser converts to `Value::Pair`.
+    /// The lexer routes here via `detect_pair_tuple` (an `x` separator
+    /// between digit-runs disambiguates from floats/words).
+    Pair(Rc<str>, Rc<str>),
+    /// `255.0.0` / `128.64.32.128` — a tuple! literal (RGB or RGBA bytes).
+    /// 3 or 4 byte components, each 0–255, dot-joined. The lexer routes here
+    /// via `detect_pair_tuple` (2 or 3 dots between digit-runs).
+    Tuple(Rc<[u8]>),
+    /// `29-Jun-2024` / `2024-06-29T12:30:00Z` / `12:30:00-04:00` — a `date!`
+    /// literal (M45). Stored as a fully-parsed `DateValue` (the lexer
+    /// validates the structure + values). A single variant covers date-only,
+    /// date+time, and date+time+zone; the parser wraps it as `Value::Date`.
+    Date(DateValue),
     LBracket,
     RBracket,
     LParen,
@@ -69,6 +85,19 @@ pub enum LexError {
     InvalidChar { span: Span, chars: String },
     /// `#{...}` hit EOF before the closing `}`, or contained a non-hex digit.
     InvalidBinary { span: Span, chars: String },
+    /// `1x`-style pair! literal where the `x` is not followed by a valid
+    /// number component, or one side is empty.
+    InvalidPair { span: Span, chars: String },
+    /// `255.0.0`-style tuple! literal with a component > 255, too many
+    /// components (> 4), or too few (< 3).
+    InvalidTuple { span: Span, chars: String },
+    /// `31-Feb-2024`-style date! literal with an invalid date (bad day/month
+    /// combination, out-of-range values, etc.). The run structurally matches
+    /// a date/time form but the values don't validate.
+    InvalidDate { span: Span, chars: String },
+    /// `+15:00`-style zone offset suffix with |minutes| > 14*60 or a malformed
+    /// suffix shape.
+    InvalidZone { span: Span, chars: String },
 }
 
 impl LexError {
@@ -80,7 +109,11 @@ impl LexError {
             | LexError::InvalidWord { span }
             | LexError::UnbalancedBrace { span, .. }
             | LexError::InvalidChar { span, .. }
-            | LexError::InvalidBinary { span, .. } => *span,
+            | LexError::InvalidBinary { span, .. }
+            | LexError::InvalidPair { span, .. }
+            | LexError::InvalidTuple { span, .. }
+            | LexError::InvalidDate { span, .. }
+            | LexError::InvalidZone { span, .. } => *span,
         }
     }
 }
@@ -103,6 +136,18 @@ impl std::fmt::Display for LexError {
             }
             LexError::InvalidBinary { chars, .. } => {
                 write!(f, "invalid binary literal: {chars:?}")
+            }
+            LexError::InvalidPair { chars, .. } => {
+                write!(f, "invalid pair literal: {chars:?}")
+            }
+            LexError::InvalidTuple { chars, .. } => {
+                write!(f, "invalid tuple literal: {chars:?}")
+            }
+            LexError::InvalidDate { chars, .. } => {
+                write!(f, "invalid date literal: {chars:?}")
+            }
+            LexError::InvalidZone { chars, .. } => {
+                write!(f, "invalid zone offset: {chars:?}")
             }
         }
     }
@@ -232,10 +277,38 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             }
         }
 
-        // Numbers: digit, or `-` followed by digit.
+        // Numbers: digit, or `-` followed by digit. M44: pre-detect pair!
+        // (`NxM`) and tuple! (`R.G.B[.A]`) forms here so `scan_number` only
+        // sees plain integers/floats (preserving its existing 2nd-dot error).
+        // M45: pre-detect date!/time! forms first — `29-Jun-2024` starts with
+        // a digit but has alpha chars that `scan_number` can't handle.
         if c.is_ascii_digit() || (c == b'-' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit())
         {
-            let (end, kind) = scan_number(src, &mut i)?;
+            // M45: date!/time! detection (before pair/tuple/number). Must run
+            // first because `29-Jun-2024` starts with a digit but isn't a
+            // valid number/pair/tuple.
+            match detect_date_time(src, i) {
+                DateDetect::NotADate => {}
+                DateDetect::Valid { end, value } => {
+                    out.push(Token {
+                        kind: TokenKind::Date(value),
+                        span: Span::new(start, end),
+                    });
+                    i = end;
+                    continue;
+                }
+                DateDetect::Invalid { end } => {
+                    return Err(LexError::InvalidDate {
+                        span: Span::new(start, end),
+                        chars: src[start..end].to_string(),
+                    });
+                }
+            }
+            let (end, kind) = match detect_pair_tuple(src, i) {
+                Some(true) => scan_pair(src, &mut i)?,
+                Some(false) => scan_tuple(src, &mut i)?,
+                None => scan_number(src, &mut i)?,
+            };
             // M38 follow-up: integer SetPath. `2:` lexes as `Integer(2)` +
             // `SetWord("2")` with overlapping spans (mirrors `obj/field:`
             // which lexes as `Refinement(field)` + `SetWord(field)`). The
@@ -636,6 +709,209 @@ fn consume_digits(bytes: &[u8], mut i: usize) -> usize {
     i - start
 }
 
+/// M44: peek a non-delimiter run starting at `start` and classify it as a
+/// pair! (`NxM`, an `x` between digit-led runs), a tuple! (`R.G.B[.A]`,
+/// 2+ dots between digit-only runs), or neither (`None` → plain int/
+/// float, handled by `scan_number`). Does not advance `i`.
+///
+/// Disambiguation rules (per plan5.md M44):
+/// - `x` separator between two digit-led runs → pair (both sides may be int
+///   or float, e.g. `1x2`, `1.5x2.5`, `1.0e2x3`).
+/// - 2+ dots between digit-only runs → tuple (scan_tuple enforces the 3–4
+///   component limit; 5+ components route here and error cleanly).
+/// - 1 dot → float (scan_number handles).
+/// - 0 dots → integer (scan_number handles).
+///
+/// Returns `Some(true)` for pair, `Some(false)` for tuple, `None` otherwise.
+fn detect_pair_tuple(src: &str, start: usize) -> Option<bool> {
+    let bytes = src.as_bytes();
+    let mut j = start;
+    while j < bytes.len() && !is_delimiter(bytes[j]) {
+        j += 1;
+    }
+    let run = &src[start..j];
+
+    // Pair: `x` between two digit-led runs. Each side may contain digits,
+    // `.`, `-`, `e`/`E` (exponent), `+` (exponent sign) — the chars valid in
+    // a number body. The right side may have a leading `-`.
+    if let Some(xpos) = run.find('x') {
+        let (left, right) = (&run[..xpos], &run[xpos + 1..]);
+        let num_byte = |c: u8| {
+            c.is_ascii_digit() || c == b'.' || c == b'-' || c == b'e' || c == b'E' || c == b'+'
+        };
+        let left_ok = !left.is_empty()
+            && left.bytes().all(num_byte)
+            && left
+                .bytes()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit() || c == b'-');
+        let right_ok = !right.is_empty()
+            && right.bytes().all(num_byte)
+            && right
+                .bytes()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit() || c == b'-');
+        if left_ok && right_ok {
+            return Some(true);
+        }
+    }
+
+    // Tuple: 2+ dots, all bytes digits or dots, leading/trailing digit.
+    // (Leading `-` rejected: tuples are unsigned bytes.) scan_tuple enforces
+    // the 3–4 component ceiling; 5+ dots route here and error InvalidTuple.
+    let dot_count = run.bytes().filter(|&c| c == b'.').count();
+    if dot_count >= 2
+        && run.bytes().all(|c| c.is_ascii_digit() || c == b'.')
+        && run.bytes().next().is_some_and(|c| c.is_ascii_digit())
+        && run.bytes().last().is_some_and(|c| c.is_ascii_digit())
+    {
+        return Some(false);
+    }
+
+    None
+}
+
+/// `NxM` — scan a pair! literal. Both sides parse as int or float; the raw
+/// component substrings are returned in `TokenKind::Pair` and the parser
+/// converts to `Value::Pair`. Does NOT enforce value ranges (integers and
+/// floats are both valid pair components).
+fn scan_pair(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError> {
+    let start = *i;
+    let bytes = src.as_bytes();
+
+    // First component: optional `-`, digits, optional `.digits`, optional
+    // exponent. Mirrors `scan_number` minus the int/float classification
+    // (the parser does that from the raw substring).
+    let _x_start = scan_pair_component(src, i)?;
+
+    // Expect `x` separator.
+    if *i >= bytes.len() || bytes[*i] != b'x' {
+        return Err(LexError::InvalidPair {
+            span: Span::new(start, *i),
+            chars: src[start..*i].to_string(),
+        });
+    }
+    *i += 1; // consume `x`
+
+    let y_start = scan_pair_component(src, i)?;
+
+    if y_start == *i {
+        // Empty second component (e.g. `1x` followed by delimiter/EOF).
+        return Err(LexError::InvalidPair {
+            span: Span::new(start, *i),
+            chars: src[start..*i].to_string(),
+        });
+    }
+
+    let end = *i;
+    let split = start + src[start..end].find('x').unwrap_or(end - start);
+    let x_text = Rc::from(&src[start..split]);
+    let y_text = Rc::from(&src[split + 1..end]);
+    Ok((end, TokenKind::Pair(x_text, y_text)))
+}
+
+/// Scan one component of a pair! (int or float body, no `x`/tuple recursion).
+/// Returns the start offset of the component (== the caller's `*i` on entry).
+fn scan_pair_component(src: &str, i: &mut usize) -> Result<usize, LexError> {
+    let bytes = src.as_bytes();
+    let start = *i;
+
+    if *i < bytes.len() && bytes[*i] == b'-' {
+        *i += 1;
+    }
+    if *i >= bytes.len() || !bytes[*i].is_ascii_digit() {
+        return Err(LexError::InvalidPair {
+            span: Span::new(start, *i),
+            chars: src[start..*i].to_string(),
+        });
+    }
+    *i += consume_digits(bytes, *i);
+
+    // Fractional part.
+    if *i + 1 < bytes.len() && bytes[*i] == b'.' && bytes[*i + 1].is_ascii_digit() {
+        *i += 1; // consume `.`
+        *i += consume_digits(bytes, *i);
+    }
+
+    // Exponent part.
+    if *i < bytes.len() && (bytes[*i] == b'e' || bytes[*i] == b'E') {
+        let saved = *i;
+        *i += 1;
+        if *i < bytes.len() && (bytes[*i] == b'+' || bytes[*i] == b'-') {
+            *i += 1;
+        }
+        if *i < bytes.len() && bytes[*i].is_ascii_digit() {
+            *i += consume_digits(bytes, *i);
+        } else {
+            *i = saved + 1; // not an exponent; let `e` start the next token
+        }
+    }
+
+    Ok(start)
+}
+
+/// `R.G.B[.A]` — scan a tuple! literal. Each component is a 0–255 integer
+/// (no floats, no negatives). 3 or 4 components; more or fewer is an error.
+fn scan_tuple(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError> {
+    let start = *i;
+    let bytes = src.as_bytes();
+    let mut comps: Vec<u8> = Vec::with_capacity(4);
+
+    // First component: digits only (leading `-` rejected — tuples are unsigned).
+    let comp_start = *i;
+    *i += consume_digits(bytes, *i);
+    let n = parse_tuple_component(src, comp_start, *i, start)?;
+    comps.push(n);
+
+    // Remaining components: `.digits`.
+    while *i + 1 < bytes.len() && bytes[*i] == b'.' && bytes[*i + 1].is_ascii_digit() {
+        *i += 1; // consume `.`
+        let comp_start = *i;
+        *i += consume_digits(bytes, *i);
+        let n = parse_tuple_component(src, comp_start, *i, start)?;
+        comps.push(n);
+        if comps.len() > 4 {
+            return Err(LexError::InvalidTuple {
+                span: Span::new(start, *i),
+                chars: src[start..*i].to_string(),
+            });
+        }
+    }
+
+    if comps.len() < 3 {
+        // detect_pair_tuple only routes 2-or-3-dot runs here, so this is a
+        // defensive guard for malformed input that slipped through.
+        return Err(LexError::InvalidTuple {
+            span: Span::new(start, *i),
+            chars: src[start..*i].to_string(),
+        });
+    }
+
+    Ok((*i, TokenKind::Tuple(Rc::from(&comps[..]))))
+}
+
+/// Parse one tuple component (a 0–255 integer) from `src[comp_start..comp_end]`.
+/// `start` is the tuple's start (for error spans).
+fn parse_tuple_component(
+    src: &str,
+    comp_start: usize,
+    comp_end: usize,
+    start: usize,
+) -> Result<u8, LexError> {
+    let text = &src[comp_start..comp_end];
+    let n: i64 = text.parse().map_err(|_| LexError::InvalidTuple {
+        span: Span::new(start, comp_end),
+        chars: src[start..comp_end].to_string(),
+    })?;
+    if !(0..=255).contains(&n) {
+        return Err(LexError::InvalidTuple {
+            span: Span::new(start, comp_end),
+            chars: src[start..comp_end].to_string(),
+        });
+    }
+    Ok(n as u8)
+}
+
 /// Read a run of non-delimiter chars (delimiters = whitespace, `[](){};",`)
 /// and classify into Word/SetWord/GetWord/LitWord. Rejects an empty body.
 fn scan_word(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError> {
@@ -892,6 +1168,481 @@ fn utf8_len(first_byte: u8) -> usize {
     }
 }
 
+// ---------------------------------------------------------------------------
+// M45: date! / time! / zone scanning
+// ---------------------------------------------------------------------------
+
+/// Result of `detect_date_time`: peek the non-delimiter run starting at `i`
+/// and classify whether it's a date/time/zone literal.
+#[derive(Clone, Debug)]
+enum DateDetect {
+    /// The run doesn't structurally match any date/time form. Fall through to
+    /// pair/tuple/number scanning.
+    NotADate,
+    /// A valid date!/time! literal. `end` is the byte offset just past the
+    /// consumed run; `value` is the fully-parsed `DateValue`.
+    Valid { end: usize, value: DateValue },
+    /// The run structurally matches a date/time form but the values are
+    /// invalid (e.g. `31-Feb-2024`, or a zone offset > 14h). `end` is the run
+    /// end for the error span.
+    Invalid { end: usize },
+}
+
+/// Peek the non-delimiter run starting at `start` and decide if it's a
+/// date/time literal. Does not advance any cursor — the caller consumes the
+/// run based on the returned `end`.
+///
+/// Special handling: `DD-Mon-YYYY/HH:MM:SS[zone]` — the `/` is a lexer
+/// delimiter, so the initial run stops at the `/`. If the first run is a
+/// valid date-only and the next char is `/` followed by a time-shaped run,
+/// the detection extends past the `/` to include the time + zone.
+/// (`DD/MM/YYYY` is not supported — its internal `/`s split it into separate
+/// tokens; use `DD-Mon-YYYY` or `YYYY-MM-DD` instead.)
+fn detect_date_time(src: &str, start: usize) -> DateDetect {
+    let bytes = src.as_bytes();
+    let mut j = start;
+    while j < bytes.len() && !is_delimiter(bytes[j]) {
+        j += 1;
+    }
+    let run = &src[start..j];
+
+    if !looks_like_date_time(run) {
+        return DateDetect::NotADate;
+    }
+
+    match parse_date_run(run) {
+        Ok(dv) => {
+            // Date-only: check for `/` + time extension
+            // (`DD-Mon-YYYY/HH:MM:SS[zone]`).
+            if !dv.has_time() && dv.zone.is_none() && j < bytes.len() && bytes[j] == b'/' {
+                let mut k = j + 1;
+                while k < bytes.len() && !is_delimiter(bytes[k]) {
+                    k += 1;
+                }
+                let ext_run = &src[j + 1..k];
+                if looks_like_time(ext_run) {
+                    let full_run = &src[start..k];
+                    return match parse_date_run(full_run) {
+                        Ok(dv2) => DateDetect::Valid { end: k, value: dv2 },
+                        Err(()) => DateDetect::Invalid { end: k },
+                    };
+                }
+            }
+            DateDetect::Valid { end: j, value: dv }
+        }
+        Err(()) => DateDetect::Invalid { end: j },
+    }
+}
+
+/// Quick check: does `run` look like a time form (`HH:MM:SS[.mmm][zone]`)?
+/// Structural only — value validation happens in `parse_time`.
+fn looks_like_time(run: &str) -> bool {
+    let bytes = run.as_bytes();
+    if bytes.len() < 8 {
+        return false;
+    }
+    // Must start with 2 digits + `:`.
+    if bytes[0].is_ascii_digit() && bytes[1].is_ascii_digit() && bytes[2] == b':' {
+        return true;
+    }
+    false
+}
+
+/// Quick structural check: does `run` look like a date/time form? This is a
+/// fast pre-filter — `parse_date_run` does the full validation. Returns false
+/// for plain integers/floats/pairs/tuples so they fall through to their
+/// scanners.
+///
+/// Note: `DD/MM/YYYY` is NOT detected here because `/` is a lexer delimiter
+/// (the run splits before reaching this function). Only `/`-free date forms
+/// (`DD-Mon-YYYY`, `YYYY-MM-DD`) and time forms (`HH:MM:SS`) are detected;
+/// the `DD-Mon-YYYY/HH:MM:SS` combined form is handled by `detect_date_time`'s
+/// `/`-extension logic.
+fn looks_like_date_time(run: &str) -> bool {
+    let bytes = run.as_bytes();
+    if bytes.is_empty() || !bytes[0].is_ascii_digit() {
+        return false;
+    }
+    // DD-Mon-YYYY: 1-2 digits + `-` + alpha (e.g. `29-Jun-2024`, `1-Jan-2024`).
+    if bytes.len() >= 3 && bytes[0].is_ascii_digit() {
+        // Find the first `-` within the first 3 chars.
+        if let Some(dash) = bytes[..3usize.min(bytes.len())]
+            .iter()
+            .position(|&b| b == b'-')
+        {
+            if (1..=2).contains(&dash)
+                && bytes.get(dash + 1).is_some_and(|b| b.is_ascii_alphabetic())
+            {
+                return true;
+            }
+        }
+    }
+    // ISO YYYY-MM-DD: 4 digits + `-`.
+    if bytes.len() >= 5 && bytes[0..4].iter().all(|b| b.is_ascii_digit()) && bytes[4] == b'-' {
+        return true;
+    }
+    // Time-only: HH:MM:SS — starts with 2 digits then `:`.
+    if looks_like_time(run) {
+        return true;
+    }
+    false
+}
+
+/// Parse a full date/time/zone run into a `DateValue`. Returns `Err(())` if
+/// the run structurally matches a date/time form but the values are invalid
+/// (e.g. `31-Feb-2024`); returns `Ok(DateValue)` on success.
+///
+/// Supported forms:
+/// - `DD-Mon-YYYY` (date-only)
+/// - `DD-Mon-YYYY/HH:MM:SS[.mmm][zone]`
+/// - `YYYY-MM-DD` (ISO date-only)
+/// - `YYYY-MM-DDTHH:MM:SS[.mmm][zone]` (ISO datetime)
+/// - `DD/MM/YYYY` (date-only)
+/// - `DD/MM/YYYY/HH:MM:SS[.mmm][zone]`
+/// - `HH:MM:SS[.mmm][zone]` (time-only; epoch date 1970-01-01)
+/// - Zone: `Z`, `+HH:MM`, `+H:MM`, `-HH:MM`, `+HHMM`, `-HHMM`, `+HH`, `-HH`
+fn parse_date_run(run: &str) -> Result<DateValue, ()> {
+    // Split off the trailing zone suffix (if any).
+    let (body, zone) = split_zone_suffix(run)?;
+    let zone = match zone {
+        Ok(z) => z,
+        Err(()) => return Err(()), // malformed zone
+    };
+
+    // Try ISO datetime: YYYY-MM-DDTHH:MM:SS[.mmm]
+    // (Only uppercase `T` — lowercase `t` appears in month abbreviations like
+    // `Oct`.)
+    if let Some(t_pos) = body.find('T') {
+        let date_str = &body[..t_pos];
+        let time_str = &body[t_pos + 1..];
+        if let Some(date) = parse_iso_date(date_str)? {
+            if let Some(time) = parse_time(time_str)? {
+                return Ok(DateValue::from_local(date.and_time(time), zone));
+            }
+        }
+        return Err(());
+    }
+
+    // Try date + `/` + time. Split on the LAST `/` so DD/MM/YYYY's internal
+    // slashes stay with the date part.
+    if let Some(slash_pos) = body.rfind('/') {
+        let date_str = &body[..slash_pos];
+        let time_str = &body[slash_pos + 1..];
+        // Try each date form on date_str. If a form structurally matches but
+        // values are invalid (Err), propagate the error.
+        let date_opt: Option<NaiveDate> = {
+            match parse_iso_date(date_str) {
+                Ok(o) => o,
+                Err(()) => return Err(()),
+            }
+        };
+        let date_opt = match date_opt {
+            Some(d) => Some(d),
+            None => match parse_dmonyyyy(date_str) {
+                Ok(o) => o,
+                Err(()) => return Err(()),
+            },
+        };
+        let date_opt = match date_opt {
+            Some(d) => Some(d),
+            None => match parse_dslashyyyy(date_str) {
+                Ok(o) => o,
+                Err(()) => return Err(()),
+            },
+        };
+        if let Some(date) = date_opt {
+            if let Some(time) = parse_time(time_str)? {
+                return Ok(DateValue::from_local(date.and_time(time), zone));
+            }
+        }
+        return Err(());
+    }
+
+    // No `/` or `T` separator. Try date-only, then time-only.
+    if let Some(date) = parse_iso_date(body)? {
+        // Date-only can't have a zone (zone only valid on date+time forms).
+        if zone.is_some() {
+            return Err(());
+        }
+        return Ok(DateValue::date_only(date));
+    }
+    if let Some(date) = parse_dmonyyyy(body)? {
+        if zone.is_some() {
+            return Err(());
+        }
+        return Ok(DateValue::date_only(date));
+    }
+    if let Some(date) = parse_dslashyyyy(body)? {
+        if zone.is_some() {
+            return Err(());
+        }
+        return Ok(DateValue::date_only(date));
+    }
+    // Time-only: HH:MM:SS[.mmm] with optional zone. Epoch date 1970-01-01.
+    if let Some(time) = parse_time(body)? {
+        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        return Ok(DateValue::from_local(epoch.and_time(time), zone));
+    }
+    Err(())
+}
+
+/// Split a trailing zone suffix off `s`. Returns `(body, Ok(zone_opt))` on
+/// success (zone_opt is `Some(minutes)` or `None` if no suffix), or
+/// `(body, Err(()))` if a suffix is present but malformed.
+///
+/// A zone is only valid on a time form (the body before the sign must contain
+/// `:`), so a `-` inside a date-only body like `2024-06-29` is not mistaken
+/// for a zone.
+fn split_zone_suffix(s: &str) -> Result<(&str, Result<Option<i32>, ()>), ()> {
+    let bytes = s.as_bytes();
+    // `Z` suffix (UTC).
+    if let Some(body) = s.strip_suffix('Z') {
+        if body.contains(':') {
+            return Ok((body, Ok(Some(0))));
+        }
+        // `Z` on a date-only form is malformed.
+        return Ok((body, Err(())));
+    }
+    // Scan from the end for the last `+` or `-`. The zone must be at the end
+    // and the body before it must contain `:` (indicating a time form).
+    for i in (1..bytes.len()).rev() {
+        let c = bytes[i];
+        if c != b'+' && c != b'-' {
+            continue;
+        }
+        let body = &s[..i];
+        let suffix = &s[i..];
+        // A zone is only valid on a time form.
+        if !body.contains(':') {
+            // This sign is part of the date body (e.g. `2024-06-29`), not a
+            // zone. There's no zone in this run.
+            return Ok((s, Ok(None)));
+        }
+        // Try to parse the suffix as a zone.
+        match parse_zone_suffix(suffix) {
+            Some(zone) => return Ok((body, Ok(Some(zone)))),
+            None => {
+                // Malformed zone — error only if the suffix looks zone-shaped
+                // (sign + digit). Otherwise treat as no zone (the sign is
+                // part of some other construct).
+                if suffix.len() >= 2 && bytes[i + 1].is_ascii_digit() {
+                    return Ok((body, Err(())));
+                }
+                return Ok((s, Ok(None)));
+            }
+        }
+    }
+    Ok((s, Ok(None)))
+}
+
+/// Parse a zone offset suffix (`+HH:MM`, `-HH:MM`, `+H:MM`, `+HHMM`,
+/// `-HHMM`, `+HH`, `-HH`, `Z`). Returns `Some(minutes)` or `None` if the
+/// string doesn't match any valid zone form. `|minutes| > 14*60` is rejected.
+fn parse_zone_suffix(s: &str) -> Option<i32> {
+    if s == "Z" {
+        return Some(0);
+    }
+    let bytes = s.as_bytes();
+    if bytes.is_empty() || (bytes[0] != b'+' && bytes[0] != b'-') {
+        return None;
+    }
+    let sign = if bytes[0] == b'+' { 1 } else { -1 };
+    let rest = &s[1..];
+    let rest_bytes = rest.as_bytes();
+    if rest.is_empty() {
+        return None;
+    }
+    // Validate: only digits and at most one `:`.
+    if !rest_bytes.iter().all(|b| b.is_ascii_digit() || *b == b':') {
+        return None;
+    }
+    let colon_count = rest_bytes.iter().filter(|&&b| b == b':').count();
+    if colon_count > 1 {
+        return None;
+    }
+    let (h, m) = if colon_count == 1 {
+        // `H:MM` or `HH:MM` — minutes must be exactly 2 digits.
+        let colon_pos = rest.find(':').unwrap();
+        let h_str = &rest[..colon_pos];
+        let m_str = &rest[colon_pos + 1..];
+        if h_str.is_empty() || h_str.len() > 2 {
+            return None;
+        }
+        if m_str.len() != 2 {
+            return None;
+        }
+        (h_str.parse::<i32>().ok()?, m_str.parse::<i32>().ok()?)
+    } else {
+        // No colon: `HH` (2 digits) or `HHMM` (4 digits) only.
+        match rest.len() {
+            2 => (rest.parse::<i32>().ok()?, 0),
+            4 => (
+                rest[..2].parse::<i32>().ok()?,
+                rest[2..].parse::<i32>().ok()?,
+            ),
+            _ => return None,
+        }
+    };
+    if h > 14 || m > 59 {
+        return None;
+    }
+    Some(sign * (h * 60 + m))
+}
+
+/// Parse `YYYY-MM-DD` (exactly 10 chars). Returns:
+/// - `Ok(Some(date))` — valid date.
+/// - `Ok(None)` — not structurally an ISO date (wrong length/shape).
+/// - `Err(())` — structurally an ISO date but values invalid (e.g. Feb 31).
+fn parse_iso_date(s: &str) -> Result<Option<NaiveDate>, ()> {
+    if s.len() != 10 {
+        return Ok(None);
+    }
+    let bytes = s.as_bytes();
+    if bytes[4] != b'-' || bytes[7] != b'-' {
+        return Ok(None);
+    }
+    if !bytes[0..4].iter().all(|b| b.is_ascii_digit())
+        || !bytes[5..7].iter().all(|b| b.is_ascii_digit())
+        || !bytes[8..10].iter().all(|b| b.is_ascii_digit())
+    {
+        return Ok(None);
+    }
+    let y: i32 = s[0..4].parse().map_err(|_| ())?;
+    let m: u32 = s[5..7].parse().map_err(|_| ())?;
+    let d: u32 = s[8..10].parse().map_err(|_| ())?;
+    match NaiveDate::from_ymd_opt(y, m, d) {
+        Some(d) => Ok(Some(d)),
+        None => Err(()),
+    }
+}
+
+/// Parse `DD-Mon-YYYY` or `D-Mon-YYYY` (10 or 11 chars: `1-Jan-2024` or
+/// `29-Jun-2024`). Month is a 3-letter English abbreviation, case-insensitive.
+/// Same return convention as [`parse_iso_date`].
+fn parse_dmonyyyy(s: &str) -> Result<Option<NaiveDate>, ()> {
+    // Find the first `-` (day/month separator).
+    let first_dash = match s.find('-') {
+        Some(p) if p == 1 || p == 2 => p,
+        _ => return Ok(None),
+    };
+    // Find the second `-` (month/year separator) at first_dash+4.
+    let second_dash = first_dash + 4;
+    let bytes = s.as_bytes();
+    if bytes.len() < second_dash + 5 {
+        return Ok(None);
+    }
+    if bytes[second_dash] != b'-' {
+        return Ok(None);
+    }
+    // Validate day part (1-2 digits).
+    if !bytes[..first_dash].iter().all(|b| b.is_ascii_digit()) {
+        return Ok(None);
+    }
+    // Validate month part (3 alpha chars).
+    if !bytes[first_dash + 1..second_dash]
+        .iter()
+        .all(|b| b.is_ascii_alphabetic())
+    {
+        return Ok(None);
+    }
+    // Validate year part (4 digits after second dash).
+    if bytes.len() != second_dash + 5
+        || !bytes[second_dash + 1..].iter().all(|b| b.is_ascii_digit())
+    {
+        return Ok(None);
+    }
+    let d: u32 = s[..first_dash].parse().map_err(|_| ())?;
+    let m = month_from_abbr(&s[first_dash + 1..second_dash]).ok_or(())?;
+    let y: i32 = s[second_dash + 1..].parse().map_err(|_| ())?;
+    match NaiveDate::from_ymd_opt(y, m, d) {
+        Some(d) => Ok(Some(d)),
+        None => Err(()),
+    }
+}
+
+/// Parse `DD/MM/YYYY` (exactly 10 chars). Same return convention as
+/// [`parse_iso_date`].
+fn parse_dslashyyyy(s: &str) -> Result<Option<NaiveDate>, ()> {
+    if s.len() != 10 {
+        return Ok(None);
+    }
+    let bytes = s.as_bytes();
+    if bytes[2] != b'/' || bytes[5] != b'/' {
+        return Ok(None);
+    }
+    if !bytes[0..2].iter().all(|b| b.is_ascii_digit())
+        || !bytes[3..5].iter().all(|b| b.is_ascii_digit())
+        || !bytes[6..10].iter().all(|b| b.is_ascii_digit())
+    {
+        return Ok(None);
+    }
+    let d: u32 = s[0..2].parse().map_err(|_| ())?;
+    let m: u32 = s[3..5].parse().map_err(|_| ())?;
+    let y: i32 = s[6..10].parse().map_err(|_| ())?;
+    match NaiveDate::from_ymd_opt(y, m, d) {
+        Some(d) => Ok(Some(d)),
+        None => Err(()),
+    }
+}
+
+/// Parse `HH:MM:SS` or `HH:MM:SS.mmm`. Same return convention as
+/// [`parse_iso_date`] but for `NaiveTime`.
+fn parse_time(s: &str) -> Result<Option<NaiveTime>, ()> {
+    let bytes = s.as_bytes();
+    if bytes.len() < 8 {
+        return Ok(None);
+    }
+    if bytes[2] != b':' || bytes[5] != b':' {
+        return Ok(None);
+    }
+    if !bytes[0..2].iter().all(|b| b.is_ascii_digit())
+        || !bytes[3..5].iter().all(|b| b.is_ascii_digit())
+        || !bytes[6..8].iter().all(|b| b.is_ascii_digit())
+    {
+        return Ok(None);
+    }
+    let h: u32 = s[0..2].parse().map_err(|_| ())?;
+    let m: u32 = s[3..5].parse().map_err(|_| ())?;
+    let sec: u32 = s[6..8].parse().map_err(|_| ())?;
+    // Optional `.mmm` (exactly 3 fractional digits).
+    let mut millis = 0;
+    if bytes.len() == 12 && bytes[8] == b'.' {
+        if !bytes[9..12].iter().all(|b| b.is_ascii_digit()) {
+            return Ok(None);
+        }
+        millis = s[9..12].parse().map_err(|_| ())?;
+    } else if bytes.len() != 8 {
+        return Ok(None);
+    }
+    if h > 23 || m > 59 || sec > 60 {
+        return Err(());
+    }
+    match NaiveTime::from_hms_milli_opt(h, m, sec, millis) {
+        Some(t) => Ok(Some(t)),
+        None => Err(()),
+    }
+}
+
+/// 3-letter English month abbreviation → month number (1–12). Case-insensitive.
+fn month_from_abbr(s: &str) -> Option<u32> {
+    let up: String = s.chars().map(|c| c.to_ascii_uppercase()).collect();
+    Some(match up.as_str() {
+        "JAN" => 1,
+        "FEB" => 2,
+        "MAR" => 3,
+        "APR" => 4,
+        "MAY" => 5,
+        "JUN" => 6,
+        "JUL" => 7,
+        "AUG" => 8,
+        "SEP" => 9,
+        "OCT" => 10,
+        "NOV" => 11,
+        "DEC" => 12,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -956,8 +1707,274 @@ mod tests {
 
     #[test]
     fn invalid_number_double_dot() {
-        let err = lex("1.2.3").unwrap_err();
-        assert!(matches!(err, LexError::InvalidNumber { .. }));
+        // M44: `1.2.3` is now a tuple! literal (3-byte RGB), not an error.
+        assert_eq!(one("1.2.3"), TokenKind::Tuple(Rc::from(&[1u8, 2, 3][..])));
+        // 5+ components are still rejected (4-byte RGBA is the max).
+        let err = lex("1.2.3.4.5").unwrap_err();
+        assert!(matches!(err, LexError::InvalidTuple { .. }));
+    }
+
+    #[test]
+    fn pair_literal_basic() {
+        assert_eq!(
+            one("100x200"),
+            TokenKind::Pair(Rc::from("100"), Rc::from("200"))
+        );
+        assert_eq!(one("0x0"), TokenKind::Pair(Rc::from("0"), Rc::from("0")));
+        assert_eq!(one("-1x2"), TokenKind::Pair(Rc::from("-1"), Rc::from("2")));
+    }
+
+    #[test]
+    fn pair_literal_float_components() {
+        assert_eq!(
+            one("1.5x2.5"),
+            TokenKind::Pair(Rc::from("1.5"), Rc::from("2.5"))
+        );
+        assert_eq!(
+            one("1.0e2x3"),
+            TokenKind::Pair(Rc::from("1.0e2"), Rc::from("3"))
+        );
+    }
+
+    #[test]
+    fn pair_literal_bad_form() {
+        // `1x` followed by a digit is a pair; `1x-` (no digit after `-`)
+        // routes to scan_pair but fails in the second component.
+        let err = lex("1x-").unwrap_err();
+        assert!(matches!(err, LexError::InvalidPair { .. }));
+        // `1x` followed by EOF/delimiter is Integer(1) + Word("x") — detect
+        // returns None for an empty right side, so this is NOT a pair error.
+        let toks = lex("1x ").expect("lex");
+        assert_eq!(toks.len(), 2);
+        assert_eq!(toks[0].kind, TokenKind::Integer(1));
+        assert_eq!(toks[1].kind, TokenKind::Word(Symbol::new("x")));
+    }
+
+    #[test]
+    fn tuple_literal_basic() {
+        assert_eq!(
+            one("255.0.0"),
+            TokenKind::Tuple(Rc::from(&[255u8, 0, 0][..]))
+        );
+        assert_eq!(one("0.0.0"), TokenKind::Tuple(Rc::from(&[0u8, 0, 0][..])));
+        assert_eq!(
+            one("128.64.32.128"),
+            TokenKind::Tuple(Rc::from(&[128u8, 64, 32, 128][..]))
+        );
+    }
+
+    #[test]
+    fn tuple_literal_out_of_range() {
+        let err = lex("300.0.0").unwrap_err();
+        assert!(matches!(err, LexError::InvalidTuple { .. }));
+        let err = lex("255.256.0").unwrap_err();
+        assert!(matches!(err, LexError::InvalidTuple { .. }));
+    }
+
+    #[test]
+    fn tuple_literal_too_many_components() {
+        let err = lex("1.2.3.4.5").unwrap_err();
+        assert!(matches!(err, LexError::InvalidTuple { .. }));
+    }
+
+    #[test]
+    fn pair_tuple_do_not_break_floats() {
+        // `1.5` stays a float (1 dot, no `x`).
+        assert_eq!(one("1.5"), TokenKind::Float(1.5));
+        // `1e3` stays a float exponent.
+        assert_eq!(one("1e3"), TokenKind::Float(1000.0));
+        // `5` stays an integer.
+        assert_eq!(one("5"), TokenKind::Integer(5));
+    }
+
+    // --- M45 date!/time! lexer tests ---
+
+    #[test]
+    fn date_dmonyyyy_single_digit_day() {
+        // Day with leading zero (01-Oct-1900) should parse correctly.
+        let dv = match one("01-Oct-1900") {
+            TokenKind::Date(dv) => dv,
+            other => panic!("expected Date, got {other:?}"),
+        };
+        assert_eq!(
+            dv.dt,
+            NaiveDate::from_ymd_opt(1900, 10, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+        );
+        assert_eq!(dv.zone, None);
+    }
+
+    #[test]
+    fn date_dmonyyyy_basic() {
+        let dv = match one("29-Jun-2024") {
+            TokenKind::Date(dv) => dv,
+            other => panic!("expected Date, got {other:?}"),
+        };
+        assert_eq!(
+            dv.dt,
+            NaiveDate::from_ymd_opt(2024, 6, 29)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+        );
+        assert_eq!(dv.zone, None);
+    }
+
+    #[test]
+    fn date_iso_basic() {
+        let dv = match one("2024-06-29") {
+            TokenKind::Date(dv) => dv,
+            other => panic!("expected Date, got {other:?}"),
+        };
+        assert_eq!(
+            dv.dt,
+            NaiveDate::from_ymd_opt(2024, 6, 29)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+        );
+        assert_eq!(dv.zone, None);
+    }
+
+    #[test]
+    fn date_dslashyyyy_not_supported() {
+        // DD/MM/YYYY is not supported because `/` is a lexer delimiter —
+        // the run splits before reaching the date scanner. The lexer produces
+        // separate Integer/Word tokens instead. This is a documented
+        // limitation; use `DD-Mon-YYYY` or `YYYY-MM-DD` instead.
+        let toks = kinds("29/06/2024");
+        assert_eq!(toks[0], TokenKind::Integer(29));
+    }
+
+    #[test]
+    fn date_datetime_with_zone() {
+        // `29-Jun-2024/12:30:00+5:30` → zone = Some(330)
+        let dv = match one("29-Jun-2024/12:30:00+5:30") {
+            TokenKind::Date(dv) => dv,
+            other => panic!("expected Date, got {other:?}"),
+        };
+        assert_eq!(
+            dv.dt,
+            NaiveDate::from_ymd_opt(2024, 6, 29)
+                .unwrap()
+                .and_hms_opt(12, 30, 0)
+                .unwrap()
+        );
+        assert_eq!(dv.zone, Some(330));
+    }
+
+    #[test]
+    fn date_iso_datetime_utc() {
+        // `2024-06-29T12:30:00Z` → zone = Some(0)
+        let dv = match one("2024-06-29T12:30:00Z") {
+            TokenKind::Date(dv) => dv,
+            other => panic!("expected Date, got {other:?}"),
+        };
+        assert_eq!(
+            dv.dt,
+            NaiveDate::from_ymd_opt(2024, 6, 29)
+                .unwrap()
+                .and_hms_opt(12, 30, 0)
+                .unwrap()
+        );
+        assert_eq!(dv.zone, Some(0));
+    }
+
+    #[test]
+    fn date_time_only_with_zone() {
+        // `12:30:00-04:00` → epoch date, zone = Some(-240)
+        let dv = match one("12:30:00-04:00") {
+            TokenKind::Date(dv) => dv,
+            other => panic!("expected Date, got {other:?}"),
+        };
+        assert_eq!(
+            dv.dt,
+            NaiveDate::from_ymd_opt(1970, 1, 1)
+                .unwrap()
+                .and_hms_opt(12, 30, 0)
+                .unwrap()
+        );
+        assert_eq!(dv.zone, Some(-240));
+    }
+
+    #[test]
+    fn date_time_only_no_zone() {
+        let dv = match one("12:30:00") {
+            TokenKind::Date(dv) => dv,
+            other => panic!("expected Date, got {other:?}"),
+        };
+        assert_eq!(
+            dv.dt,
+            NaiveDate::from_ymd_opt(1970, 1, 1)
+                .unwrap()
+                .and_hms_opt(12, 30, 0)
+                .unwrap()
+        );
+        assert_eq!(dv.zone, None);
+    }
+
+    #[test]
+    fn date_zone_variants() {
+        // `+HH:MM`, `-HH:MM`, `+HHMM`, `-HHMM`, `+HH`, `Z`
+        let z = |s: &str| match one(s) {
+            TokenKind::Date(dv) => dv.zone,
+            other => panic!("expected Date for {s:?}, got {other:?}"),
+        };
+        // Use time-only forms so the zone attaches.
+        assert_eq!(z("12:00:00+05:30"), Some(330));
+        assert_eq!(z("12:00:00-04:00"), Some(-240));
+        assert_eq!(z("12:00:00+0530"), Some(330));
+        assert_eq!(z("12:00:00-0400"), Some(-240));
+        assert_eq!(z("12:00:00+05"), Some(300));
+        assert_eq!(z("12:00:00-04"), Some(-240));
+        assert_eq!(z("12:00:00Z"), Some(0));
+    }
+
+    #[test]
+    fn date_invalid_date() {
+        // Feb 31 — structurally a date but values don't validate.
+        let err = lex("31-Feb-2024").unwrap_err();
+        assert!(matches!(err, LexError::InvalidDate { .. }));
+    }
+
+    #[test]
+    fn date_invalid_zone() {
+        // |zone| > 14*60 → invalid.
+        let err = lex("29-Jun-2024/12:30:00+15:00").unwrap_err();
+        assert!(matches!(err, LexError::InvalidDate { .. }));
+    }
+
+    #[test]
+    fn date_does_not_break_plain_integers() {
+        // `42` stays an integer.
+        assert_eq!(one("42"), TokenKind::Integer(42));
+        // `2024` stays an integer (4 digits, no `-` after).
+        assert_eq!(one("2024"), TokenKind::Integer(2024));
+    }
+
+    #[test]
+    fn date_mold_round_trips() {
+        // Verify that the printer's mold form reparses to the same value.
+        use crate::printer::mold_to_string;
+        use crate::value::DateValue;
+        let dv = DateValue::from_local(
+            NaiveDate::from_ymd_opt(2024, 6, 29)
+                .unwrap()
+                .and_hms_opt(12, 30, 0)
+                .unwrap(),
+            Some(330),
+        );
+        let v = crate::value::Value::date(dv.clone());
+        let molded = mold_to_string(&v);
+        assert_eq!(molded, "29-Jun-2024/12:30:00+05:30");
+        // Reparse.
+        let reparsed = match one(&molded) {
+            TokenKind::Date(d) => d,
+            other => panic!("expected Date, got {other:?}"),
+        };
+        assert_eq!(reparsed, dv);
     }
 
     #[test]

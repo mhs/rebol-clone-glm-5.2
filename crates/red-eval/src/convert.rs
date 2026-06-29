@@ -415,6 +415,9 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
         "url!" | "url" => make_url(spec)?,
         "char!" | "char" => make_char(spec)?,
         "binary!" | "binary" => make_binary(spec)?,
+        "pair!" | "pair" => make_pair(spec)?,
+        "tuple!" | "tuple" => make_tuple(spec)?,
+        "date!" | "date" => make_date(spec)?,
         "error!" | "error" => return make_error(spec),
         "object!" | "object" => return crate::object::make_object(spec, env),
         "map!" | "map" => return crate::map::make_map(spec, env),
@@ -667,11 +670,104 @@ fn make_binary(spec: &Value) -> Result<Value, EvalError> {
     }
 }
 
+/// `make pair! <spec>` — M44. Construct a `pair!` value.
+/// - `pair!` → identity
+/// - `block!` of 2 elements → `make pair! [x y]`
+/// - `integer!`/`float!` → `Nx0` (single value as x, y zeroed)
+fn make_pair(spec: &Value) -> Result<Value, EvalError> {
+    match spec {
+        Value::Pair { .. } => Ok(spec.clone()),
+        Value::Block { series, .. } | Value::Paren { series, .. } => {
+            let data = series.data.borrow();
+            let items: Vec<Value> = data.iter().skip(series.index).cloned().collect();
+            if items.len() != 2 {
+                return Err(EvalError::Native {
+                    message: format!(
+                        "make pair!: block must have exactly 2 elements, got {}",
+                        items.len()
+                    ),
+                    span: spec.span_or_default(),
+                });
+            }
+            let mut iter = items.into_iter();
+            let x = iter.next().unwrap();
+            let y = iter.next().unwrap();
+            Ok(Value::pair(x, y))
+        }
+        Value::Integer { .. } | Value::Float { .. } => {
+            Ok(Value::pair(spec.clone(), Value::integer(0)))
+        }
+        other => Err(EvalError::TypeError {
+            expected: "pair!, block!, integer!, or float!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
+/// `make tuple! <spec>` — M44. Construct a `tuple!` (RGB or RGBA bytes).
+/// - `tuple!` → identity
+/// - `integer!` N → all-zero tuple of N components (3 or 4; else error)
+/// - `block!` of 3–4 integers → tuple from those bytes (each 0–255)
+fn make_tuple(spec: &Value) -> Result<Value, EvalError> {
+    match spec {
+        Value::Tuple { .. } => Ok(spec.clone()),
+        Value::Integer { n, .. } => {
+            let n = *n;
+            if n != 3 && n != 4 {
+                return Err(EvalError::Native {
+                    message: format!(
+                        "make tuple!: integer must be 3 or 4 (component count), got {n}"
+                    ),
+                    span: spec.span_or_default(),
+                });
+            }
+            Ok(Value::tuple(vec![0u8; n as usize]))
+        }
+        Value::Block { series, .. } | Value::Paren { series, .. } => {
+            let data = series.data.borrow();
+            let items: Vec<Value> = data.iter().skip(series.index).cloned().collect();
+            if items.len() < 3 || items.len() > 4 {
+                return Err(EvalError::Native {
+                    message: format!(
+                        "make tuple!: block must have 3 or 4 elements, got {}",
+                        items.len()
+                    ),
+                    span: spec.span_or_default(),
+                });
+            }
+            let mut bytes: Vec<u8> = Vec::with_capacity(items.len());
+            for v in &items {
+                let n = match v {
+                    Value::Integer { n, .. } => *n,
+                    Value::Char { c, .. } => *c as i64,
+                    other => {
+                        return Err(EvalError::TypeError {
+                            expected: "integer! or char!",
+                            found: type_name(other),
+                            span: other.span_or_default(),
+                        })
+                    }
+                };
+                if !(0..=255).contains(&n) {
+                    return Err(EvalError::Native {
+                        message: format!("make tuple!: component {n} out of range 0-255"),
+                        span: v.span_or_default(),
+                    });
+                }
+                bytes.push(n as u8);
+            }
+            Ok(Value::tuple(bytes))
+        }
+        other => Err(EvalError::TypeError {
+            expected: "tuple!, integer!, or block!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
 /// `make error! <value>` — M42. Two forms:
-/// - `make error! "msg"` → message-only `ErrorValue`.
-/// - `make error! [code: 42 type: 'math message: "..." args: [...]]` →
-///   structured `ErrorValue` (delegates to `parse_error_block` in
-///   `control.rs` via a shared helper to avoid duplication).
 fn make_error(spec: &Value) -> Result<Value, EvalError> {
     match spec {
         Value::String { s, .. } => Ok(Value::error(s.to_string())),
@@ -710,6 +806,111 @@ fn to_binary(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value
     make_binary(&args[0])
 }
 
+/// `to-pair value` — M44. Coerce to `pair!`. Same as `make pair!` (no
+/// distinct conversion semantics in the POC).
+fn to_pair(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "to-pair", 1, args.len()));
+    }
+    make_pair(&args[0])
+}
+
+/// `to-tuple value` — M44. Coerce to `tuple!`. Same as `make tuple!`.
+fn to_tuple(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "to-tuple", 1, args.len()));
+    }
+    make_tuple(&args[0])
+}
+
+/// `to-date value` — M45. Coerce to `date!`. Same as `make date!`.
+fn to_date(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "to-date", 1, args.len()));
+    }
+    make_date(&args[0])
+}
+
+/// `make date! spec` — M45. Construct a `date!` from:
+/// - `string!` → parse via the lexer's date scanner (e.g. `"29-Jun-2024"`).
+/// - `date!` → identity (clone).
+/// - `integer!` → epoch seconds (UTC, `zone = Some(0)`).
+/// - `block!` → `[year month day]` or `[year month day hour min sec]`.
+fn make_date(spec: &Value) -> Result<Value, EvalError> {
+    match spec {
+        Value::Date { dt, .. } => Ok(Value::Date {
+            dt: dt.clone(),
+            span: Span::default(),
+        }),
+        Value::String { s, .. } => {
+            // Lex the string; the first token should be a Date.
+            let toks = lexer::lex(s).map_err(|e| native_err(spec, e.to_string()))?;
+            match toks.first() {
+                Some(t) => match &t.kind {
+                    lexer::TokenKind::Date(dv) => Ok(Value::date(dv.clone())),
+                    _ => Err(native_err(spec, format!("cannot parse {s:?} as date"))),
+                },
+                None => Err(native_err(spec, "empty string for date")),
+            }
+        }
+        Value::Integer { n, .. } => {
+            // Epoch seconds (UTC). `zone = Some(0)`.
+            let dv = red_core::DateValue::from_epoch(*n)
+                .ok_or_else(|| native_err(spec, format!("epoch {} out of range", n)))?;
+            Ok(Value::date(dv))
+        }
+        Value::Block { series, .. } => {
+            let data = series.data.borrow();
+            let nums: Vec<i64> = data
+                .iter()
+                .map(|v| match v {
+                    Value::Integer { n, .. } => Ok(*n),
+                    _ => Err(EvalError::TypeError {
+                        expected: "integer!",
+                        found: type_name(v),
+                        span: v.span_or_default(),
+                    }),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            match nums.len() {
+                3 => {
+                    let y = nums[0] as i32;
+                    let mo = nums[1] as u32;
+                    let d = nums[2] as u32;
+                    let date = red_core::NaiveDate::from_ymd_opt(y, mo, d)
+                        .ok_or_else(|| native_err(spec, "invalid date"))?;
+                    Ok(Value::date(red_core::DateValue::date_only(date)))
+                }
+                6 => {
+                    let y = nums[0] as i32;
+                    let mo = nums[1] as u32;
+                    let d = nums[2] as u32;
+                    let h = nums[3] as u32;
+                    let mi = nums[4] as u32;
+                    let s = nums[5] as u32;
+                    let date = red_core::NaiveDate::from_ymd_opt(y, mo, d)
+                        .ok_or_else(|| native_err(spec, "invalid date"))?;
+                    let time = red_core::NaiveTime::from_hms_opt(h, mi, s)
+                        .ok_or_else(|| native_err(spec, "invalid time"))?;
+                    Ok(Value::date(red_core::DateValue::from_local(
+                        date.and_time(time),
+                        None,
+                    )))
+                }
+                _ => Err(native_err(
+                    spec,
+                    "make date!: block must be [y m d] or [y m d h mi s]",
+                )),
+            }
+        }
+        other => Err(EvalError::TypeError {
+            expected: "string!, integer!, date!, or block!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // to <type> <value>
 // ---------------------------------------------------------------------------
@@ -739,6 +940,9 @@ fn to_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
         "url!" | "url" => to_url(one, &RefineArgs::empty(), env),
         "char!" | "char" => to_char(one, &RefineArgs::empty(), env),
         "binary!" | "binary" => to_binary(one, &RefineArgs::empty(), env),
+        "pair!" | "pair" => to_pair(one, &RefineArgs::empty(), env),
+        "tuple!" | "tuple" => to_tuple(one, &RefineArgs::empty(), env),
+        "date!" | "date" => to_date(one, &RefineArgs::empty(), env),
         "error!" | "error" => to_error(one, &RefineArgs::empty(), env),
         "map!" | "map" => crate::map::to_map(one, &RefineArgs::empty(), env),
         other => Err(EvalError::Native {
@@ -804,6 +1008,9 @@ pub fn register_convert_natives(env: &mut Env) {
     reg(env, "to-url", to_url as NF, 1);
     reg(env, "to-char", to_char as NF, 1);
     reg(env, "to-binary", to_binary as NF, 1);
+    reg(env, "to-pair", to_pair as NF, 1);
+    reg(env, "to-tuple", to_tuple as NF, 1);
+    reg(env, "to-date", to_date as NF, 1);
     reg(env, "to-error", to_error as NF, 1);
 
     // make / to (arity 2)

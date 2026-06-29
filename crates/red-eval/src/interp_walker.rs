@@ -344,8 +344,11 @@ fn eval_prefix(
         | Value::File { .. }
         | Value::Url { .. }
         | Value::Char { .. }
+        | Value::Pair { .. }
+        | Value::Tuple { .. }
         | Value::Object(_)
-        | Value::Map(_) => Ok(cur),
+        | Value::Map(_)
+        | Value::Date { .. } => Ok(cur),
 
         // Path: a function-headed path is a refined call (`copy/part`,
         // `find/case`); anything else is a data-path select (`block/2`,
@@ -504,6 +507,13 @@ fn eval_path_call(
         Value::Word { sym, binding, .. } => (sym.clone(), binding.clone()),
         Value::GetWord { sym, binding, .. } => (sym.clone(), binding.clone()),
         Value::LitWord { sym, .. } => (sym.clone(), Binding::Unbound),
+        // M44: literal-headed data paths (`100x200/x`, `255.0.0/r`,
+        // `[1 2 3]/1`). The head value is the data itself — no resolution
+        // needed; walk the tail directly.
+        Value::Pair { .. } | Value::Tuple { .. } | Value::Block { .. } => {
+            let result = walk_data_path(parts[0].clone(), &parts[1..], env, path_span)?;
+            return Ok(result);
+        }
         other => {
             return Err(EvalError::Native {
                 message: format!(
@@ -527,22 +537,48 @@ fn eval_path_call(
         })
         .collect();
     let resolved = resolve_word(&head_sym, &head_binding, env, path_span)?;
-    match resolved {
-        Value::Func(_) => {
-            dispatch_call_with_refs(resolved, &head_sym, &leading_refs, data, i, env, path_span)
+    match &resolved {
+        Value::Func(fd) => {
+            // M45: if the func has no declared refinements and the path tail
+            // has word parts, this is a data-path select on the func's return
+            // value (e.g. `now/year`). Call the func with 0 args, then walk
+            // the tail as a data path. Otherwise dispatch as a refined call.
+            if fd.refinements.is_empty() && !leading_refs.is_empty() {
+                let result = dispatch_call_with_refs(
+                    resolved.clone(),
+                    &head_sym,
+                    &[],
+                    data,
+                    i,
+                    env,
+                    path_span,
+                )?;
+                return walk_data_path(result, &parts[1..], env, path_span);
+            }
+            dispatch_call_with_refs(
+                resolved.clone(),
+                &head_sym,
+                &leading_refs,
+                data,
+                i,
+                env,
+                path_span,
+            )
         }
-        Value::Object(obj) => select_object_path(obj, &parts[1..], data, i, env, path_span),
+        Value::Object(obj) => {
+            select_object_path(Rc::clone(obj), &parts[1..], data, i, env, path_span)
+        }
         // M43: map-headed path — `m/word`, `m/2`, `m/key: val`. No method-call
         // dispatch (maps aren't objects); the tail is walked as a data path.
         Value::Map(_) => {
-            let result = walk_data_path(resolved, &parts[1..], env, path_span)?;
+            let result = walk_data_path(resolved.clone(), &parts[1..], env, path_span)?;
             Ok(result)
         }
         // Non-function, non-object data path: walk the tail selecting by
         // integer index (block/string) or word field (object encountered
         // mid-walk). Paren parts are evaluated in place. M19.
         other => {
-            let result = walk_data_path(other, &parts[1..], env, path_span)?;
+            let result = walk_data_path(other.clone(), &parts[1..], env, path_span)?;
             // If the final value is a Func, it's a method call on whatever
             // object/context produced it — but only the Object arm above
             // knows the owning ctx. For block/string-headed paths reaching a
@@ -621,7 +657,9 @@ fn step_path(
 }
 
 /// Select a named field from `current`. Objects look up by slot; maps look up
-/// by `MapKey::Sym` with a string fall-back; other types error.
+/// by `MapKey::Sym` with a string fall-back; M44: pairs look up `/x`/`/y`,
+/// tuples look up `/r`/`/red`/`/g`/`/green`/`/b`/`/blue`/`/a`/`/alpha`; other
+/// types error.
 fn select_field(current: &Value, sym: &Symbol, path_span: Span) -> Result<Value, EvalError> {
     match current {
         Value::Object(obj) => obj.borrow().ctx.get(sym).ok_or_else(|| EvalError::Native {
@@ -629,6 +667,56 @@ fn select_field(current: &Value, sym: &Symbol, path_span: Span) -> Result<Value,
             span: path_span,
         }),
         Value::Map(m) => Ok(crate::map::select_map_field(m, sym)),
+        Value::Pair { x, y, .. } => match sym.as_str() {
+            "x" => Ok((**x).clone()),
+            "y" => Ok((**y).clone()),
+            _ => Err(EvalError::Native {
+                message: format!("pair! has no field {} (only /x and /y)", sym.as_str()),
+                span: path_span,
+            }),
+        },
+        Value::Tuple { bytes, .. } => {
+            let get = |idx: usize| Value::integer(bytes[idx] as i64);
+            match sym.as_str() {
+                "r" | "red" => Ok(get(0)),
+                "g" | "green" => Ok(get(1)),
+                "b" | "blue" => Ok(get(2)),
+                "a" | "alpha" if bytes.len() >= 4 => Ok(get(3)),
+                "a" | "alpha" => Err(EvalError::Native {
+                    message: "3-byte tuple! has no /alpha field".into(),
+                    span: path_span,
+                }),
+                _ => Err(EvalError::Native {
+                    message: format!("tuple! has no field {} (only /r /g /b /a)", sym.as_str()),
+                    span: path_span,
+                }),
+            }
+        }
+        // M45: date! path accessors.
+        Value::Date { dt, .. } => match sym.as_str() {
+            "year" => Ok(Value::integer(dt.year() as i64)),
+            "month" => Ok(Value::integer(dt.month() as i64)),
+            "day" => Ok(Value::integer(dt.day() as i64)),
+            "time" => {
+                // Return the time component as a time-shaped date (epoch date).
+                let epoch = red_core::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                Ok(Value::date(red_core::DateValue::from_local(
+                    epoch.and_time(dt.time()),
+                    None,
+                )))
+            }
+            "weekday" => Ok(Value::integer(dt.weekday() as i64)),
+            "yearday" => Ok(Value::integer(dt.yearday() as i64)),
+            "week" => Ok(Value::integer(dt.week() as i64)),
+            "zone" => Ok(dt.zone_as_time().unwrap_or(Value::None)),
+            _ => Err(EvalError::Native {
+                message: format!(
+                    "date! has no field {} (only /year /month /day /time /weekday /yearday /week /zone)",
+                    sym.as_str()
+                ),
+                span: path_span,
+            }),
+        },
         other => Err(EvalError::Native {
             message: format!(
                 "cannot select field {} from {}",
@@ -687,6 +775,22 @@ fn pick_path_index(current: &Value, n: i64, path_span: Span) -> Result<Value, Ev
             m,
             &red_core::value::MapKey::Int(n),
         )),
+        // M44: pair/2 → y, tuple/3 → blue byte (1-based). Out of range → none.
+        Value::Pair { x, y, .. } => match n {
+            1 => Ok((**x).clone()),
+            2 => Ok((**y).clone()),
+            _ => Ok(Value::None),
+        },
+        Value::Tuple { bytes, .. } => {
+            if n <= 0 {
+                return Ok(Value::None);
+            }
+            let idx = (n - 1) as usize;
+            if idx >= bytes.len() {
+                return Ok(Value::None);
+            }
+            Ok(Value::integer(bytes[idx] as i64))
+        }
         other => Err(EvalError::TypeError {
             expected: "block!, paren!, or string! for integer path index",
             found: crate::natives::type_name(other),
@@ -762,6 +866,123 @@ fn poke_string_char(s: &Rc<str>, n: i64, rhs: &Value, path_span: Span) -> Result
     Ok(Value::string(Rc::from(new_str.as_str())))
 }
 
+/// M44: rebuild a pair! with one component replaced by `rhs`. `part` is the
+/// path part (`/x` word or `/1` integer) selecting which component. The other
+/// component is preserved. Returns the new pair.
+fn poke_pair(
+    x: &Rc<Value>,
+    y: &Rc<Value>,
+    part: &Value,
+    rhs: &Value,
+    path_span: Span,
+) -> Result<Value, EvalError> {
+    // Coerce rhs to a number (int/float). Pair components are always numeric.
+    if !matches!(rhs, Value::Integer { .. } | Value::Float { .. }) {
+        return Err(EvalError::TypeError {
+            expected: "integer! or float!",
+            found: crate::natives::type_name(rhs),
+            span: path_span,
+        });
+    }
+    let rhs_owned = rhs.clone();
+    match part {
+        Value::Word { sym, .. } | Value::GetWord { sym, .. } | Value::LitWord { sym, .. } => {
+            match sym.as_str() {
+                "x" => Ok(Value::pair(rhs_owned, (**y).clone())),
+                "y" => Ok(Value::pair((**x).clone(), rhs_owned)),
+                _ => Err(EvalError::Native {
+                    message: format!("pair! has no field {} (only /x and /y)", sym.as_str()),
+                    span: path_span,
+                }),
+            }
+        }
+        Value::Integer { n, .. } => match *n {
+            1 => Ok(Value::pair(rhs_owned, (**y).clone())),
+            2 => Ok(Value::pair((**x).clone(), rhs_owned)),
+            _ => Err(EvalError::Native {
+                message: format!("poke pair index {n} out of range (1 or 2)"),
+                span: path_span,
+            }),
+        },
+        other => Err(EvalError::TypeError {
+            expected: "word! or integer! in pair set-path",
+            found: crate::natives::type_name(other),
+            span: path_span,
+        }),
+    }
+}
+
+/// M44: rebuild a tuple! with one byte replaced by `rhs` (an integer 0–255).
+/// `part` is the path part: a word (`/r`/`/red`/`/g`/`/green`/`/b`/`/blue`/
+/// `/a`/`/alpha`) or an integer (`/1`..`/4`). Returns the new tuple.
+fn poke_tuple(
+    bytes: &Rc<[u8]>,
+    part: &Value,
+    rhs: &Value,
+    path_span: Span,
+) -> Result<Value, EvalError> {
+    // Coerce rhs to a 0–255 integer byte.
+    let n: i64 = match rhs {
+        Value::Integer { n, .. } => *n,
+        Value::Char { c, .. } => *c as i64,
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "integer! or char!",
+                found: crate::natives::type_name(other),
+                span: path_span,
+            });
+        }
+    };
+    if !(0..=255).contains(&n) {
+        return Err(EvalError::Native {
+            message: format!("poke tuple: value {n} out of range 0-255"),
+            span: path_span,
+        });
+    }
+    let b = n as u8;
+    let mut out: Vec<u8> = bytes.to_vec();
+    let idx: usize = match part {
+        Value::Word { sym, .. } | Value::GetWord { sym, .. } | Value::LitWord { sym, .. } => {
+            match sym.as_str() {
+                "r" | "red" => 0,
+                "g" | "green" => 1,
+                "b" | "blue" => 2,
+                "a" | "alpha" if out.len() >= 4 => 3,
+                "a" | "alpha" => {
+                    return Err(EvalError::Native {
+                        message: "3-byte Tuple! has no /alpha field".into(),
+                        span: path_span,
+                    })
+                }
+                _ => {
+                    return Err(EvalError::Native {
+                        message: format!("tuple! has no field {} (only /r /g /b /a)", sym.as_str()),
+                        span: path_span,
+                    })
+                }
+            }
+        }
+        Value::Integer { n, .. } => {
+            if *n <= 0 || (*n as usize) > out.len() {
+                return Err(EvalError::Native {
+                    message: format!("poke tuple index {} out of range (1..{})", *n, out.len()),
+                    span: path_span,
+                });
+            }
+            *n as usize - 1
+        }
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "word! or integer! in tuple set-path",
+                found: crate::natives::type_name(other),
+                span: path_span,
+            })
+        }
+    };
+    out[idx] = b;
+    Ok(Value::tuple(out))
+}
+
 /// `:foo/bar` — resolve the head and walk the tail, returning the final
 /// value *without* invoking any function encountered. Same as `walk_data_path`
 /// except the head is resolved as a `GetWord` (reads the slot / fetches the
@@ -779,12 +1000,40 @@ pub(crate) fn eval_get_path(
     }
     let head = match &parts[0] {
         Value::Word { sym, binding, .. } | Value::GetWord { sym, binding, .. } => {
-            resolve_word(sym, binding, env, path_span)?
+            let resolved = resolve_word(sym, binding, env, path_span)?;
+            // M45: if the head resolves to a 0-arity func (e.g. `now`), call
+            // it and use the result as the data head. This supports paths like
+            // `now/year` where `now` is a 0-arity native with no refinements.
+            if let Value::Func(fd) = &resolved {
+                if fd.params.is_empty() && fd.refinements.is_empty() {
+                    if let Some(native) = fd.native {
+                        native(&[], &red_core::RefineArgs::empty(), env)?
+                    } else {
+                        return Err(EvalError::Native {
+                            message: "cannot use user function as path head in get-path".into(),
+                            span: path_span,
+                        });
+                    }
+                } else {
+                    return Err(EvalError::Native {
+                        message: "get-path head resolves to a function with params".into(),
+                        span: path_span,
+                    });
+                }
+            } else {
+                resolved
+            }
         }
         Value::LitWord { sym: _, .. } => {
             // A lit-path head with lit-word head is itself data; return the
             // first field as a lit-word. (Unusual; not really expected.)
             return Ok(parts[0].clone());
+        }
+        // M44: literal-headed data paths (`:100x200/x`). The head value is
+        // the data itself — no resolution needed.
+        // M45: `date` head for `:29-Jun-2024/year`.
+        Value::Pair { .. } | Value::Tuple { .. } | Value::Block { .. } | Value::Date { .. } => {
+            parts[0].clone()
         }
         other => {
             return Err(EvalError::Native {
@@ -849,6 +1098,53 @@ pub(crate) fn set_path_value(
             let new_str = poke_string_char(s, *n, &rhs, path_span)?;
             return write_setword(&head_sym, &head_binding, new_str, env, path_span);
         }
+    }
+    // M44: pair/tuple set-path. Immutable (value types) — rebuild and write
+    // the new value back to the head word's binding, same pattern as the
+    // string char-poke above.
+    if let Value::Pair { x, y, .. } = &current {
+        let new_pair = poke_pair(x, y, final_part, &rhs, path_span)?;
+        return write_setword(&head_sym, &head_binding, new_pair, env, path_span);
+    }
+    if let Value::Tuple { bytes, .. } = &current {
+        let new_tuple = poke_tuple(bytes, final_part, &rhs, path_span)?;
+        return write_setword(&head_sym, &head_binding, new_tuple, env, path_span);
+    }
+    // M45: date! set-path. `date/zone:` relabels the offset only (does NOT
+    // shift the wall-clock `dt`). Only `/zone` is writable; other fields are
+    // read-only (immutable value type, like pair!/tuple!).
+    if let Value::Date { dt, .. } = &current {
+        if let Value::Word { sym, .. } | Value::GetWord { sym, .. } | Value::LitWord { sym, .. } =
+            final_part
+        {
+            if sym.as_str() == "zone" {
+                // The RHS is a time-shaped date (from `date/zone`), `none`,
+                // or an integer (zone minutes directly).
+                let new_zone = match &rhs {
+                    Value::None => None,
+                    Value::Date { dt: rhs_dt, .. } => {
+                        // Extract HH:MM as minutes.
+                        let h = rhs_dt.hour() as i32;
+                        let m = rhs_dt.minute() as i32;
+                        Some(h * 60 + m)
+                    }
+                    Value::Integer { n, .. } => Some(*n as i32),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "time!, integer!, or none!",
+                            found: crate::natives::type_name(&rhs),
+                            span: rhs.span_or_default(),
+                        })
+                    }
+                };
+                let new_date = Value::date(dt.relabel_zone(new_zone));
+                return write_setword(&head_sym, &head_binding, new_date, env, path_span);
+            }
+        }
+        return Err(EvalError::Native {
+            message: "date! set-path only supports /zone".into(),
+            span: path_span,
+        });
     }
     write_path_slot(&current, final_part, rhs, env, path_span)
 }

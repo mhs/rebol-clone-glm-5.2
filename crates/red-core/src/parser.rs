@@ -11,6 +11,7 @@
 
 use crate::lexer::{Token, TokenKind};
 use crate::value::{Binding, Series, Span, Symbol, Value};
+use std::rc::Rc;
 
 /// Parse failure. Every variant carries the span of the offending token so
 /// the CLI can later render `file:line:col: error: ...`.
@@ -156,6 +157,39 @@ impl<'a> Parser<'a> {
                     bytes: b.to_vec(),
                     span: tok.span,
                 })
+            }
+            TokenKind::Pair(x_raw, y_raw) => {
+                self.advance()?;
+                // Each component parses as int if possible, else float.
+                // Component spans are not tracked individually (the pair's
+                // span covers both); components get the zero placeholder.
+                let x = parse_number_value(&x_raw)?;
+                let y = parse_number_value(&y_raw)?;
+                let head = Value::Pair {
+                    x: Rc::new(x),
+                    y: Rc::new(y),
+                    span: tok.span,
+                };
+                // M44: fold adjacent refinements (`100x200/x`) into a path.
+                self.assemble_path(head, tok.span)
+            }
+            TokenKind::Tuple(b) => {
+                self.advance()?;
+                let head = Value::Tuple {
+                    bytes: b,
+                    span: tok.span,
+                };
+                // M44: fold adjacent refinements (`255.0.0/r`) into a path.
+                self.assemble_path(head, tok.span)
+            }
+            TokenKind::Date(dv) => {
+                self.advance()?;
+                let head = Value::Date {
+                    dt: std::rc::Rc::new(dv),
+                    span: tok.span,
+                };
+                // M45: fold adjacent refinements (`29-Jun-2024/year`) into a path.
+                self.assemble_path(head, tok.span)
             }
             TokenKind::Word(sym) => {
                 self.advance()?;
@@ -516,6 +550,30 @@ pub fn load_source(src: &str) -> Result<Series, crate::error::Error> {
     let tokens = crate::lexer::lex(src)?;
     let series = load(&tokens)?;
     Ok(series)
+}
+
+/// Parse a pair! component substring (raw text from the lexer) into an
+/// `Integer` or `Float` `Value`. Integers parse first (so `2` stays an int);
+/// floats fall through. Component spans are the zero placeholder since the
+/// lexer only tracks the whole-pair span.
+fn parse_number_value(text: &str) -> Result<Value, ParseError> {
+    if let Ok(n) = text.parse::<i64>() {
+        return Ok(Value::Integer {
+            n,
+            span: Span::default(),
+        });
+    }
+    if let Ok(f) = text.parse::<f64>() {
+        return Ok(Value::Float {
+            f,
+            span: Span::default(),
+        });
+    }
+    Err(ParseError::Unexpected {
+        found: TokenKind::Word(Symbol::new(text)),
+        span: Span::default(),
+        expected: "number component",
+    })
 }
 
 #[cfg(test)]

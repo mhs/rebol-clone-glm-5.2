@@ -1,0 +1,10 @@
+Red []
+d: 29-Jun-2024/12:30:00+5:30
+print d/zone
+print d/year
+print d/month
+print d/day
+print d/weekday
+print d/yearday
+naive: 29-Jun-2024
+print naive/zone

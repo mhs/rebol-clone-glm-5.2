@@ -60,6 +60,13 @@ enum LineAction {
 /// `quit`/`exit` are handled by the caller (driver), not here, so that they
 /// only act as REPL commands at a fresh prompt rather than mid-block.
 fn eval_repl_line(buffer: &str, env: &mut Env) -> LineAction {
+    // Each REPL line creates a fresh `Series` whose `Rc<Vec<Value>>` may
+    // reuse a freed address from a prior line (allocator reuse). The block
+    // cache's secondary `source_span` check can't catch this because
+    // `Value::block()` uses `Span::default()` for every line. Clearing the
+    // block cache per line prevents the ABA stale-block bug. (The func_cache
+    // is safe — function `Rc`s stay alive in `user_ctx`.)
+    env.block_cache.clear();
     match load_source(buffer) {
         Ok(body) => {
             if body.data.borrow().is_empty() {

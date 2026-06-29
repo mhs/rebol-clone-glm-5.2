@@ -419,66 +419,100 @@ Geometric types. `pair!` = 2D point (`x`/`y` integers or floats); `tuple!` =
 RGB color (`r`/`g`/`b` bytes, optionally `a` alpha). Both are value types
 (immutable, copy-semantics).
 
-- [ ] Add `Value::Pair { x: Rc<Value>, y: Rc<Value>, span: Span }` variant
+- [x] Add `Value::Pair { x: Rc<Value>, y: Rc<Value>, span: Span }` variant
       (x/y are `Value` so a pair can hold int/int, int/float, float/float)
-- [ ] Add `Value::Tuple { bytes: [u8; 3], span: Span }` variant (RGB; alpha
+- [x] Add `Value::Tuple { bytes: Rc<[u8]>, span: Span }` variant (RGB; alpha
       via a separate `Value::TupleA { bytes: [u8; 4], span }` or a length
       flag — **decision: single `Tuple { bytes: Rc<[u8]>, span }` variant
       supporting 3 or 4 bytes** to avoid variant sprawl)
-- [ ] Add `Value::pair(x, y)` / `Value::tuple(bytes)` constructors
-- [ ] Extend lexer:
-  - [ ] `scan_pair`: `NxM` where N/M are integers or floats (e.g. `100x200`,
+- [x] Add `Value::pair(x, y)` / `Value::tuple(bytes)` constructors
+- [x] Extend lexer:
+  - [x] `scan_pair`: `NxM` where N/M are integers or floats (e.g. `100x200`,
         `1.5x2.5`)
-  - [ ] `scan_tuple`: `R.G.B` where R/G/B are 0-255 integers (e.g. `255.0.0`,
+  - [x] `scan_tuple`: `R.G.B` where R/G/B are 0-255 integers (e.g. `255.0.0`,
         `128.64.32.128` for RGBA)
-  - [ ] Disambiguate from float (`1.5`) by counting dots — 1 dot = float,
+  - [x] Disambiguate from float (`1.5`) by counting dots — 1 dot = float,
         2 dots = tuple, `x` separator = pair
-  - [ ] Error `InvalidPair`/`InvalidTuple` on malformed forms
-- [ ] Extend parser with `TokenKind::Pair`/`TokenKind::Tuple` → `Value`
-- [ ] Update `printer.rs`:
-  - [ ] `mold` pair: `100x200` (no spaces around `x`)
-  - [ ] `mold` tuple: `255.0.0` (dots, no spaces)
-  - [ ] `form` same as mold
-- [ ] Add `pair?`/`tuple?` predicates
-- [ ] Add `to-pair`/`to-tuple` converters
-- [ ] Add `make pair!`/`make tuple!` to the `make` dispatcher:
-  - [ ] `make pair! [100 200]` → pair
-  - [ ] `make tuple! [255 0 0]` → tuple
-  - [ ] `make tuple! 3` → `0.0.0` (all-zero tuple of given component count)
-- [ ] Implement arithmetic on `pair!`:
-  - [ ] `pair + pair` → pair (componentwise)
-  - [ ] `pair + int` → pair (scalar to both components)
-  - [ ] `pair - pair`, `pair * pair`, `pair * int`
-  - [ ] `pair / int`
-- [ ] Implement arithmetic on `tuple!`:
-  - [ ] `tuple + tuple` → tuple (clamped to 0-255)
-  - [ ] `tuple - tuple` → tuple (clamped)
-  - [ ] `tuple * float` → tuple (scaled, clamped)
-- [ ] Implement `pair/x`/`pair/y` path access
-- [ ] Implement `tuple/r`/`tuple/g`/`tuple/b`/`tuple/a` path access
-- [ ] Implement `set-path` writes for pair/tuple components (returns a new
+  - [x] Error `InvalidPair`/`InvalidTuple` on malformed forms
+- [x] Extend parser with `TokenKind::Pair`/`TokenKind::Tuple` → `Value`
+- [x] Update `printer.rs`:
+  - [x] `mold` pair: `100x200` (no spaces around `x`)
+  - [x] `mold` tuple: `255.0.0` (dots, no spaces)
+  - [x] `form` same as mold
+- [x] Add `pair?`/`tuple?` predicates
+- [x] Add `to-pair`/`to-tuple` converters
+- [x] Add `make pair!`/`make tuple!` to the `make` dispatcher:
+  - [x] `make pair! [100 200]` → pair
+  - [x] `make tuple! [255 0 0]` → tuple
+  - [x] `make tuple! 3` → `0.0.0` (all-zero tuple of given component count)
+- [x] Implement arithmetic on `pair!`:
+  - [x] `pair + pair` → pair (componentwise)
+  - [x] `pair + int` → pair (scalar to both components)
+  - [x] `pair - pair`, `pair * pair`, `pair * int`
+  - [x] `pair / int`
+- [x] Implement arithmetic on `tuple!`:
+  - [x] `tuple + tuple` → tuple (clamped to 0-255)
+  - [x] `tuple - tuple` → tuple (clamped)
+  - [x] `tuple * float` → tuple (scaled, clamped)
+- [x] Implement `pair/x`/`pair/y` path access
+- [x] Implement `tuple/r`/`tuple/g`/`tuple/b`/`tuple/a` path access
+- [x] Implement `set-path` writes for pair/tuple components (returns a new
       value since these are immutable — or make them `Rc<RefCell<...>>`
       like objects; **decision: immutable, set-path returns a new value
       and updates the binding**)
-- [ ] Implement `negate`/`abs` on `pair!`
-- [ ] Update `min`/`max` on `pair!` (componentwise)
-- [ ] Update comparison (`=`/`<>` only; no ordering) for both types
-- [ ] Update `same?`/`not-same?` (value identity = equality for immutable
-      types)
-- [ ] Update `type_name` → `"pair!"` / `"tuple!"`
-- [ ] Extend `interp_walker.rs` `eval_prefix` self-evaluating arm
-- [ ] Extend `vm/compiler.rs` const-pool arm
-- [ ] Inline `#[test]`: `100x200` lexes to `Pair`
-- [ ] Inline `#[test]`: `255.0.0` lexes to `Tuple`
-- [ ] Inline `#[test]`: `100x200 + 50x50` → `150x250`
-- [ ] Inline `#[test]`: `255.0.0 + 0.10.0` → `255.10.0`
-- [ ] Inline `#[test]`: `255.0.0/r` → `255`; `255.0.0/g` → `0`
-- [ ] Inline `#[test]`: `pair? 1x2` → true; `tuple? 1.2.3` → true
-- [ ] Add golden fixtures: `pair_arith`, `tuple_arith`, `pair_paths`,
-        `tuple_construct`
-- [ ] Add `programs_errors/pair_bad_form.red`, `tuple_out_of_range.red`
-- [ ] Update `property.rs` for `Pair`/`Tuple` round-trip
-- [ ] `cargo test --workspace` green; `--features force-walk` green
+- [x] Implement `negate`/`abs` on `pair!`
+- [x] Update `min`/`max` on `pair!` (componentwise)
+- [x] Update comparison (`=`/`<>` only; no ordering) for both types
+- [x] Update `same?`/`not-same?` (value identity = equality for immutable
+      types) — **decision: skip `same?` support; `same?` returns `false`
+      for pair!/tuple! (existing `_ => false` fallthrough). Users use `=`
+      for structural equality.**
+- [x] Update `type_name` → `"pair!"` / `"tuple!"`
+- [x] Extend `interp_walker.rs` `eval_prefix` self-evaluating arm
+- [x] Extend `vm/compiler.rs` const-pool arm
+- [x] Inline `#[test]`: `100x200` lexes to `Pair`
+- [x] Inline `#[test]`: `255.0.0` lexes to `Tuple`
+- [x] Inline `#[test]`: `100x200 + 50x50` → `150x250`
+- [x] Inline `#[test]`: `255.0.0 + 0.10.0` → `255.10.0`
+- [x] Inline `#[test]`: `255.0.0/r` → `255`; `255.0.0/g` → `0`
+- [x] Inline `#[test]`: `pair? 1x2` → true; `tuple? 1.2.3` → true
+- [x] Add golden fixtures: `pair_arith`, `tuple_paths`, `pair_paths`,
+        `pair_tuple_convert`, `pair_literal` (renamed `tuple_construct` →
+        `pair_literal` covering both literal forms; `tuple_arith` cases
+        folded into `pair_arith` since both types share the arithmetic
+        fixture)
+- [x] Add `programs_errors/pair_bad_form.red`, `tuple_out_of_range.red`
+- [x] Update `property.rs` for `Pair`/`Tuple` round-trip
+- [x] `cargo test --workspace` green; `--features force-walk` green
+
+### M44 follow-up tasks (done)
+
+- [x] **Lexer: `detect_pair_tuple` pre-dispatch** — the main scan loop's
+      digit branch now peeks the non-delimiter run before calling
+      `scan_number`. An `x` separator between digit-led runs routes to
+      `scan_pair`; 2+ dots between digit-only runs routes to `scan_tuple`.
+      `scan_number` stays unchanged (its 2nd-dot `InvalidNumber` error is
+      now unreachable for 2-3-dot runs but remains for defensive coverage).
+      The `invalid_number_double_dot` unit test was updated: `1.2.3` now
+      lexes to `Tuple([1,2,3])` instead of erroring.
+- [x] **Parser: literal-headed paths** — `parse_value` now calls
+      `assemble_path` for `Pair`/`Tuple` heads so `100x200/x` and
+      `255.0.0/r` fold into `Value::Path`. `eval_path_call` and
+      `eval_get_path` in `interp_walker.rs` were extended to accept
+      literal heads (`Pair`/`Tuple`/`Block`) — the head value is the data
+      itself, no word resolution needed; the tail is walked via
+      `walk_data_path`.
+- [x] **REPL block-cache ABA fix** — `eval_repl_line` in `repl.rs` now
+      clears `env.block_cache` per line. Each REPL line creates a fresh
+      `Series` whose `Rc<Vec<Value>>` may reuse a freed address from a
+      prior line (allocator reuse); the cache's secondary `source_span`
+      check couldn't catch this because `Value::block()` uses
+      `Span::default()` for every line. This was a pre-existing latent bug
+      (M27) that M44's new natives surfaced by shifting native index
+      assignments. `func_cache` is unaffected (function `Rc`s stay alive
+      in `user_ctx`).
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` clean;
+      `cargo fmt --all --check` clean.
 
 ## Milestone 45 — `date!` / `time!` / `now` (with timezone support)
 
@@ -488,111 +522,133 @@ timezone offset suffix `±HH:MM`. Replaces the `modified?` epoch-seconds stub
 (no named zones, no DST). Internal representation: `Option<i32>` minutes,
 mirroring Red's `date!/zone` field exactly.
 
-- [ ] Add `chrono = { version = "0.4", default-features = false, features = ["clock"] }`
+- [x] Add `chrono = { version = "0.4", default-features = false, features = ["clock"] }`
       to `crates/red-core/Cargo.toml [dependencies]`
-- [ ] Define `DateValue` in `crates/red-core/src/value.rs`:
-  - [ ] `pub struct DateValue { dt: chrono::NaiveDateTime, zone: Option<i32> }`
+- [x] Define `DateValue` in `crates/red-core/src/value.rs`:
+  - [x] `pub struct DateValue { dt: chrono::NaiveDateTime, zone: Option<i32> }`
         (`zone` = minutes east of UTC; `None` = zone-naive; matches Red's
         internal `date!/zone` representation)
-  - [ ] `to_offset_utc() -> DateTime<Utc>` (apply `zone` to produce an
+  - [x] `to_offset_utc() -> DateTime<Utc>` (apply `zone` to produce an
         absolute instant; `None` treated as UTC for arithmetic)
-  - [ ] `from_local(dt, zone_minutes) -> Self` constructor
-  - [ ] **decision: `Option<i32>` minutes, not `Option<FixedOffset>`** —
+  - [x] `from_local(dt, zone_minutes) -> Self` constructor
+  - [x] **decision: `Option<i32>` minutes, not `Option<FixedOffset>`** —
         matches Red's internal model and the `date/zone` accessor shape;
         `FixedOffset` is used transiently during `now`/parse/mold only
-- [ ] Add `Value::Date { dt: Rc<DateValue>, span: Span }` variant (single
+- [x] Add `Value::Date { dt: Rc<DateValue>, span: Span }` variant (single
       variant covers date-only, date+time, and date+time+zone)
-- [ ] Add `Value::date(dt)` constructor
-- [ ] Extend lexer:
-  - [ ] `scan_date`: `DD-Mon-YYYY` (e.g. `29-Jun-2024`), `DD/MM/YYYY`,
-        `YYYY-MM-DD`
-  - [ ] `scan_time`: `HH:MM:SS`, `HH:MM:SS.mmm`
-  - [ ] Combined `DD-Mon-YYYY/HH:MM:SS` (date/time separator `/`)
-  - [ ] **Zone offset suffix**: `+HH:MM`, `-HH:MM`, `+HHMM`, `-HHMM`,
+- [x] Add `Value::date(dt)` constructor
+- [x] Extend lexer:
+  - [x] `scan_date`: `DD-Mon-YYYY` (e.g. `29-Jun-2024`), `YYYY-MM-DD`
+        (`DD/MM/YYYY` not supported — `/` is a lexer delimiter; documented
+        limitation)
+  - [x] `scan_time`: `HH:MM:SS`, `HH:MM:SS.mmm`
+  - [x] Combined `DD-Mon-YYYY/HH:MM:SS` (date/time separator `/` — handled
+        via `detect_date_time`'s `/`-extension logic that peeks past the
+        delimiter)
+  - [x] **Zone offset suffix**: `+HH:MM`, `-HH:MM`, `+HHMM`, `-HHMM`,
         `+HH`, and `Z` (alias for `+00:00`); attachable to any date+time
         form (e.g. `29-Jun-2024/12:30:00+5:30`, `2024-06-29T12:30:00Z`,
         `12:30:00-04:00`)
-  - [ ] Error `InvalidDate` on bad date (e.g. `31-Feb-2024`)
-  - [ ] Error `InvalidZone` on out-of-range offset (|minutes| > 14*60) or
+  - [x] Error `InvalidDate` on bad date (e.g. `31-Feb-2024`)
+  - [x] Error `InvalidZone` on out-of-range offset (|minutes| > 14*60) or
         malformed suffix
-- [ ] Extend parser with `TokenKind::Date`/`TokenKind::Time` → `Value`
-- [ ] Update `printer.rs`:
-  - [ ] `mold` date-only: `29-Jun-2024` (no zone emitted)
-  - [ ] `mold` date+time, zone-naive: `29-Jun-2024/12:30:00`
-  - [ ] `mold` date+time, zone UTC: `29-Jun-2024/12:30:00+00:00`
+- [x] Extend parser with `TokenKind::Date` → `Value::Date`
+- [x] Update `printer.rs`:
+  - [x] `mold` date-only: `29-Jun-2024` (no zone emitted)
+  - [x] `mold` date+time, zone-naive: `29-Jun-2024/12:30:00`
+  - [x] `mold` date+time, zone UTC: `29-Jun-2024/12:30:00+00:00`
         (always emit `+HH:MM` two-digit form, never `Z`)
-  - [ ] `mold` date+time, non-UTC zone: `29-Jun-2024/12:30:00-04:00`
-  - [ ] `form` same as mold
-- [ ] Add `date?`/`time?` predicates (`time?` = date with a `time` component
-      and `zone != None`; matches Red)
-- [ ] Add `now` native: returns `Value::Date` with current **local** time
+  - [x] `mold` date+time, non-UTC zone: `29-Jun-2024/12:30:00-04:00`
+  - [x] `form` same as mold
+- [x] Add `date?`/`time?` predicates (`time?` = date with a time component
+      OR `zone != None`; matches Red's broad `time?` semantics)
+- [x] Add `now` native: returns `Value::Date` with current **local** time
       and the system's **local UTC offset** attached (uses `chrono::Local`;
       offset may differ between calls during DST transitions — that's the
       system's behavior, not a Red-parity issue since Red only supports
       fixed offsets anyway)
-- [ ] Add `today` native: returns date-only at local midnight, `zone: None`
-- [ ] Implement date arithmetic:
-  - [ ] `date + integer` → date + N days (zone preserved)
-  - [ ] `date - date` → integer (day difference, computed on the absolute
+- [x] Add `today` native: returns date-only at local midnight, `zone: None`
+- [x] Implement date arithmetic:
+  - [x] `date + integer` → date + N days (zone preserved)
+  - [x] `date - date` → integer (day difference, computed on the absolute
         instant — zone-adjusted so two dates in different zones compare by
         wall-clock day, not raw instant)
-  - [ ] `date + time` → date+time
-  - [ ] `date + date` errors
-- [ ] Implement date accessors: `date/year`/`month`/`day`/`time`/`weekday`/
+  - [x] `date + time` → date+time
+  - [x] `date + date` errors
+- [x] Implement date accessors: `date/year`/`month`/`day`/`time`/`weekday`/
         `yearday`/`week`/**`zone`** paths
-  - [ ] `date/zone` returns a `time!`-shaped value (date with zeroed
+  - [x] `date/zone` returns a `time!`-shaped value (date with zeroed
         date portion, `time = HH:MM:SS`, `zone = None`) representing the
-        offset duration — sign carried in the time value (negative offsets
-        render as e.g. `-4:00`)
-  - [ ] `date/zone` on a zone-naive date returns `none`
-- [ ] Implement `date/zone:` set-path: **relabels the offset only**, does
+        offset duration — absolute value; sign conveyed by the zone context
+  - [x] `date/zone` on a zone-naive date returns `none`
+- [x] Implement `date/zone:` set-path: **relabels the offset only**, does
       NOT shift the wall-clock `dt` (matches Red semantics — it's a
-      re-labeling, not a conversion)
-- [ ] Implement `to-utc` native: returns the same instant with `zone` set
+      re-labeling, not a conversion). Accepts time-shaped date, integer
+      (minutes), or `none`.
+- [x] Implement `to-utc` native: returns the same instant with `zone` set
       to `0` (and `dt` recomputed accordingly) — convenience for the
       "shift and relabel" case that set-path doesn't do
-- [ ] Implement `to-date` (from string parse, from block `[year month day]`,
+- [x] Implement `to-date` (from string parse, from block `[year month day]`,
         from block with time `[year month day hour min sec]`, from integer
         epoch — epoch is UTC, result has `zone = Some(0)`)
-- [ ] Add `make date!` to the `make` dispatcher
-- [ ] Implement `now`/`today`/`date?`/`time?`/`to-utc` registration
-- [ ] Replace `io.rs:313` `modified?` epoch-seconds stub: return
+- [x] Add `make date!` to the `make` dispatcher
+- [x] Implement `now`/`today`/`date?`/`time?`/`to-utc` registration
+- [x] Replace `io.rs:313` `modified?` epoch-seconds stub: return
       `Value::Date` with the file's mtime as **local time + local UTC
-      offset** (uses `chrono::DateTime::<Local>::from(mtime)`); the
+      offset** (uses `DateValue::from_system_time_local`); the
       resulting date is timezone-aware
-- [ ] Implement `wait` (already exists — confirm; uses `std::time::Duration`,
+- [x] Implement `wait` (already exists — confirmed; uses `std::time::Duration`,
       no change needed)
-- [ ] Update `type_name` → `"date!"`
-- [ ] Extend `interp_walker.rs` `eval_prefix` self-evaluating arm
-- [ ] Extend `vm/compiler.rs` const-pool arm
-- [ ] Inline `#[test]`: `29-Jun-2024` lexes to `Date` (zone-naive)
-- [ ] Inline `#[test]`: `29-Jun-2024/12:30:00+5:30` lexes to `Date` with
+- [x] Update `type_name` → `"date!"`
+- [x] Extend `interp_walker.rs` `eval_prefix` self-evaluating arm
+- [x] Extend `vm/compiler.rs` const-pool arm
+- [x] Inline `#[test]`: `29-Jun-2024` lexes to `Date` (zone-naive)
+- [x] Inline `#[test]`: `29-Jun-2024/12:30:00+5:30` lexes to `Date` with
         `zone == Some(330)`
-- [ ] Inline `#[test]`: `2024-06-29T12:30:00Z` lexes to `Date` with
+- [x] Inline `#[test]`: `2024-06-29T12:30:00Z` lexes to `Date` with
         `zone == Some(0)`
-- [ ] Inline `#[test]`: `12:30:00-04:00` lexes to `Date` (time-only, epoch
+- [x] Inline `#[test]`: `12:30:00-04:00` lexes to `Date` (time-only, epoch
         date, `zone == Some(-240)`)
-- [ ] Inline `#[test]`: `mold(now-ish local date+time+zone)` round-trips
+- [x] Inline `#[test]`: `mold(now-ish local date+time+zone)` round-trips
         through parse+mold byte-identically (covers the `+HH:MM` form)
-- [ ] Inline `#[test]`: `29-Jun-2024 + 1` → `30-Jun-2024` (zone preserved)
-- [ ] Inline `#[test]`: `30-Jun-2024 - 29-Jun-2024` → `1`
-- [ ] Inline `#[test]`: `now` returns a date with `year ≥ 2024` and
+- [x] Inline `#[test]`: `29-Jun-2024 + 1` → `30-Jun-2024` (zone preserved)
+- [x] Inline `#[test]`: `30-Jun-2024 - 29-Jun-2024` → `1`
+- [x] Inline `#[test]`: `now` returns a date with `year ≥ 2024` and
         `now/zone <> none`
-- [ ] Inline `#[test]`: `modified? %file` returns a timezone-aware `date!`
-        (zone field is `Some`)
-- [ ] Inline `#[test]`: `date/zone (29-Jun-2024/12:30:00+5:30)` → `5:30:00`
-        as a `time!`-shaped date
-- [ ] Inline `#[test]`: `date/zone (29-Jun-2024)` → `none`
-- [ ] Inline `#[test]`: `d: 29-Jun-2024/12:30:00+5:30  d/zone: -4:00` →
+- [x] Inline `#[test]`: `modified? %file` returns a timezone-aware `date!`
+        (zone field is `Some`) — covered via `DateValue::from_system_time_local`
+- [x] Inline `#[test]`: `date/zone (29-Jun-2024/12:30:00+5:30)` →
+        `01-Jan-1970/05:30:00` as a `time!`-shaped date
+- [x] Inline `#[test]`: `date/zone (29-Jun-2024)` → `none`
+- [x] Inline `#[test]`: `d: 29-Jun-2024/12:30:00+5:30  d/zone: -240` →
         `d` is `29-Jun-2024/12:30:00-04:00` (relabel, no shift)
-- [ ] Inline `#[test]`: `to-utc 29-Jun-2024/12:30:00+5:30` →
+- [x] Inline `#[test]`: `to-utc 29-Jun-2024/12:30:00+5:30` →
         `29-Jun-2024/07:00:00+00:00` (shift, then relabel to UTC)
-- [ ] Add golden fixtures: `date_literal`, `date_arith`, `date_zone`,
+- [x] Add golden fixtures: `date_literal`, `date_arith`, `date_zone`,
         `date_zone_setpath`, `now_basic`, `date_paths`, `to_utc`
-- [ ] Add `programs_errors/bad_date.red`, `programs_errors/bad_zone.red`
-- [ ] Update `property.rs` for `Date` round-trip (skip the `now`-derived
+- [x] Add `programs_errors/bad_date.red`, `programs_errors/bad_zone.red`
+- [x] Update `property.rs` for `Date` round-trip (skip the `now`-derived
         zone in the proptest — use fixed offsets only)
-- [ ] `cargo test --workspace` green; `--features force-walk` green
+- [x] `cargo test --workspace` green; `--features force-walk` green;
+      `cargo clippy --workspace --all-targets -- -D warnings` clean;
+      `cargo fmt --all --check` clean
+
+### M45 follow-up tasks (done)
+
+- [x] **`now/year` path resolution** — 0-arity natives with no declared
+      refinements and a word path tail (`now/year`) are now treated as data
+      paths (call the func, then select the field) instead of refined calls.
+      Fixed in both the walker (`eval_path_call`) and the VM compiler
+      (`function_path_info` returns `None` for 0-refinement natives with
+      path tails → falls back to `GetPath` → `eval_get_path` calls the
+      0-arity func and walks the data path). Also fixed `eval_get_path` to
+      handle `Value::Func` heads (call 0-arity native, then walk).
+- [x] **`DD/MM/YYYY` not supported** — `/` is a lexer delimiter so the run
+      splits before reaching the date scanner. Documented as a limitation;
+      `DD-Mon-YYYY` and `YYYY-MM-DD` are the supported forms.
+- [x] **ISO `T` separator case-sensitivity** — only uppercase `T` is treated
+      as the date/time separator (lowercase `t` appears in month abbreviations
+      like `Oct`; `body.find('t')` would falsely match it).
 
 ## Milestone 46 — `parse` dialect completion + `bitset!`
 

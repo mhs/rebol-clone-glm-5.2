@@ -163,6 +163,239 @@ fn native_err(from: &Value, msg: impl Into<String>) -> EvalError {
 }
 
 // ---------------------------------------------------------------------------
+// M44: pair! / tuple! arithmetic
+// ---------------------------------------------------------------------------
+
+/// Extract the two components of a `pair!` as a tuple of references.
+fn pair_components(v: &Value) -> (&Value, &Value) {
+    match v {
+        Value::Pair { x, y, .. } => (x, y),
+        _ => unreachable!("caller checks Value::Pair"),
+    }
+}
+
+/// M44 pair arithmetic dispatcher. Returns `Some(result)` if either operand
+/// is a `pair!`; `None` if neither is (caller falls through to `num_binop`).
+/// Component arithmetic delegates to `num_binop` so int/int→int, mixed→float.
+///
+/// Supported combos (callers gate the asymmetric ones):
+/// - `pair OP pair` → pair (componentwise)
+/// - `pair OP scalar` → pair (scalar broadcast to both components)
+/// - `scalar OP pair` → only valid for commutative `+`/`*`; `subtract`/`divide`
+///   reject `scalar - pair` / `scalar / pair` before calling.
+fn pair_binop(
+    args: &[Value],
+    op: &str,
+    f_int: fn(i64, i64) -> Option<i64>,
+    f_float: fn(f64, f64) -> f64,
+) -> Result<Option<Value>, EvalError> {
+    let a = &args[0];
+    let b = &args[1];
+    let a_pair = matches!(a, Value::Pair { .. });
+    let b_pair = matches!(b, Value::Pair { .. });
+    if !a_pair && !b_pair {
+        return Ok(None);
+    }
+    // Reject non-numeric non-pair operands (e.g. pair + string).
+    let check_num = |v: &Value| -> Result<(), EvalError> {
+        if !matches!(v, Value::Pair { .. }) && as_number(v).is_none() {
+            return Err(num_type_err(v));
+        }
+        Ok(())
+    };
+    check_num(a)?;
+    check_num(b)?;
+
+    let apply = |x: &Value, y: &Value| -> Result<Value, EvalError> {
+        num_binop(&[x.clone(), y.clone()], op, f_int, f_float)
+    };
+
+    match (a_pair, b_pair) {
+        (true, true) => {
+            let (ax, ay) = pair_components(a);
+            let (bx, by) = pair_components(b);
+            let nx = apply(ax, bx)?;
+            let ny = apply(ay, by)?;
+            Ok(Some(Value::pair(nx, ny)))
+        }
+        (true, false) => {
+            let (ax, ay) = pair_components(a);
+            let nx = apply(ax, b)?;
+            let ny = apply(ay, b)?;
+            Ok(Some(Value::pair(nx, ny)))
+        }
+        (false, true) => {
+            // scalar OP pair — only reached for commutative +/*. subtract/divide
+            // guard this before calling.
+            let (bx, by) = pair_components(b);
+            let nx = apply(a, bx)?;
+            let ny = apply(a, by)?;
+            Ok(Some(Value::pair(nx, ny)))
+        }
+        (false, false) => Ok(None),
+    }
+}
+
+/// M44 tuple arithmetic dispatcher. Returns `Some(result)` if either operand
+/// is a `tuple!`; `None` if neither is. Supported:
+/// - `tuple + tuple` → tuple (componentwise, clamped 0–255; lengths must match)
+/// - `tuple - tuple` → tuple (clamped)
+/// - `tuple * float` → tuple (scaled, clamped)
+///
+/// Other combos (tuple + int, scalar + tuple, tuple / *) raise TypeError.
+fn tuple_binop(
+    args: &[Value],
+    op: &str,
+    _f_int: fn(i64, i64) -> Option<i64>,
+    f_float: fn(f64, f64) -> f64,
+) -> Result<Option<Value>, EvalError> {
+    let a = &args[0];
+    let b = &args[1];
+    let a_tup = matches!(a, Value::Tuple { .. });
+    let b_tup = matches!(b, Value::Tuple { .. });
+    if !a_tup && !b_tup {
+        return Ok(None);
+    }
+
+    let a_bytes = |v: &Value| match v {
+        Value::Tuple { bytes, .. } => bytes.clone(),
+        _ => unreachable!(),
+    };
+    let clamp_byte = |r: i64| r.clamp(0, 255) as u8;
+
+    if a_tup && b_tup {
+        let a_b = a_bytes(a);
+        let b_b = a_bytes(b);
+        if a_b.len() != b_b.len() {
+            return Err(native_err(
+                a,
+                format!(
+                    "{op}: tuple length mismatch ({} vs {})",
+                    a_b.len(),
+                    b_b.len()
+                ),
+            ));
+        }
+        let out: Vec<u8> = a_b
+            .iter()
+            .zip(b_b.iter())
+            .map(|(&x, &y)| {
+                let r = match op {
+                    "add" => x as i64 + y as i64,
+                    "subtract" => x as i64 - y as i64,
+                    _ => unreachable!("tuple_binop: unsupported tuple-tuple op"),
+                };
+                clamp_byte(r)
+            })
+            .collect();
+        return Ok(Some(Value::tuple(out)));
+    }
+
+    if a_tup && !b_tup {
+        let a_b = a_bytes(a);
+        match b {
+            Value::Float { f, .. } => {
+                let scale = *f;
+                let out: Vec<u8> = a_b
+                    .iter()
+                    .map(|&x| clamp_byte((f_float(x as f64, scale)).round() as i64))
+                    .collect();
+                return Ok(Some(Value::tuple(out)));
+            }
+            Value::Integer { n, .. } => {
+                // tuple * int (broadcast, clamped) — only valid for *
+                if op != "multiply" {
+                    return Err(native_err(
+                        b,
+                        format!("{op}: tuple OP integer not supported (only tuple * integer)"),
+                    ));
+                }
+                let k = *n;
+                let out: Vec<u8> = a_b.iter().map(|&x| clamp_byte(x as i64 * k)).collect();
+                return Ok(Some(Value::tuple(out)));
+            }
+            _ => return Err(num_type_err(b)),
+        }
+    }
+
+    // scalar OP tuple — not supported (asymmetric).
+    Err(native_err(
+        a,
+        format!("{op}: scalar {op} tuple not supported"),
+    ))
+}
+
+/// `EvalError::Native` shaped `math` error (for `tuple` arithmetic failures).
+#[allow(dead_code)]
+fn math_err(from: &Value, msg: impl Into<String>) -> EvalError {
+    native_err(from, msg)
+}
+
+// ---------------------------------------------------------------------------
+// M45: date! arithmetic
+// ---------------------------------------------------------------------------
+
+/// `date + integer` → date + N days (zone preserved).
+/// `date + date` (time-shaped) → date+time (the second date contributes its
+/// time component). `date + date` (full date) → TypeError.
+/// Returns `Some(result)` if either operand is a `date!`; `None` otherwise.
+fn date_add(args: &[Value]) -> Result<Option<Value>, EvalError> {
+    let a = &args[0];
+    let b = &args[1];
+    let a_date = matches!(a, Value::Date { .. });
+    let b_date = matches!(b, Value::Date { .. });
+    if !a_date && !b_date {
+        return Ok(None);
+    }
+    match (a, b) {
+        // `date + integer` → date + N days.
+        (Value::Date { dt, .. }, Value::Integer { n, .. }) => {
+            Ok(Some(Value::date(dt.add_days(*n))))
+        }
+        // `integer + date` → date + N days (commutative).
+        (Value::Integer { n, .. }, Value::Date { dt, .. }) => {
+            Ok(Some(Value::date(dt.add_days(*n))))
+        }
+        // `date + date` → only valid if the second is time-shaped (epoch date).
+        // The result is the first date with the second's time component.
+        (Value::Date { dt: da, .. }, Value::Date { dt: db, .. }) => {
+            // If the second date is epoch (1970-01-01), treat it as a time.
+            let epoch = red_core::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            if db.dt.date() == epoch {
+                Ok(Some(Value::date(da.with_time(db.dt.time()))))
+            } else {
+                Err(EvalError::TypeError {
+                    expected: "integer! or time! (date + date not supported)",
+                    found: "date!",
+                    span: b.span_or_default(),
+                })
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `date - date` → integer (day difference, zone-adjusted on the absolute
+/// instant). Returns `Some(result)` if both operands are `date!`; `None`
+/// otherwise.
+fn date_subtract(args: &[Value]) -> Result<Option<Value>, EvalError> {
+    let a = &args[0];
+    let b = &args[1];
+    match (a, b) {
+        (Value::Date { dt: da, .. }, Value::Date { dt: db, .. }) => {
+            // Compute the day difference on the absolute instant (zone-adjusted).
+            let a_utc = da.to_offset_utc();
+            let b_utc = db.to_offset_utc();
+            let a_date = a_utc.date_naive();
+            let b_date = b_utc.date_naive();
+            let diff = (a_date - b_date).num_days();
+            Ok(Some(Value::integer(diff)))
+        }
+        _ => Ok(None),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Arithmetic infix: + - * /  (and the shared `num_binop` helper)
 // ---------------------------------------------------------------------------
 
@@ -214,7 +447,8 @@ fn num_binop(
 
 /// `+` infix — numeric addition, with string concatenation when both operands
 /// are strings (M15), and char arithmetic (M38: `char + int → char`,
-/// `char + char → int`). Falls through to numeric addition otherwise.
+/// `char + char → int`). M44: pair/tuple arithmetic. Falls through to numeric
+/// addition otherwise.
 pub(crate) fn add(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     if let (Value::String { s: a, .. }, Value::String { s: b, .. }) = (&args[0], &args[1]) {
         let mut cat = String::with_capacity(a.len() + b.len());
@@ -225,21 +459,35 @@ pub(crate) fn add(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<
     if let Some(r) = char_binop(args, "add", |a, b| a + b, |a, b| a + b)? {
         return Ok(r);
     }
+    if let Some(r) = pair_binop(args, "add", |a, b| Some(a + b), |a, b| a + b)? {
+        return Ok(r);
+    }
+    if let Some(r) = tuple_binop(args, "add", |a, b| Some(a + b), |a, b| a + b)? {
+        return Ok(r);
+    }
+    // M45: date arithmetic.
+    if let Some(r) = date_add(args)? {
+        return Ok(r);
+    }
     num_binop(args, "add", |a, b| Some(a + b), |a, b| a + b)
 }
 
 /// `-` infix — numeric subtraction, with char arithmetic (M38:
-/// `char - char → int`, `char - int → char`). Falls through to numeric
-/// subtraction otherwise. `int - char` is a type error in Red.
+/// `char - char → int`, `char - int → char`). M44: pair/tuple arithmetic.
+/// `int - pair`/`int - tuple`/`scalar - tuple` are type errors (asymmetric).
 pub(crate) fn subtract(
     args: &[Value],
     _refs: &RefineArgs,
     _env: &mut Env,
 ) -> Result<Value, EvalError> {
-    // `int - char` is not allowed (asymmetric). Block it before `char_binop`.
-    if as_codepoint(&args[0]).is_none() && as_codepoint(&args[1]).is_some() {
+    // `int - char`/`int - pair`/`int - tuple` is not allowed (asymmetric).
+    if as_codepoint(&args[0]).is_none()
+        && !matches!(&args[0], Value::Pair { .. } | Value::Tuple { .. })
+        && (as_codepoint(&args[1]).is_some()
+            || matches!(&args[1], Value::Pair { .. } | Value::Tuple { .. }))
+    {
         return Err(EvalError::TypeError {
-            expected: "char! or float!",
+            expected: "char!, pair!, tuple!, or float!",
             found: type_name(&args[0]),
             span: args[0].span_or_default(),
         });
@@ -247,24 +495,66 @@ pub(crate) fn subtract(
     if let Some(r) = char_binop(args, "subtract", |a, b| a - b, |a, b| a - b)? {
         return Ok(r);
     }
+    if let Some(r) = pair_binop(args, "subtraction", |a, b| Some(a - b), |a, b| a - b)? {
+        return Ok(r);
+    }
+    if let Some(r) = tuple_binop(args, "subtract", |a, b| Some(a - b), |a, b| a - b)? {
+        return Ok(r);
+    }
+    // M45: date subtraction (`date - date → integer`).
+    if let Some(r) = date_subtract(args)? {
+        return Ok(r);
+    }
     num_binop(args, "subtraction", |a, b| Some(a - b), |a, b| a - b)
 }
 
-/// `*` infix — numeric multiplication.
+/// `*` infix — numeric multiplication. M44: pair/tuple arithmetic.
 pub(crate) fn multiply(
     args: &[Value],
     _refs: &RefineArgs,
     _env: &mut Env,
 ) -> Result<Value, EvalError> {
-    num_binop(args, "division", |a, b| Some(a * b), |a, b| a * b)
+    if let Some(r) = pair_binop(args, "multiply", |a, b| Some(a * b), |a, b| a * b)? {
+        return Ok(r);
+    }
+    if let Some(r) = tuple_binop(args, "multiply", |a, b| Some(a * b), |a, b| a * b)? {
+        return Ok(r);
+    }
+    num_binop(args, "multiply", |a, b| Some(a * b), |a, b| a * b)
 }
 
-/// `/` infix — numeric division. Integer division by zero → error.
+/// `/` infix — numeric division. Integer division by zero → error. M44:
+/// pair/scalar division (pair/pair not supported). Tuple division is a type
+/// error (tuples are bytes, not divisible).
 pub(crate) fn divide(
     args: &[Value],
     _refs: &RefineArgs,
     _env: &mut Env,
 ) -> Result<Value, EvalError> {
+    // `int / pair`/`scalar / tuple` — asymmetric, type error.
+    if !matches!(&args[0], Value::Pair { .. } | Value::Tuple { .. })
+        && matches!(&args[1], Value::Pair { .. } | Value::Tuple { .. })
+    {
+        return Err(EvalError::TypeError {
+            expected: "number!",
+            found: type_name(&args[1]),
+            span: args[1].span_or_default(),
+        });
+    }
+    if let Some(r) = pair_binop(
+        args,
+        "division",
+        |a, b| if b == 0 { None } else { Some(a / b) },
+        |a, b| a / b,
+    )? {
+        return Ok(r);
+    }
+    if matches!(&args[0], Value::Tuple { .. }) || matches!(&args[1], Value::Tuple { .. }) {
+        return Err(native_err(
+            &args[0],
+            "division: tuple division not supported",
+        ));
+    }
     num_binop(
         args,
         "division",
@@ -328,10 +618,30 @@ fn abs_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Valu
     if args.len() != 1 {
         return Err(arity_err(args, "abs", 1, args.len()));
     }
-    match as_number(&args[0]) {
+    match &args[0] {
+        Value::Integer { n, .. } => Ok(Value::integer(n.wrapping_abs())),
+        Value::Float { f, .. } => Ok(Value::float(f.abs())),
+        // M44: abs on a pair → componentwise abs.
+        Value::Pair { x, y, .. } => {
+            let nx = abs_one(x)?;
+            let ny = abs_one(y)?;
+            Ok(Value::pair(nx, ny))
+        }
+        Value::Tuple { .. } => Err(EvalError::TypeError {
+            expected: "number! or pair!",
+            found: "tuple!",
+            span: args[0].span_or_default(),
+        }),
+        other => Err(num_type_err(other)),
+    }
+}
+
+/// Helper: `abs` of a single number value (int/float). Errors on non-numbers.
+fn abs_one(v: &Value) -> Result<Value, EvalError> {
+    match as_number(v) {
         Some(Num::Int(n)) => Ok(Value::integer(n.wrapping_abs())),
         Some(Num::Float(f)) => Ok(Value::float(f.abs())),
-        None => Err(num_type_err(&args[0])),
+        None => Err(num_type_err(v)),
     }
 }
 
@@ -339,10 +649,30 @@ fn negate_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<V
     if args.len() != 1 {
         return Err(arity_err(args, "negate", 1, args.len()));
     }
-    match as_number(&args[0]) {
+    match &args[0] {
+        Value::Integer { n, .. } => Ok(Value::integer(n.wrapping_neg())),
+        Value::Float { f, .. } => Ok(Value::float(-f)),
+        // M44: negate on a pair → componentwise negate.
+        Value::Pair { x, y, .. } => {
+            let nx = negate_one(x)?;
+            let ny = negate_one(y)?;
+            Ok(Value::pair(nx, ny))
+        }
+        Value::Tuple { .. } => Err(EvalError::TypeError {
+            expected: "number! or pair!",
+            found: "tuple!",
+            span: args[0].span_or_default(),
+        }),
+        other => Err(num_type_err(other)),
+    }
+}
+
+/// Helper: negate of a single number value (int/float).
+fn negate_one(v: &Value) -> Result<Value, EvalError> {
+    match as_number(v) {
         Some(Num::Int(n)) => Ok(Value::integer(n.wrapping_neg())),
         Some(Num::Float(f)) => Ok(Value::float(-f)),
-        None => Err(num_type_err(&args[0])),
+        None => Err(num_type_err(v)),
     }
 }
 
@@ -460,6 +790,38 @@ fn min_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Valu
     if args.len() != 2 {
         return Err(arity_err(args, "min", 2, args.len()));
     }
+    // M44: pair + pair → componentwise min. Tuple → type error.
+    if matches!(&args[0], Value::Tuple { .. }) || matches!(&args[1], Value::Tuple { .. }) {
+        return Err(EvalError::TypeError {
+            expected: "number! or pair!",
+            found: "tuple!",
+            span: args[0].span_or_default(),
+        });
+    }
+    if let (Value::Pair { x: ax, y: ay, .. }, Value::Pair { x: bx, y: by, .. }) =
+        (&args[0], &args[1])
+    {
+        let nx = match num_ordering(ax, bx)? {
+            std::cmp::Ordering::Greater => (**bx).clone(),
+            _ => (**ax).clone(),
+        };
+        let ny = match num_ordering(ay, by)? {
+            std::cmp::Ordering::Greater => (**by).clone(),
+            _ => (**ay).clone(),
+        };
+        return Ok(Value::pair(nx, ny));
+    }
+    if matches!(&args[0], Value::Pair { .. }) || matches!(&args[1], Value::Pair { .. }) {
+        return Err(EvalError::TypeError {
+            expected: "pair!",
+            found: if matches!(&args[0], Value::Pair { .. }) {
+                type_name(&args[1])
+            } else {
+                type_name(&args[0])
+            },
+            span: args[0].span_or_default(),
+        });
+    }
     Ok(match num_ordering(&args[0], &args[1])? {
         std::cmp::Ordering::Greater => args[1].clone(),
         _ => args[0].clone(),
@@ -469,6 +831,38 @@ fn min_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Valu
 fn max_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "max", 2, args.len()));
+    }
+    // M44: pair + pair → componentwise max. Tuple → type error.
+    if matches!(&args[0], Value::Tuple { .. }) || matches!(&args[1], Value::Tuple { .. }) {
+        return Err(EvalError::TypeError {
+            expected: "number! or pair!",
+            found: "tuple!",
+            span: args[0].span_or_default(),
+        });
+    }
+    if let (Value::Pair { x: ax, y: ay, .. }, Value::Pair { x: bx, y: by, .. }) =
+        (&args[0], &args[1])
+    {
+        let nx = match num_ordering(ax, bx)? {
+            std::cmp::Ordering::Less => (**bx).clone(),
+            _ => (**ax).clone(),
+        };
+        let ny = match num_ordering(ay, by)? {
+            std::cmp::Ordering::Less => (**by).clone(),
+            _ => (**ay).clone(),
+        };
+        return Ok(Value::pair(nx, ny));
+    }
+    if matches!(&args[0], Value::Pair { .. }) || matches!(&args[1], Value::Pair { .. }) {
+        return Err(EvalError::TypeError {
+            expected: "pair!",
+            found: if matches!(&args[0], Value::Pair { .. }) {
+                type_name(&args[1])
+            } else {
+                type_name(&args[0])
+            },
+            span: args[0].span_or_default(),
+        });
     }
     Ok(match num_ordering(&args[0], &args[1])? {
         std::cmp::Ordering::Less => args[1].clone(),
@@ -1382,5 +1776,71 @@ mod tests {
     fn pi_and_e_constants() {
         assert!(approx(as_f64(&val("pi")), std::f64::consts::PI));
         assert!(approx(as_f64(&val("e")), std::f64::consts::E));
+    }
+
+    // --- M44 pair! / tuple! arithmetic ---
+
+    #[test]
+    fn pair_add_pair() {
+        assert_eq!(mold_to_string(&val("100x200 + 50x50")), "150x250");
+    }
+
+    #[test]
+    fn pair_add_scalar() {
+        assert_eq!(mold_to_string(&val("1x2 + 10")), "11x12");
+        assert_eq!(mold_to_string(&val("10 + 1x2")), "11x12");
+    }
+
+    #[test]
+    fn pair_subtract_and_multiply() {
+        assert_eq!(mold_to_string(&val("100x200 - 50x50")), "50x150");
+        assert_eq!(mold_to_string(&val("2x3 * 3x4")), "6x12");
+        assert_eq!(mold_to_string(&val("2x3 * 2")), "4x6");
+    }
+
+    #[test]
+    fn pair_divide_scalar() {
+        assert_eq!(mold_to_string(&val("10x20 / 2")), "5x10");
+    }
+
+    #[test]
+    fn pair_float_arith() {
+        assert_eq!(mold_to_string(&val("100x200 + 1.5x2.5")), "101.5x202.5");
+    }
+
+    #[test]
+    fn pair_negate_abs_min_max() {
+        assert_eq!(mold_to_string(&val("negate 5x10")), "-5x-10");
+        assert_eq!(mold_to_string(&val("abs -5x-10")), "5x10");
+        assert_eq!(mold_to_string(&val("min 1x2 3x4")), "1x2");
+        assert_eq!(mold_to_string(&val("max 1x2 3x4")), "3x4");
+    }
+
+    #[test]
+    fn tuple_add_subtract() {
+        assert_eq!(mold_to_string(&val("255.0.0 + 0.10.0")), "255.10.0");
+        assert_eq!(mold_to_string(&val("255.0.0 - 10.20.30")), "245.0.0");
+    }
+
+    #[test]
+    fn tuple_multiply_float() {
+        assert_eq!(mold_to_string(&val("100.50.25 * 0.5")), "50.25.13");
+        assert_eq!(mold_to_string(&val("100.50.25 * 2")), "200.100.50");
+    }
+
+    #[test]
+    fn tuple_length_mismatch_errors() {
+        assert!(run_capture_val("255.0.0 + 1.2.3.4").is_err());
+    }
+
+    #[test]
+    fn int_minus_pair_errors() {
+        // Asymmetric: `int - pair` is a type error (like `int - char`).
+        assert!(run_capture_val("10 - 1x2").is_err());
+    }
+
+    #[test]
+    fn tuple_division_errors() {
+        assert!(run_capture_val("255.0.0 / 2").is_err());
     }
 }

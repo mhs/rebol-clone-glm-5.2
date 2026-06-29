@@ -283,6 +283,12 @@ fn length_q(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value,
     if let Value::Map(m) = &args[0] {
         return Ok(Value::integer(m.borrow().len() as i64));
     }
+    // M44: pair! always 2; tuple! is its byte count (3 or 4).
+    match &args[0] {
+        Value::Pair { .. } => return Ok(Value::integer(2)),
+        Value::Tuple { bytes, .. } => return Ok(Value::integer(bytes.len() as i64)),
+        _ => {}
+    }
     let (series, _, _) = extract_series(&args[0])?;
     let len = storage_len(&series);
     let count = len.saturating_sub(series.index);

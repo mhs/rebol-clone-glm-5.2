@@ -22,6 +22,10 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Float { f: x, .. }, Value::Integer { n: y, .. }) => *x == (*y as f64),
         (Value::String { s: x, .. }, Value::String { s: y, .. }) => x == y,
         (Value::Char { c: x, .. }, Value::Char { c: y, .. }) => x == y,
+        (Value::Pair { x: ax, y: ay, .. }, Value::Pair { x: bx, y: by, .. }) => {
+            values_equal(ax, bx) && values_equal(ay, by)
+        }
+        (Value::Tuple { bytes: x, .. }, Value::Tuple { bytes: y, .. }) => x == y,
         (Value::String8 { bytes: x, .. }, Value::String8 { bytes: y, .. }) => x == y,
         (Value::None, Value::None) => true,
         (Value::Logic(x), Value::Logic(y)) => x == y,
@@ -68,6 +72,12 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
                     .borrow()
                     .iter()
                     .all(|(k, v)| b.get(k).is_some_and(|bv| values_equal(v, &bv)))
+        }
+        // M45: date! equality. Normalize `None` zone → `Some(0)` (UTC) for
+        // comparison, so a zone-naive date equals the same UTC date. Two
+        // dates are equal iff their `dt` matches AND normalized zones match.
+        (Value::Date { dt: da, .. }, Value::Date { dt: db, .. }) => {
+            da.dt == db.dt && da.zone.unwrap_or(0) == db.zone.unwrap_or(0)
         }
         _ => false,
     }

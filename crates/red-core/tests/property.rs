@@ -21,8 +21,10 @@
 
 use proptest::prelude::*;
 use red_core::{
-    load_source, mold_to_string, printer::mold, MapDef, MapKey, Series, Span, Symbol, Value,
+    load_source, mold_to_string, printer::mold, DateValue, MapDef, MapKey, Series, Span, Symbol,
+    Value,
 };
+use std::rc::Rc;
 
 /// Generate a `Value` tree of bounded depth using only reparseable variants.
 fn gen_value(_depth: u32) -> BoxedStrategy<Value> {
@@ -59,6 +61,69 @@ fn gen_value(_depth: u32) -> BoxedStrategy<Value> {
             bytes,
             span: Span::new(0, 0),
         }),
+        // M44: pair! literals — two small integers (mold form `NxM` reparses).
+        // Keep values non-negative so the mold form is unambiguous (no leading
+        // `-` to confuse the lexer's pair-detection).
+        (0i64..1000, 0i64..1000).prop_map(|(x, y)| Value::Pair {
+            x: Rc::new(Value::Integer {
+                n: x,
+                span: Span::new(0, 0)
+            }),
+            y: Rc::new(Value::Integer {
+                n: y,
+                span: Span::new(0, 0)
+            }),
+            span: Span::new(0, 0),
+        }),
+        // M44: tuple! literals — 3 or 4 bytes 0-255 (mold form `R.G.B[.A]`
+        // reparses).
+        (any::<u8>(), any::<u8>(), any::<u8>()).prop_map(|(r, g, b)| Value::Tuple {
+            bytes: Rc::from(&[r, g, b][..]),
+            span: Span::new(0, 0),
+        }),
+        (any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>()).prop_map(|(r, g, b, a)| {
+            Value::Tuple {
+                bytes: Rc::from(&[r, g, b, a][..]),
+                span: Span::new(0, 0),
+            }
+        }),
+        // M45: date! literals. Generate a valid year/month/day (chrono
+        // validates), an optional time (HH:MM:SS), and an optional fixed
+        // offset zone (0..=14h). The mold form `DD-Mon-YYYY[/HH:MM:SS[+HH:MM]]`
+        // reparses through the new lexer rule. Skip the `now`-derived zone
+        // (use fixed offsets only, per plan5.md M45 line 627).
+        (1900i32..2100, 1u32..=12, 1u32..=28).prop_map(|(y, m, d)| {
+            let date = red_core::NaiveDate::from_ymd_opt(y, m, d).unwrap();
+            Value::date(DateValue::date_only(date))
+        }),
+        (
+            1900i32..2100,
+            1u32..=12,
+            1u32..=28,
+            0u32..23,
+            0u32..59,
+            0u32..59
+        )
+            .prop_map(|(y, m, d, h, mi, s)| {
+                let date = red_core::NaiveDate::from_ymd_opt(y, m, d).unwrap();
+                let time = red_core::NaiveTime::from_hms_opt(h, mi, s).unwrap();
+                Value::date(DateValue::from_local(date.and_time(time), None))
+            },),
+        (
+            1900i32..2100,
+            1u32..=12,
+            1u32..=28,
+            0u32..23,
+            0u32..59,
+            0u32..59,
+            -14i32..=14,
+        )
+            .prop_map(|(y, m, d, h, mi, s, zh)| {
+                let date = red_core::NaiveDate::from_ymd_opt(y, m, d).unwrap();
+                let time = red_core::NaiveTime::from_hms_opt(h, mi, s).unwrap();
+                let zone = Some(zh * 60);
+                Value::date(DateValue::from_local(date.and_time(time), zone))
+            }),
         // Word family.
         "[a-z][a-z0-9]{0,8}".prop_map(|s: String| Value::Word {
             sym: red_core::Symbol::new(&s),
