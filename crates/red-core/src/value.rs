@@ -314,6 +314,10 @@ pub enum Value {
     /// `+05:30`. `FixedOffset` is used transiently during parse/mold/`now`
     /// only — the struct stores raw minutes.
     Date { dt: Rc<DateValue>, span: Span },
+    /// A bitset! (M46): a bit-packed set of byte values (0..255) used by
+    /// `parse` dialect charset matching and the `charset`/`make bitset!`
+    /// constructors. Synthetic — produced at runtime; carries no source span.
+    Bitset(Rc<RefCell<BitsetDef>>),
 }
 
 /// Payload of a `Value::Error`. M42 extends the prior message-only stub to
@@ -551,6 +555,193 @@ impl MapDef {
     }
 }
 
+/// A `bitset!` (M46): a bit-packed set of byte values (0..255). Used as a
+/// `parse` dialect matcher (matches any char in the set) and as a standalone
+/// value type with set operations (`union`/`intersect`/`difference`/
+/// `complement`). Bits are packed into `Vec<u64>`; `len` is the bit count
+/// (always a multiple of 64 in storage; the logical size is 256 for charsets
+/// but may be larger for general bitsets).
+///
+/// Mutation is interior (`RefCell`), mirroring `MapDef`/`ObjectDef` — a
+/// `Value::Bitset(Rc<RefCell<BitsetDef>>)` is shared by aliases and mutations
+/// are visible to all references.
+#[derive(Clone, Debug, Default)]
+pub struct BitsetDef {
+    pub bits: RefCell<Vec<u64>>,
+    /// Logical bit count (number of bits the bitset can address). Always
+    /// rounded up to a multiple of 64 in storage.
+    pub len: usize,
+}
+
+impl BitsetDef {
+    /// Create a new empty bitset addressing `len` bits.
+    pub fn new(len: usize) -> Self {
+        let words = len.div_ceil(64);
+        BitsetDef {
+            bits: RefCell::new(vec![0u64; words]),
+            len,
+        }
+    }
+
+    /// Create a charset bitset addressing 256 byte values (the standard
+    /// `charset` form for `parse` matching).
+    pub fn new_charset() -> Self {
+        Self::new(256)
+    }
+
+    /// Set the bit for `byte` (no-op if out of range).
+    pub fn set(&self, byte: usize) {
+        if byte >= self.len {
+            return;
+        }
+        let word = byte / 64;
+        let bit = byte % 64;
+        self.bits.borrow_mut()[word] |= 1u64 << bit;
+    }
+
+    /// Clear the bit for `byte` (no-op if out of range).
+    pub fn clear(&self, byte: usize) {
+        if byte >= self.len {
+            return;
+        }
+        let word = byte / 64;
+        let bit = byte % 64;
+        self.bits.borrow_mut()[word] &= !(1u64 << bit);
+    }
+
+    /// Test the bit for `byte` (returns `false` if out of range).
+    pub fn test(&self, byte: usize) -> bool {
+        if byte >= self.len {
+            return false;
+        }
+        let word = byte / 64;
+        let bit = byte % 64;
+        self.bits.borrow()[word] & (1u64 << bit) != 0
+    }
+
+    /// Union `other` into `self` (in-place). Sizes must match; if `other` is
+    /// smaller/larger, only the overlapping range is unioned.
+    pub fn union(&self, other: &BitsetDef) {
+        let mut mine = self.bits.borrow_mut();
+        let theirs = other.bits.borrow();
+        for i in 0..mine.len().min(theirs.len()) {
+            mine[i] |= theirs[i];
+        }
+    }
+
+    /// Intersect `self` with `other` (in-place).
+    pub fn intersect(&self, other: &BitsetDef) {
+        let mut mine = self.bits.borrow_mut();
+        let theirs = other.bits.borrow();
+        for i in 0..mine.len().min(theirs.len()) {
+            mine[i] &= theirs[i];
+        }
+    }
+
+    /// Subtract `other` from `self` (in-place).
+    pub fn difference(&self, other: &BitsetDef) {
+        let mut mine = self.bits.borrow_mut();
+        let theirs = other.bits.borrow();
+        for i in 0..mine.len().min(theirs.len()) {
+            mine[i] &= !theirs[i];
+        }
+    }
+
+    /// Complement all bits in-place (within `len`).
+    pub fn complement(&self) {
+        let mut mine = self.bits.borrow_mut();
+        for w in mine.iter_mut() {
+            *w = !*w;
+        }
+        // Mask off bits beyond `len` in the trailing word.
+        let extra = self.len % 64;
+        if extra != 0 && !mine.is_empty() {
+            let mask = (1u64 << extra) - 1;
+            let last = mine.len() - 1;
+            mine[last] &= mask;
+        }
+    }
+
+    /// Build a charset from the chars of `s` (each char's codepoint becomes
+    /// a set bit, modulo 256).
+    pub fn from_chars(s: &str) -> Self {
+        let bs = Self::new_charset();
+        for c in s.chars() {
+            let b = (c as u32) as usize;
+            if b < 256 {
+                bs.set(b);
+            }
+        }
+        bs
+    }
+
+    /// Build a charset with bits set for `lo..=hi` (inclusive byte range).
+    pub fn from_range(lo: u8, hi: u8) -> Self {
+        let bs = Self::new_charset();
+        let (start, end) = if lo <= hi {
+            (lo as usize, hi as usize)
+        } else {
+            (hi as usize, lo as usize)
+        };
+        for b in start..=end {
+            bs.set(b);
+        }
+        bs
+    }
+
+    /// Count of set bits.
+    pub fn count(&self) -> usize {
+        self.bits
+            .borrow()
+            .iter()
+            .map(|w| w.count_ones() as usize)
+            .sum()
+    }
+
+    /// Is the bitset empty (no set bits)?
+    pub fn is_empty(&self) -> bool {
+        self.count() == 0
+    }
+
+    /// Iterate over the byte values (as `char`s) of set bits, in ascending
+    /// order. Used by the printer for the `make bitset! "ABC"` form.
+    pub fn iter_set_chars(&self) -> Vec<char> {
+        let mut out = Vec::new();
+        let mine = self.bits.borrow();
+        for (word_idx, &w) in mine.iter().enumerate() {
+            let mut bits = w;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                let byte = word_idx * 64 + bit;
+                if byte < self.len && byte < 256 {
+                    out.push(char::from_u32(byte as u32).unwrap_or('\0'));
+                }
+                bits &= !(1u64 << bit);
+            }
+        }
+        out
+    }
+
+    /// Raw byte view of the bit packs (byte i = bits 8i..8i+7, little-endian
+    /// within each u64 word). Used by the printer's `#{hex}` fallback form.
+    pub fn raw_bytes(&self) -> Vec<u8> {
+        let mine = self.bits.borrow();
+        let n_bytes = self.len.div_ceil(8);
+        let mut out = Vec::with_capacity(n_bytes);
+        for i in 0..n_bytes {
+            let word = i / 8;
+            let byte_in_word = i % 8;
+            let b = if word < mine.len() {
+                (mine[word] >> (8 * byte_in_word)) & 0xFF
+            } else {
+                0
+            };
+            out.push(b as u8);
+        }
+        out
+    }
+}
+
 /// A `date!` payload (M45): a wall-clock `NaiveDateTime` plus an optional UTC
 /// offset stored as `Option<i32>` minutes (matching Red's internal
 /// `date!/zone` shape). `None` is zone-naive (no offset emitted on mold);
@@ -768,7 +959,8 @@ impl Value {
             | Value::Func(_)
             | Value::Error(_)
             | Value::Object(_)
-            | Value::Map(_) => None,
+            | Value::Map(_)
+            | Value::Bitset(_) => None,
         }
     }
 
@@ -995,6 +1187,11 @@ impl Value {
             dt: Rc::new(dt),
             span: Span::default(),
         }
+    }
+
+    /// Constructor shorthand for a bitset! value wrapping `bs_def`.
+    pub fn bitset(bs_def: BitsetDef) -> Self {
+        Value::Bitset(Rc::new(RefCell::new(bs_def)))
     }
 }
 

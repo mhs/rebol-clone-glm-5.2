@@ -79,6 +79,12 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Date { dt: da, .. }, Value::Date { dt: db, .. }) => {
             da.dt == db.dt && da.zone.unwrap_or(0) == db.zone.unwrap_or(0)
         }
+        // M46: bitset! equality — same length and same bit pattern.
+        (Value::Bitset(a), Value::Bitset(b)) => {
+            let a = a.borrow();
+            let b = b.borrow();
+            a.len == b.len && a.bits.borrow().as_slice() == b.bits.borrow().as_slice()
+        }
         _ => false,
     }
 }

@@ -348,7 +348,8 @@ fn eval_prefix(
         | Value::Tuple { .. }
         | Value::Object(_)
         | Value::Map(_)
-        | Value::Date { .. } => Ok(cur),
+        | Value::Date { .. }
+        | Value::Bitset(_) => Ok(cur),
 
         // Path: a function-headed path is a refined call (`copy/part`,
         // `find/case`); anything else is a data-path select (`block/2`,

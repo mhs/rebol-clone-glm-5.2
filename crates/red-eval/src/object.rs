@@ -186,6 +186,7 @@ fn same_predicate(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<
         (Value::Func(a), Value::Func(b)) => Rc::ptr_eq(a, b),
         (Value::Error(a), Value::Error(b)) => Rc::ptr_eq(a, b),
         (Value::Map(a), Value::Map(b)) => Rc::ptr_eq(a, b),
+        (Value::Bitset(a), Value::Bitset(b)) => Rc::ptr_eq(a, b),
         _ => false,
     };
     Ok(Value::Logic(same))

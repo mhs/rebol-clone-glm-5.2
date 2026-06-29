@@ -1,0 +1,4 @@
+make bitset! "ABC"
+make bitset! "abcdefghijklmnopqrstuvwxyz"
+true
+false

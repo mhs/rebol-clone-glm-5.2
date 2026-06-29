@@ -657,82 +657,82 @@ Closes the most-limited core feature. Adds the missing rule words, the
 
 ### `bitset!` type
 
-- [ ] Define `BitsetDef` in `crates/red-core/src/value.rs`:
-  - [ ] `pub struct BitsetDef { bits: RefCell<Vec<u64>>, len: usize }`
+- [x] Define `BitsetDef` in `crates/red-core/src/value.rs`:
+  - [x] `pub struct BitsetDef { bits: RefCell<Vec<u64>>, len: usize }`
         (bit-packed; `len` = bit count)
-- [ ] Add `Value::Bitset(Rc<RefCell<BitsetDef>>)` variant
-- [ ] Add `Value::bitset()` constructor
-- [ ] Implement `BitsetDef::new(len)`, `set(byte)`, `clear(byte)`,
+- [x] Add `Value::Bitset(Rc<RefCell<BitsetDef>>)` variant
+- [x] Add `Value::bitset()` constructor
+- [x] Implement `BitsetDef::new(len)`, `set(byte)`, `clear(byte)`,
         `test(byte)`, `union(&other)`, `intersect(&other)`,
         `difference(&other)`, `complement()`, `from_chars(&str)`,
         `from_range(byte, byte)`
-- [ ] Extend lexer to parse `#{...}` already taken by `binary!` —
+- [x] Extend lexer to parse `#{...}` already taken by `binary!` —
       **bitset literals use `make bitset! [...]` or `charset "ABC"` form**
       (no new lexer token)
-- [ ] Add `charset` native: `charset "ABC"` → bitset of those chars
-- [ ] Add `make bitset!` to the `make` dispatcher:
-  - [ ] From string → bits for each char
-  - [ ] From block: `make bitset! [#"a" - #"z"]` (ranges), `["abc" "XYZ"]`
+- [x] Add `charset` native: `charset "ABC"` → bitset of those chars
+- [x] Add `make bitset!` to the `make` dispatcher:
+  - [x] From string → bits for each char
+  - [x] From block: `make bitset! [#"a" - #"z"]` (ranges), `["abc" "XYZ"]`
         (unions)
-- [ ] Update `printer.rs`:
-  - [ ] `mold` bitset: `make bitset! #{010203...}` (the internal bit pattern
+- [x] Update `printer.rs`:
+  - [x] `mold` bitset: `make bitset! #{010203...}` (the internal bit pattern
         as binary) or `make bitset! "ABC"` form (reconstruct a string form
         when possible) — **decision: use `make bitset! "..."` form listing
         set chars; fall back to `#{hex}` for sparse bitsets**
-- [ ] Add `bitset?` predicate
-- [ ] Add `to-bitset` converter
-- [ ] Implement bitset ops: `union`/`intersect`/`difference`/`complement`/
+- [x] Add `bitset?` predicate
+- [x] Add `to-bitset` converter
+- [x] Implement bitset ops: `union`/`intersect`/`difference`/`complement`/
         `extract?` (membership test)
-- [ ] Update `type_name` → `"bitset!"`
-- [ ] Extend `interp_walker.rs`/`vm/compiler.rs` for `Value::Bitset(_)`
+- [x] Update `type_name` → `"bitset!"`
+- [x] Extend `interp_walker.rs`/`vm/compiler.rs` for `Value::Bitset(_)`
 
 ### `parse` rule additions
 
-- [ ] Implement `/case` refinement on `parse` itself (currently `_refs` at
+- [x] Implement `/case` refinement on `parse` itself (currently `_refs` at
       `parse.rs:278`): case-sensitive vs case-insensitive string matching
-- [ ] Implement `bitset!` as a rule: matches any char in the set, advances
+- [x] Implement `bitset!` as a rule: matches any char in the set, advances
       cursor by 1
-- [ ] Implement `collect` rule:
-  - [ ] `collect 'word rule` — accumulate matched values into a block,
+- [x] Implement `collect` rule:
+  - [x] `collect 'word rule` — accumulate matched values into a block,
         bind word
-  - [ ] `collect into 'word rule` — append to existing block
-  - [ ] `collect [...]` — collect rules in a block
-- [ ] Implement `keep` rule:
-  - [ ] `keep value` — push value into the current collect target
-  - [ ] `keep 'word` — push word's value
-  - [ ] `keep (expr)` — evaluate Red expr, push result
-- [ ] Implement `match` rule: `match value` — like literal match but
+  - [x] `collect into 'word rule` — append to existing block
+  - [x] `collect [...]` — collect rules in a block
+- [x] Implement `keep` rule:
+  - [x] `keep value` — push value into the current collect target
+  - [x] `keep 'word` — push word's value
+  - [x] `keep (expr)` — evaluate Red expr, push result
+- [x] Implement `match` rule: `match value` — like literal match but
       returns the matched value (not just true/false)
-- [ ] Implement `into 'word rule` — parse a sub-series, bind result
-- [ ] Implement `fail` rule: always fails (opposite of `none`)
-- [ ] Implement `break` rule: exit the current `parse` entirely (return
+- [x] Implement `into 'word rule` — parse a sub-series, bind result
+- [x] Implement `fail` rule: always fails (opposite of `none`)
+- [x] Implement `break` rule: exit the current `parse` entirely (return
       true)
-- [ ] Implement `if (expr)` rule: succeeds iff expr is truthy (no advance)
-- [ ] Implement `not rule` — succeeds iff sub-rule fails (no advance)
-- [ ] Implement `??` debug rule: prints current input position to stderr
-- [ ] Implement `accept value` — succeed immediately, return value
-- [ ] Implement `reject` — fail immediately
-- [ ] Implement `ahead rule` — lookahead; succeed/fail without advancing
-- [ ] Implement `behind rule` — reverse lookahead
-- [ ] Update `rule_extent` (`parse.rs:648-684`) to count args for each new
+- [x] Implement `if (expr)` rule: succeeds iff expr is truthy (no advance)
+- [x] Implement `not rule` — succeeds iff sub-rule fails (no advance)
+- [x] Implement `??` debug rule: prints current input position to stderr
+- [x] Implement `accept value` — succeed immediately, return value
+- [x] Implement `reject` — fail immediately
+- [x] Implement `ahead rule` — lookahead; succeed/fail without advancing
+- [x] Implement `behind rule` — reverse lookahead
+- [x] Update `rule_extent` (`parse.rs:648-684`) to count args for each new
       rule word
-- [ ] Extend `rule_one` (`parse.rs:406-514`) with a keyword arm per new rule
-- [ ] Inline `#[test]`: `parse "abc" [collect w some [skip]]` → true,
+- [x] Extend `rule_one` (`parse.rs:406-514`) with a keyword arm per new rule
+- [x] Inline `#[test]`: `parse "abc" [collect w some [skip]]` → true,
         `w == [#"a" #"b" #"c"]` (block of chars, post-M38)
-- [ ] Inline `#[test]`: `parse "a1b2" [collect w some [match #"a" | match #"b" | skip]]`
+- [x] Inline `#[test]`: `parse "a1b2" [collect w some [match #"a" | match #"b" | skip]]`
         → true, `w == [#"a" #"b"]`
-- [ ] Inline `#[test]`: `parse/case "Abc" ["A" "b" "c"]` → false (case
+- [x] Inline `#[test]`: `parse/case "Abc" ["A" "b" "c"]` → false (case
         sensitive); without `/case` → true
-- [ ] Inline `#[test]`: `parse "xyz" [charset "abc" charset "xyz" "z"]` →
+- [x] Inline `#[test]`: `parse "xyz" [charset "abc" charset "xyz" "z"]` →
         true (bitset matches `x` then `y`)
-- [ ] Inline `#[test]`: `parse "abc" [ahead "a" "b"]` → true, cursor didn't
+- [x] Inline `#[test]`: `parse "abc" [ahead "a" "b"]` → true, cursor didn't
         advance past `a`
-- [ ] Inline `#[test]`: `parse "abc" [not "z" "a" "b" "c"]` → true
-- [ ] Inline `#[test]`: `parse "abc" [fail]` → false
-- [ ] Inline `#[test]`: `parse "abc" [if (1 < 2) "a" "b" "c"]` → true
-- [ ] Add golden fixtures: `parse_collect`, `parse_keep`, `parse_bitset`,
+- [x] Inline `#[test]`: `parse "abc" [not "z" "a" "b" "c"]` → true
+- [x] Inline `#[test]`: `parse "abc" [fail]` → false
+- [x] Inline `#[test]`: `parse "abc" [if (1 < 2) "a" "b" "c"]` → true
+- [x] Add golden fixtures: `parse_collect`, `parse_keep`, `parse_bitset`,
         `parse_case`, `parse_lookahead`, `parse_match`
-- [ ] `cargo test --workspace` green; `--features force-walk` green
+- [x] `cargo test --workspace` green; `--features force-walk` green
 
 ## Milestone 47 — Polish & v0.4.0 release
 

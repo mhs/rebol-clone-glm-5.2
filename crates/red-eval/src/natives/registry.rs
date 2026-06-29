@@ -307,10 +307,15 @@ pub fn register_natives(env: &mut Env) {
     // Series (M8)
     crate::series::register_series_natives(env);
 
-    // Parse dialect (M10)
-    env.natives.insert(
-        Symbol::new("parse"),
-        fixed_native(crate::parse::parse_native as NativeFn, 2),
+    // Parse dialect (M10). M46: declares the `/case` refinement (0 args)
+    // so `parse/case input rules` routes to `parse_native` with the
+    // refinement active.
+    reg_refined(
+        env,
+        "parse",
+        crate::parse::parse_native as NativeFn,
+        2,
+        &[("case", 0)],
     );
 
     // Type conversions + make/to/form (M14)
@@ -330,6 +335,9 @@ pub fn register_natives(env: &mut Env) {
 
     // Maps (M43)
     crate::map::register_map_natives(env);
+
+    // Bitsets (M46)
+    crate::bitset::register_bitset_natives(env);
 
     // Path natives (M19)
     crate::path::register_path_natives(env);

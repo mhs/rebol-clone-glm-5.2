@@ -160,6 +160,7 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Object(_) => "object!",
         Value::Map(_) => "map!",
         Value::Date { .. } => "date!",
+        Value::Bitset(_) => "bitset!",
     }
 }
 

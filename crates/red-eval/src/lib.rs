@@ -12,6 +12,7 @@
 //! implementations (`natives`, `series`, `binding`, `parse`, …).
 
 pub mod binding;
+pub mod bitset;
 pub mod convert;
 pub mod interp;
 pub mod interp_runner;

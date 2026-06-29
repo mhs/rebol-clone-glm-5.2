@@ -640,7 +640,8 @@ fn compile_prefix(
         | Value::File { .. }
         | Value::Url { .. }
         | Value::Object(_)
-        | Value::Map(_) => {
+        | Value::Map(_)
+        | Value::Bitset(_) => {
             let idx = c.push_const(cur.clone());
             c.emit(Instr::Const(idx));
         }

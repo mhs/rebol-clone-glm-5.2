@@ -1232,8 +1232,15 @@ fn complement_native(
     }
     match &args[0] {
         Value::Integer { n, .. } => Ok(Value::integer(!*n)),
+        Value::Bitset(b) => {
+            // M46: bitset complement — flip all bits in-place. Returns a new
+            // bitset (the original is preserved since we clone the Rc inner).
+            let new_bs = b.borrow().clone();
+            new_bs.complement();
+            Ok(Value::bitset(new_bs))
+        }
         other => Err(EvalError::TypeError {
-            expected: "integer!",
+            expected: "integer! or bitset!",
             found: type_name(other),
             span: other.span_or_default(),
         }),

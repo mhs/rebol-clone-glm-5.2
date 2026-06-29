@@ -1,0 +1,5 @@
+make bitset! "ehlo"
+make bitset! "dlorw"
+make bitset! #{FF00}
+true
+true

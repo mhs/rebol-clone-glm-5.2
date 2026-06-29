@@ -3,7 +3,7 @@
 
 use chrono::{Datelike, Timelike};
 
-use crate::value::{DateValue, MapDef, MapKey, ObjectDef, Value};
+use crate::value::{BitsetDef, DateValue, MapDef, MapKey, ObjectDef, Value};
 
 /// Append the Red source form of `value` to `out`.
 pub fn mold(value: &Value, out: &mut String) {
@@ -153,6 +153,7 @@ pub fn mold(value: &Value, out: &mut String) {
         Value::Object(obj) => mold_object(&obj.borrow(), out),
         Value::Map(m) => mold_map(&m.borrow(), out),
         Value::Date { dt, .. } => mold_date(dt, out),
+        Value::Bitset(b) => mold_bitset(&b.borrow(), out),
     }
 }
 
@@ -237,6 +238,7 @@ pub fn form(value: &Value, out: &mut String) {
         }
         Value::Map(m) => form_map(&m.borrow(), out),
         Value::Date { dt, .. } => mold_date(dt, out),
+        Value::Bitset(b) => mold_bitset(&b.borrow(), out),
     }
 }
 
@@ -337,6 +339,43 @@ fn form_map(m: &MapDef, out: &mut String) {
         form(v, out);
     }
     out.push(']');
+}
+
+/// M46: mold a `bitset!` value.
+///
+/// Form: `make bitset! "ABC"` (listing the set chars as a string literal)
+/// when all set bits are printable, non-quote, non-backslash ASCII chars.
+/// Falls back to `make bitset! #{hex}` (the raw bit pattern as a binary!)
+/// for sparse bitsets or bitsets with control/non-ASCII bits — the hex form
+/// is unambiguous and always available.
+///
+/// The string form is preferred for the common `charset "ABC"` case (the
+/// most-frequent bitset construction in `parse` dialect code).
+fn mold_bitset(bs: &BitsetDef, out: &mut String) {
+    let chars = bs.iter_set_chars();
+    // Prefer the string form when the bitset is charset-sized (len <= 256)
+    // and every set bit is a printable ASCII char that's safe to embed in a
+    // `"..."` literal (no `"`/`\`/control chars). Empty charsets mold as
+    // `make bitset! ""`. Larger bitsets (len > 256) or those with
+    // non-printable bits fall back to `make bitset! #{hex}`.
+    let charset_sized = bs.len <= 256;
+    let all_printable = chars
+        .iter()
+        .all(|c| c.is_ascii_graphic() && *c != '"' && *c != '\\');
+    if charset_sized && all_printable {
+        out.push_str("make bitset! ");
+        let s: String = chars.iter().collect();
+        mold_string(&s, out);
+    } else {
+        // Fall back to the raw bit pattern as `#{hex}`. The binary! literal
+        // reparses and `make bitset!` accepts a binary! spec.
+        out.push_str("make bitset! #{");
+        for b in bs.raw_bytes() {
+            use std::fmt::Write;
+            let _ = write!(out, "{:02X}", b);
+        }
+        out.push('}');
+    }
 }
 
 /// M45: mold a `date!` value.

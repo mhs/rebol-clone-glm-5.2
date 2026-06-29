@@ -1,0 +1,6 @@
+make bitset! "ABCD"
+make bitset! "B"
+make bitset! "AD"
+make bitset! #{FFFFFFFFFFFFFFFFFDFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF}
+true
+false

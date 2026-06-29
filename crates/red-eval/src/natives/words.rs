@@ -313,6 +313,15 @@ pub(crate) fn date_predicate(
     pred1(args, "date?", |v| matches!(v, Value::Date { .. }))
 }
 
+/// `bitset?` — true for `bitset!` (`Value::Bitset`). M46.
+pub(crate) fn bitset_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "bitset?", |v| matches!(v, Value::Bitset(_)))
+}
+
 /// `time?` — true for `date!` values that have a time component (non-midnight
 /// `dt`) OR a zone (`zone != None`). Matches Red's `time?` semantics broadly:
 /// any `date!` that isn't date-only. M45.
@@ -562,6 +571,7 @@ pub(crate) fn register_word_predicate_natives(env: &mut Env) {
     reg(env, "tuple?", tuple_predicate);
     reg(env, "date?", date_predicate);
     reg(env, "time?", time_predicate);
+    reg(env, "bitset?", bitset_predicate);
     reg(env, "error?", error_predicate);
     reg(env, "attempted?", attempted_predicate);
 
