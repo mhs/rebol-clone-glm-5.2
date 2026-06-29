@@ -73,3 +73,73 @@ set-words. This lives in `interp_walker.rs::eval_expression` (walker) and
 advance the cursor before type-checking `if`'s block argument. Tracked
 separately from any milestone since the impact is limited to invalid
 input.
+
+## `try` inside a `func` body infinite-loops in the VM
+
+**Status:** Pre-existing (surfaced during M38–M45 example writing; not
+caused by any single milestone). The walker is unaffected — only the
+default bytecode VM hangs.
+
+**Minimal reproducer:**
+
+```red
+f: func [a b][
+    err: try [a / b]
+    err
+]
+print f 10 2
+```
+
+Run with `red examples/bad.red` — the VM enters an infinite loop and
+never returns. The same program under `red --walk` prints `5` and exits
+normally.
+
+**Observed divergence:**
+
+| Mode | Behavior |
+|------|----------|
+| VM (default) | infinite loop (no output, hangs forever) |
+| Walker (`--walk`) | works correctly, prints `5` |
+
+A `--trace` run shows the VM re-entering the `try` body without ever
+advancing past it — the `try` frame appears to re-execute on every
+iteration. A top-level `try` works fine in both modes; the bug only
+manifests when `try` appears inside a user `func` body.
+
+**Root cause:**
+
+Not yet isolated. The `try` native (`natives/control.rs`) catches a
+thrown `EvalError` and returns the error value; the VM's `Call` path
+appears to re-dispatch into the `try` block instead of resuming the
+caller's frame after `try` returns. Likely a frame-stack / continuation
+issue in the VM's handling of `try`'s block argument when the call
+originates from a user func body rather than the top level. Confirmed
+unrelated to M42's structured-error rewrite (the bug reproduces with a
+plain `try [...]` that doesn't construct any error values).
+
+**Workaround:**
+
+Keep `try` (and `attempt`) at the top level, or use `--walk` mode for
+scripts that need `try` inside a func body:
+
+```red
+; Top-level — works in both VM and walker modes
+result: try [10 / 0]
+either error? result [
+    print error-type result
+][
+    print result
+]
+
+; Inside a func — use --walk mode, or restructure to call try at top level
+```
+
+**Proper fix (deferred):**
+
+Trace the VM's frame transitions through `try`'s block argument in
+`vm/vm.rs` and `natives/control.rs::try_native`. Compare with the
+walker's `try` path (`interp_walker.rs`) to find where the VM re-enters
+the `try` block instead of returning to the caller's frame. Likely
+involves the `TryFrame` / catch-target stack not being popped after
+`try` completes when the call site is a user func.
+

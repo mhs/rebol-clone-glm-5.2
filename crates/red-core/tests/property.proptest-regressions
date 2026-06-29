@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4fb952d62c3679f5863e567241244d170bfd84111c286dd049a3e1dee5222822 # shrinks to v = Paren { series: Series { data: RefCell { value: [Date { dt: DateValue { dt: 1900-10-01T00:00:00, zone: None }, span: Span { start: 0, end: 0 } }] }, index: 0 }, span: Span { start: 0, end: 0 } }
