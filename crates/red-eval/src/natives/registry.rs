@@ -351,6 +351,9 @@ pub fn register_natives(env: &mut Env) {
     // Bitsets (M46)
     crate::bitset::register_bitset_natives(env);
 
+    // Modules (M61)
+    crate::module::register_module_natives(env);
+
     // Path natives (M19)
     crate::path::register_path_natives(env);
 

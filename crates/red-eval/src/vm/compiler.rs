@@ -682,6 +682,7 @@ fn compile_prefix(
         | Value::File { .. }
         | Value::Url { .. }
         | Value::Object(_)
+        | Value::Module(_)
         | Value::Map(_)
         | Value::Bitset(_) => {
             let idx = c.push_const(cur.clone());
@@ -1347,8 +1348,27 @@ fn collect_args(
     let arity = fd.params.len();
     let uneval_first = matches!(
         sym.as_str(),
-        "repeat" | "foreach" | "forall" | "make" | "to" | "default"
+        "repeat" | "foreach" | "forall" | "make" | "to" | "default" | "module"
     );
+
+    // M61: `module` variable-arity peek — 2 args if the next value is a
+    // Word-family (the name), 1 arg if it's a Block (the body). Mirrors
+    // the walker's `collect_call_args` override.
+    let module_arity_override = if sym.as_str() == "module" {
+        match data.get(*i) {
+            Some(
+                Value::Word { .. }
+                | Value::GetWord { .. }
+                | Value::LitWord { .. }
+                | Value::SetWord { .. },
+            ) => Some(2),
+            Some(Value::Block { .. }) => Some(1),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let arity = module_arity_override.unwrap_or(arity);
 
     // `set 'word <func-form>`: the `set` native writes a Func value into the
     // named slot at runtime. If the second arg is a literal `func`/`does`/

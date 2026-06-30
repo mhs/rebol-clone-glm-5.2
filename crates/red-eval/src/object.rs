@@ -208,8 +208,9 @@ fn not_same_predicate(
     Ok(Value::Logic(!matches!(v, Value::Logic(true))))
 }
 
-/// `words-of object|map` — block of the object's word names (as lit-words),
-/// or the map's keys (as their natural `Value` form).
+/// `words-of object|map|module` — block of the object's word names (as
+/// lit-words), the map's keys (as their natural `Value` form), or the
+/// module's *exported* word names (M61, in `ctx` insertion order).
 fn words_of_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(arity_err(args, "words-of", 1, args.len()));
@@ -220,8 +221,25 @@ fn words_of_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result
             Ok(Value::block(Series::new(borrow)))
         }
         Value::Map(m) => Ok(Value::block(Series::new(m.borrow().keys()))),
+        // M61: module exports only, in ctx insertion order.
+        Value::Module(m) => {
+            let md = m.borrow();
+            let exports = md.exports.borrow();
+            let words: Vec<Value> = md
+                .ctx
+                .words()
+                .into_iter()
+                .filter(|s| exports.contains(s))
+                .map(|s| Value::Word {
+                    sym: s,
+                    binding: Binding::Unbound,
+                    span: Span::default(),
+                })
+                .collect();
+            Ok(Value::block(Series::new(words)))
+        }
         other => Err(EvalError::TypeError {
-            expected: "object! or map!",
+            expected: "object!, map!, or module!",
             found: type_name(other),
             span: other.span_or_default(),
         }),
@@ -245,8 +263,9 @@ fn obj_borrow_words(obj: &Rc<RefCell<ObjectDef>>) -> Vec<Value> {
         .collect()
 }
 
-/// `values-of object|map` — block of the object's slot values, or the map's
-/// values in insertion order.
+/// `values-of object|map|module` — block of the object's slot values, the
+/// map's values in insertion order, or the module's *exported* values (M61,
+/// in `ctx` insertion order).
 fn values_of_native(
     args: &[Value],
     _refs: &RefineArgs,
@@ -268,8 +287,21 @@ fn values_of_native(
             Ok(Value::block(Series::new(values)))
         }
         Value::Map(m) => Ok(Value::block(Series::new(m.borrow().values()))),
+        // M61: module exports' values, in ctx insertion order.
+        Value::Module(m) => {
+            let md = m.borrow();
+            let exports = md.exports.borrow();
+            let values: Vec<Value> = md
+                .ctx
+                .words()
+                .into_iter()
+                .filter(|s| exports.contains(s))
+                .filter_map(|s| md.ctx.get(&s))
+                .collect();
+            Ok(Value::block(Series::new(values)))
+        }
         other => Err(EvalError::TypeError {
-            expected: "object! or map!",
+            expected: "object!, map!, or module!",
             found: type_name(other),
             span: other.span_or_default(),
         }),
@@ -295,7 +327,7 @@ fn reflect_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<V
         "words" => words_of_native(&[args[0].clone()], &RefineArgs::empty(), env),
         "values" => values_of_native(&[args[0].clone()], &RefineArgs::empty(), env),
         other => Err(EvalError::Native {
-            message: format!("reflect: {other} not supported for objects"),
+            message: format!("reflect: {other} not supported for objects/modules"),
             span: args[1].span_or_default(),
         }),
     }

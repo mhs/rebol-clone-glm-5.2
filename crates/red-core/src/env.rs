@@ -8,6 +8,7 @@
 //! `EvalError::UnboundWord` renders with the offending symbol. The call stack
 //! and `Return`/`Native` error variants are present for M9+ but unused here.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, Write};
@@ -15,7 +16,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::context::Context;
-use crate::value::{ErrorValue, FuncDef, Series, Span, Symbol, Value};
+use crate::value::{ErrorValue, FuncDef, ModuleDef, Series, Span, Symbol, Value};
 use crate::vm_ir::CompiledBlock;
 
 /// Bytecode compiler / VM-invariant failure kinds. Surfaced via
@@ -220,6 +221,19 @@ pub struct Env {
     /// `is_some()` before formatting the trace line, so the hot path pays
     /// only one `Option::is_some` branch per instr when off).
     pub trace_out: Option<Box<dyn Write>>,
+    /// M61: stack of currently-evaluating module bodies. Pushed by
+    /// `module_native` before evaluating the body (with `env.user_ctx`
+    /// swapped to the module's ctx), popped after. `current_module()`
+    /// returns the top — used by the `export` native (writes to its
+    /// `exports` set) and by `module/word` path resolution (to detect
+    /// "inside the module body" vs "from outside" for the export check).
+    pub module_stack: Vec<Rc<RefCell<ModuleDef>>>,
+    /// M61: cache of named modules, keyed by module name. Populated by
+    /// `module 'name [...]`; a second `module 'name [different body]`
+    /// returns the cached value (the new body is ignored — matches Red's
+    /// "module is a singleton by name"). M62's `import 'name` consults
+    /// this; M61 only populates it.
+    pub modules: HashMap<Symbol, Rc<RefCell<ModuleDef>>>,
     /// High-water mark of `call_stack.len()` since the last
     /// [`Self::reset_stats`] call. Used by the v0.3 VM milestones to prove
     /// tail-call stack bounds. Only present under the `stats` cargo feature;
@@ -269,6 +283,8 @@ impl Env {
             vm_stack_pool: Vec::new(),
             vm_locals_pool: Vec::new(),
             trace_out: None,
+            module_stack: Vec::new(),
+            modules: HashMap::new(),
             #[cfg(feature = "stats")]
             max_frame_depth: 0,
             #[cfg(feature = "stats")]
@@ -341,6 +357,15 @@ impl Env {
     /// M31: disable tracing. No-op if tracing was already off.
     pub fn clear_trace(&mut self) {
         self.trace_out = None;
+    }
+
+    /// M61: the currently-evaluating module (top of `module_stack`), or
+    /// `None` when not inside a `module` body. Used by the `export` native
+    /// (writes to the module's `exports` set) and by `module/word` path
+    /// resolution (to skip the export check when accessing from inside the
+    /// body).
+    pub fn current_module(&self) -> Option<&Rc<RefCell<ModuleDef>>> {
+        self.module_stack.last()
     }
 }
 

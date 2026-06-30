@@ -20,6 +20,7 @@ pub mod interp_walker;
 pub mod io;
 pub mod map;
 pub mod math;
+pub mod module;
 pub mod natives;
 pub mod object;
 pub mod parse;

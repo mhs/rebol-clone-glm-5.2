@@ -420,6 +420,7 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
         "date!" | "date" => make_date(spec)?,
         "error!" | "error" => return make_error(spec),
         "object!" | "object" => return crate::object::make_object(spec, env),
+        "module!" | "module" => return crate::module::make_module(spec, env),
         "map!" | "map" => return crate::map::make_map(spec, env),
         "bitset!" | "bitset" => return crate::bitset::make_bitset(spec, env),
         "function!" | "function" => {

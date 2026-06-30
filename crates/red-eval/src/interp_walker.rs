@@ -32,6 +32,7 @@
 //! `eval_prefix`, `dispatch_call`) leaves `*i` pointing at the *next*
 //! unprocessed value — one past whatever it consumed.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use red_core::value::{Binding, FuncDef, Series, Span, Symbol, Value};
@@ -348,6 +349,7 @@ fn eval_prefix(
         | Value::Pair { .. }
         | Value::Tuple { .. }
         | Value::Object(_)
+        | Value::Module(_)
         | Value::Map(_)
         | Value::Date { .. }
         | Value::Bitset(_) => Ok(cur),
@@ -576,6 +578,12 @@ fn eval_path_call(
         Value::Object(obj) => {
             select_object_path(Rc::clone(obj), &parts[1..], data, i, env, path_span)
         }
+        // M61: module-headed path — `m/word` / `m/method arg`. Mirrors
+        // `select_object_path` but with an export-visibility check from
+        // outside the module body (private words → UnboundWord). Inside the
+        // module body (when `m` is on top of `env.module_stack`), all words
+        // are visible.
+        Value::Module(m) => select_module_path(Rc::clone(m), &parts[1..], data, i, env, path_span),
         // M43: map-headed path — `m/word`, `m/2`, `m/key: val`. No method-call
         // dispatch (maps aren't objects); the tail is walked as a data path.
         Value::Map(_) => {
@@ -1053,6 +1061,13 @@ pub(crate) fn eval_get_path(
             });
         }
     };
+    // M61: module-headed get-path — `:m/word`. Walk the tail with export
+    // visibility enforced on the first step (private → UnboundWord), then
+    // continue as a data path. Returns the final value *without* invoking
+    // it (so `:m/method` yields the function value, not the call result).
+    if let Value::Module(m) = &head {
+        return get_module_path(Rc::clone(m), &parts[1..], env, path_span);
+    }
     walk_data_path(head, &parts[1..], env, path_span)
 }
 
@@ -1187,6 +1202,28 @@ fn write_path_slot(
                         obj_ctx.set(sym.clone(), rhs);
                         Ok(())
                     }
+                }
+                // M61: module set-path — `m/word: value`. From outside the
+                // module body, only exported words are settable (private →
+                // UnboundWord, matching the get-path behavior). From inside
+                // the module body, all words are writable.
+                Value::Module(m) => {
+                    let inside = env
+                        .module_stack
+                        .last()
+                        .map(|cur| Rc::ptr_eq(cur, m))
+                        .unwrap_or(false);
+                    if !inside {
+                        let is_export = m.borrow().exports.borrow().contains(sym);
+                        if !is_export {
+                            return Err(EvalError::UnboundWord {
+                                sym: sym.clone(),
+                                span: path_span,
+                            });
+                        }
+                    }
+                    m.borrow().ctx.set(sym.clone(), rhs);
+                    Ok(())
                 }
                 Value::Map(m) => {
                     // M43: set map entry. Word keys use `MapKey::Sym`; a
@@ -1389,6 +1426,143 @@ fn select_object_path(
     }
 }
 
+/// M61: helper — check whether `m` is the currently-evaluating module (top
+/// of `env.module_stack`). When true, path resolution from inside the
+/// module body skips the export-visibility check (all words visible).
+fn inside_module_body(m: &Rc<RefCell<red_core::value::ModuleDef>>, env: &Env) -> bool {
+    env.module_stack
+        .last()
+        .map(|cur| Rc::ptr_eq(cur, m))
+        .unwrap_or(false)
+}
+
+/// M61: select a field from a module with export-visibility enforcement.
+/// Used by `select_module_path` (method-call path) and `get_module_path`
+/// (get-path). Returns the field value (or `UnboundWord` for a private word
+/// accessed from outside the module body). Does *not* invoke the field if
+/// it's a function — callers do that themselves.
+fn select_module_field(
+    m: &Rc<RefCell<red_core::value::ModuleDef>>,
+    sym: &Symbol,
+    env: &Env,
+    path_span: Span,
+) -> Result<Value, EvalError> {
+    let borrow = m.borrow();
+    if !inside_module_body(m, env) {
+        let is_export = borrow.exports.borrow().contains(sym);
+        if !is_export {
+            return Err(EvalError::UnboundWord {
+                sym: sym.clone(),
+                span: path_span,
+            });
+        }
+    }
+    borrow.ctx.get(sym).ok_or_else(|| EvalError::UnboundWord {
+        sym: sym.clone(),
+        span: path_span,
+    })
+}
+
+/// M61: `m/word` / `m/method arg` — module-headed path resolution with
+/// method-call semantics. Mirrors `select_object_path`: walks the field
+/// chain; when the final field value is a `Func`/`Closure` and trailing
+/// block args are available, dispatches as a method call with `env.user_ctx`
+/// temporarily swapped to the module's ctx (so the method body resolves
+/// module-local words). Non-Word parts (integer/paren) at intermediate
+/// positions switch to general data-path traversal on the field value.
+///
+/// Visibility: from outside the module body, only exported words are
+/// accessible (private → `UnboundWord`). From inside (when `m` is on top of
+/// `env.module_stack`), all words are visible.
+fn select_module_path(
+    m: Rc<RefCell<red_core::value::ModuleDef>>,
+    parts: &[Value],
+    data: &std::cell::Ref<Vec<Value>>,
+    i: &mut usize,
+    env: &mut Env,
+    path_span: Span,
+) -> Result<Value, EvalError> {
+    if parts.is_empty() {
+        return Err(EvalError::Native {
+            message: "module path requires at least one field".into(),
+            span: path_span,
+        });
+    }
+    let mut idx = 0;
+    // First step: module field with export check.
+    let field_sym = match &parts[0] {
+        Value::Word { sym, .. } | Value::GetWord { sym, .. } | Value::LitWord { sym, .. } => {
+            sym.clone()
+        }
+        other => {
+            // Non-word first part on a module head: not a valid module path.
+            return Err(EvalError::TypeError {
+                expected: "word! in module path",
+                found: crate::natives::type_name(other),
+                span: other.span_or_default(),
+            });
+        }
+    };
+    let mut current = select_module_field(&m, &field_sym, env, path_span)?;
+    idx += 1;
+    // If this was the only part, dispatch a method call if `current` is a
+    // function (mirrors `select_object_path`'s final-step method dispatch).
+    if parts.len() == 1 {
+        return match current {
+            Value::Func(_) | Value::Closure(_) => {
+                let m_ctx = Rc::clone(&m.borrow().ctx);
+                let saved = std::mem::replace(&mut env.user_ctx, m_ctx);
+                let result = dispatch_call(current, &field_sym, data, i, env, path_span);
+                env.user_ctx = saved;
+                result
+            }
+            other => Ok(other),
+        };
+    }
+    // Subsequent parts: general data-path traversal on the field value.
+    // (A module appearing mid-path after the first step is rare; the export
+    // check was already enforced on the first step, and `select_field`'s
+    // `other` arm surfaces a TypeError for a module-headed mid-path select,
+    // which is the documented M61 limitation.)
+    while idx < parts.len() {
+        current = step_path(&current, &parts[idx], env, path_span)?;
+        idx += 1;
+    }
+    Ok(current)
+}
+
+/// M61: `:m/word` — module-headed get-path. Like `select_module_path` but
+/// returns the final value *without* invoking it (so `:m/method` yields the
+/// function value, not the call result). Enforces the same export-visibility
+/// check on the first step.
+fn get_module_path(
+    m: Rc<RefCell<red_core::value::ModuleDef>>,
+    parts: &[Value],
+    env: &mut Env,
+    path_span: Span,
+) -> Result<Value, EvalError> {
+    if parts.is_empty() {
+        return Ok(Value::Module(m));
+    }
+    let field_sym = match &parts[0] {
+        Value::Word { sym, .. } | Value::GetWord { sym, .. } | Value::LitWord { sym, .. } => {
+            sym.clone()
+        }
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "word! in module get-path",
+                found: crate::natives::type_name(other),
+                span: other.span_or_default(),
+            });
+        }
+    };
+    let current = select_module_field(&m, &field_sym, env, path_span)?;
+    if parts.len() == 1 {
+        return Ok(current);
+    }
+    walk_data_path(current, &parts[1..], env, path_span)
+}
+
 /// Collect positional args + refinement args in spec order (Red's
 /// refinement semantics). Walks `fd.params` then `fd.refinements` in
 /// declaration order; for each refinement, if it's in `leading_refs` (path
@@ -1424,8 +1598,29 @@ fn collect_call_args(
     let mut args: Vec<Value> = Vec::with_capacity(arity);
     let uneval_first = matches!(
         sym.as_str(),
-        "repeat" | "foreach" | "forall" | "make" | "to" | "default"
+        "repeat" | "foreach" | "forall" | "make" | "to" | "default" | "module"
     );
+
+    // M61: `module` has variable arity (1 for `module [body]`, 2 for
+    // `module 'name [body]`). Peek the next value: a Word-family (the name)
+    // → collect 2 args; a Block (the body) → collect 1. Both args are
+    // pushed as-is (the name is a word-kind literal, not evaluated —
+    // matches `module 'name ...` where `'name` is a lit-word in source).
+    let module_arity_override = if sym.as_str() == "module" {
+        match data.get(*i) {
+            Some(
+                Value::Word { .. }
+                | Value::GetWord { .. }
+                | Value::LitWord { .. }
+                | Value::SetWord { .. },
+            ) => Some(2),
+            Some(Value::Block { .. }) => Some(1),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let arity = module_arity_override.unwrap_or(arity);
 
     // Positional params.
     for n in 0..arity {

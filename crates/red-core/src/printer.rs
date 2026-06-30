@@ -3,7 +3,7 @@
 
 use chrono::{Datelike, Timelike};
 
-use crate::value::{BitsetDef, DateValue, MapDef, MapKey, ObjectDef, Value};
+use crate::value::{BitsetDef, DateValue, MapDef, MapKey, ModuleDef, ObjectDef, Value};
 
 /// Append the Red source form of `value` to `out`.
 pub fn mold(value: &Value, out: &mut String) {
@@ -155,6 +155,7 @@ pub fn mold(value: &Value, out: &mut String) {
         Value::Url { url, .. } => out.push_str(url),
         Value::Object(obj) => mold_object(&obj.borrow(), out),
         Value::Map(m) => mold_map(&m.borrow(), out),
+        Value::Module(m) => mold_module(&m.borrow(), out),
         Value::Date { dt, .. } => mold_date(dt, out),
         Value::Bitset(b) => mold_bitset(&b.borrow(), out),
     }
@@ -242,6 +243,7 @@ pub fn form(value: &Value, out: &mut String) {
             form_object_body(&o, out);
         }
         Value::Map(m) => form_map(&m.borrow(), out),
+        Value::Module(m) => mold_module(&m.borrow(), out),
         Value::Date { dt, .. } => mold_date(dt, out),
         Value::Bitset(b) => mold_bitset(&b.borrow(), out),
     }
@@ -342,6 +344,63 @@ fn form_map(m: &MapDef, out: &mut String) {
         mold_map_key(k, out, false);
         out.push(' ');
         form(v, out);
+    }
+    out.push(']');
+}
+
+/// M61: mold a module as `make module! [name: <name> exports: [words] word: val ...]`.
+///
+/// Only the *exported* words render (the public surface — matches `words-of`/
+/// `values-of` semantics; private slots are intentionally omitted from the
+/// mold so the serialized form doesn't leak private state). The `exports:`
+/// block lists the exported word names in `ctx` insertion order; each
+/// `word: value` pair follows in the same order. `name:` is emitted only for
+/// named modules. The form is reparseable (`load mold m` succeeds) and
+/// reconstructs via `make module! [...]` (which interprets `name:`/`exports:`
+/// as keywords).
+fn mold_module(m: &ModuleDef, out: &mut String) {
+    out.push_str("make module! [");
+    let mut first = true;
+    if let Some(name) = &m.name {
+        out.push_str("name: ");
+        out.push_str(name.as_str());
+        first = false;
+    }
+    // Collect exported words in ctx insertion order (iterate ctx.words(),
+    // filter by exports — never iterate the HashSet, which is unordered).
+    let exported: Vec<crate::value::Symbol> = m
+        .ctx
+        .words()
+        .into_iter()
+        .filter(|s| m.exports.borrow().contains(s))
+        .collect();
+    if !exported.is_empty() {
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+        out.push_str("exports: [");
+        let mut first_e = true;
+        for s in &exported {
+            if !first_e {
+                out.push(' ');
+            }
+            first_e = false;
+            out.push_str(s.as_str());
+        }
+        out.push(']');
+    }
+    let slots = m.ctx.slots.borrow();
+    for s in &exported {
+        if let Some(idx) = m.ctx.index_of(s) {
+            if !first {
+                out.push(' ');
+            }
+            first = false;
+            out.push_str(s.as_str());
+            out.push_str(": ");
+            mold(&slots[idx].borrow(), out);
+        }
     }
     out.push(']');
 }

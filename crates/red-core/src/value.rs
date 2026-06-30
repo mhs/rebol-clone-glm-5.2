@@ -5,6 +5,7 @@
 //! Milestones 5 and 9.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use chrono::{DateTime, FixedOffset, Local, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -350,6 +351,14 @@ pub enum Value {
     /// Synthetic — produced by `make object!`/`object`/`context`; carries no
     /// source span of its own.
     Object(Rc<RefCell<ObjectDef>>),
+    /// A module (M61): a self-contained namespace (`ctx`) carrying its own
+    /// word→value slots, a set of *exported* words (the public surface), an
+    /// optional name (for named modules cached on `Env`), an optional source
+    /// path (for file-based module caching, M62), and an optional parent
+    /// context (the script `user_ctx` or another module, for lexical chaining
+    /// — unused in M61 but reserved for v0.6+). Synthetic — produced by the
+    /// `module` native / `make module!`; carries no source span of its own.
+    Module(Rc<RefCell<ModuleDef>>),
     /// A map (M43): an insertion-ordered heterogeneous key→value table. Keys
     /// are the hashable subset of `Value` (`MapKey`); values are arbitrary.
     /// Synthetic — produced by `make map!`/`to-map`; carries no source span.
@@ -482,6 +491,71 @@ impl ObjectDef {
             ctx: Rc::new(Context::new()),
             parent: None,
             self_word: Symbol::new("self"),
+        }
+    }
+}
+
+/// A module (M61): an isolated namespace (`ctx`) plus the set of words marked
+/// exported via the `export` native. The module body is evaluated with
+/// `env.user_ctx` temporarily swapped to `ctx` (mirroring `make object!`),
+/// so SetWords inside the body allocate slots in the module's context.
+///
+/// Visibility: **inside the module body** all words in `ctx` are visible
+/// (private + public) — `env.user_ctx` is the module's ctx during body
+/// evaluation, so bare word resolution finds them. **Outside the module**,
+/// `module/word` path resolution and `import` (M62) consult only `exports`.
+/// The `export` native adds a word to `exports` as a side-effect; it does
+/// not restrict inner access.
+///
+/// Named modules (`module 'name [...]`) are cached on `Env::modules` keyed
+/// by name — a second `module 'name [different body]` returns the cached
+/// value (the new body is ignored, matching Red's "module is a singleton by
+/// name"). Anonymous modules (`module [body]`) are not cached.
+///
+/// `parent` is reserved for lexical chaining (v0.6+); M61 sets it to the
+/// script `user_ctx` at creation time but does not consult it during word
+/// resolution (the `resolve_word` `Unbound` fallback that would consult it
+/// lands in M62).
+#[derive(Clone, Debug)]
+pub struct ModuleDef {
+    /// The module's namespace: ordered word→slot map (same `Rc<Context>`
+    /// shape as the user context and object contexts). Installed as
+    /// `env.user_ctx` during body evaluation so SetWords write here and bare
+    /// words resolve here.
+    pub ctx: Rc<Context>,
+    /// Words marked public via `export` (a side-effect declaration inside
+    /// the body). `words-of`/`values-of`/`reflect` on a module value return
+    /// only these, in `ctx` insertion order; `module/word` path resolution
+    /// from outside the module body succeeds only for words in this set.
+    pub exports: RefCell<HashSet<Symbol>>,
+    /// Name for named modules (`module 'name [...]`). `None` for anonymous
+    /// modules. Named modules are cached on `Env::modules[name]`.
+    pub name: Option<Symbol>,
+    /// Canonical source path for file-based modules (M62 `import %file`).
+    /// `None` for modules created directly via the `module` native. Reserved
+    /// in M61; the M62 file-import path populates it.
+    pub source: Option<Rc<str>>,
+    /// Parent context (the script `user_ctx` or another module) for lexical
+    /// chaining. Reserved for v0.6+; M61 sets it but the resolver does not
+    /// consult it (the `Unbound` fallback that would walk the parent chain
+    /// is M62's behavior change).
+    pub parent: Option<Rc<Context>>,
+}
+
+impl Default for ModuleDef {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ModuleDef {
+    pub fn new() -> Self {
+        Self {
+            ctx: Rc::new(Context::new()),
+            exports: RefCell::new(HashSet::new()),
+            name: None,
+            source: None,
+            parent: None,
         }
     }
 }
@@ -1012,6 +1086,7 @@ impl Value {
             | Value::Closure(_)
             | Value::Error(_)
             | Value::Object(_)
+            | Value::Module(_)
             | Value::Map(_)
             | Value::Bitset(_) => None,
         }
@@ -1226,6 +1301,11 @@ impl Value {
     /// Constructor shorthand for an object wrapping `obj_def`.
     pub fn object(obj_def: ObjectDef) -> Self {
         Value::Object(Rc::new(RefCell::new(obj_def)))
+    }
+
+    /// Constructor shorthand for a module wrapping `module_def`. (M61.)
+    pub fn module(module_def: ModuleDef) -> Self {
+        Value::Module(Rc::new(RefCell::new(module_def)))
     }
 
     /// Constructor shorthand for a closure value wrapping `func` + the
