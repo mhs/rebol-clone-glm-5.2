@@ -3,6 +3,8 @@
 //!
 //! Excluded variants (documented POC gaps):
 //! - `Func` — molds as `#[function]`, not reparseable.
+//! - `Closure` (M60) — molds as `#[closure]`, not reparseable (snapshot
+//!   captures can't be reconstituted from source).
 //! - `Error` — molds as `make error! "..."` (or `make error! [...]` for
 //!   structured errors), which parses to a block of words (the `make`
 //!   native runs at eval time, not parse time). Round-trip would require

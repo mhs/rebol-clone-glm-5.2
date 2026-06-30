@@ -93,6 +93,15 @@ impl Default for Series {
 ///   frame to the defining frame; `slot` is the slot index in that frame's
 ///   `locals`. Attached by the compile-time scope analyzer (M23); the
 ///   tree-walker never produces or reads this variant.
+/// - `Closure(usize)`: a free-variable slot captured into a `ClosureDef`'s
+///   `captures` cell at `closure`-creation time (M60). Indexes into
+///   `ClosureDef.captures`; resolved at eval time via the active call frame's
+///   `captures` Vec (`Frame.captures` in the VM, `CallFrame.captures` in the
+///   walker). Unlike `Lexical`, the captured value is *snapshotted* at
+///   creation — outer writes after `MakeClosure` don't propagate inward. The
+///   `RefCell<Value>` per capture permits interior mutability across
+///   invocations of the same closure (a `count: count + 1` body sees its own
+///   prior write on the next call).
 #[derive(Clone, Debug, Default)]
 pub enum Binding {
     #[default]
@@ -100,6 +109,12 @@ pub enum Binding {
     Local(Rc<Context>, usize),
     Func(usize),
     Lexical(usize, usize),
+    /// M60: index into the enclosing closure's `ClosureDef.captures` cell.
+    /// The cell is read/written via the active call frame's `captures` Vec
+    /// (sized at frame push from the `ClosureDef`). For non-closure frames
+    /// the resolver reports a `Native` error (should never happen — the
+    /// binding is only attached to freevar words inside a `closure` body).
+    Closure(usize),
 }
 
 impl Binding {
@@ -181,6 +196,37 @@ impl FuncDef {
     }
 }
 
+/// A closure value (M60): a `func`-style definition plus an owned cell of
+/// captured free-variable values. Snapshotted at `closure`-creation time
+/// (the v0.3 escaping-closure bug fix). The `captures: Vec<RefCell<Value>>`
+/// is indexed in the same order as the analyzer's freevar list; a body word
+/// referencing a freevar carries `Binding::Closure(idx)` so the VM/walker can
+/// resolve it to `captures[idx]` of the active closure call frame.
+///
+/// Deviation from upstream Red: real Red `closure!` shares the cell across
+/// multiple closures closing over the same variable (and inner writes
+/// propagate outward). v0.5 ships snapshot semantics — two closures closing
+/// over the same outer `x` get *independent* cells — but `RefCell` per
+/// capture permits interior mutability across *invocations of the same
+/// closure* (a `count: count + 1` body persists its prior write). Shared
+/// cells are deferred to v0.6.
+#[derive(Clone, Debug)]
+pub struct ClosureDef {
+    /// The underlying function definition: spec/body/ctx/etc. The body's
+    /// freevar words have `Binding::Closure(idx)` (attached by
+    /// `bind_closure_body`); other words bind normally (`Func`/`Local`/
+    /// `Lexical`). `Rc`-backed so the VM/walker can cheaply clone for
+    /// `ensure_compiled` + `CallFrame.func`.
+    pub func: Rc<FuncDef>,
+    /// Free-variable capture cells, indexed by `Binding::Closure(idx)`. Sized
+    /// at `MakeClosure` time (VM) or `closure_native` time (walker) from the
+    /// analyzer's `(Symbol, depth, slot)` list. Each cell is a `RefCell` so
+    /// a closure body's `SetWord` to a captured word mutates the same cell
+    /// across invocations of that closure. `Rc`-backed so the `Frame`/
+    /// `CallFrame` shares the same cells without cloning the Vec.
+    pub captures: Rc<Vec<RefCell<Value>>>,
+}
+
 /// The single runtime value type. Covers every variant from the brief, even
 /// ones not exercised until later milestones (`Path`, `Func`).
 ///
@@ -252,6 +298,12 @@ pub enum Value {
     /// produced by `func`/`does`/`make function!` and by native lookup; has
     /// no source span of its own.
     Func(Rc<FuncDef>),
+    /// A closure value (M60): a `FuncDef` plus a captured free-variable cell.
+    /// Synthetic — produced by the `closure` native (walker) or
+    /// `Instr::MakeClosure` (VM); carries no source span of its own. A closure
+    /// is a function (`function?` returns `true` on it); `closure?` is the
+    /// strict predicate.
+    Closure(Rc<ClosureDef>),
     /// `foo/bar` — a path. Source-origin (the parser assembles these from a
     /// word immediately followed by one or more refinement tokens); carries
     /// the span of the whole `foo/bar` run. Used both for data selection
@@ -957,6 +1009,7 @@ impl Value {
             Value::None
             | Value::Logic(_)
             | Value::Func(_)
+            | Value::Closure(_)
             | Value::Error(_)
             | Value::Object(_)
             | Value::Map(_)
@@ -1175,6 +1228,12 @@ impl Value {
         Value::Object(Rc::new(RefCell::new(obj_def)))
     }
 
+    /// Constructor shorthand for a closure value wrapping `func` + the
+    /// captured free-variable cells. (M60.)
+    pub fn closure(func: Rc<FuncDef>, captures: Rc<Vec<RefCell<Value>>>) -> Self {
+        Value::Closure(Rc::new(ClosureDef { func, captures }))
+    }
+
     /// Constructor shorthand for a map wrapping `map_def`.
     pub fn map(map_def: MapDef) -> Self {
         Value::Map(Rc::new(RefCell::new(map_def)))
@@ -1258,6 +1317,11 @@ mod tests {
         let func = Binding::Func(1);
         assert!(!func.is_lexical());
         assert!(func.as_lexical().is_none());
+
+        // M60: Closure binding is not Lexical.
+        let closure = Binding::Closure(2);
+        assert!(!closure.is_lexical());
+        assert!(closure.as_lexical().is_none());
     }
 
     #[test]
@@ -1500,6 +1564,19 @@ mod tests {
     }
 
     #[test]
+    fn value_closure_constructor() {
+        // M60: `Value::closure` wraps a FuncDef + captures cell into a
+        // `Closure` variant.
+        let cd = Value::closure(Rc::new(FuncDef::default()), Rc::new(Vec::new()));
+        match &cd {
+            Value::Closure(c) => {
+                assert!(c.captures.is_empty());
+            }
+            other => panic!("expected Closure, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn value_map_constructor() {
         let m = MapDef::new();
         match Value::map(m) {
@@ -1633,6 +1710,12 @@ mod tests {
         assert!(Value::Func(Rc::new(FuncDef::default())).span().is_none());
         assert!(Value::error("x").span().is_none());
         assert!(Value::object(ObjectDef::new()).span().is_none());
+        // M60: closure is synthetic — no span.
+        assert!(
+            Value::closure(Rc::new(FuncDef::default()), Rc::new(Vec::new()))
+                .span()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1700,6 +1783,7 @@ mod tests {
             pool: Rc::from(&[][..]),
             symbols: Rc::from(&Vec::<Symbol>::new()[..]),
             freevars_table: Rc::from(&Vec::<Vec<Symbol>>::new()[..]),
+            captures_table: Rc::from(&Vec::<Vec<(Symbol, usize, usize)>>::new()[..]),
             n_locals: 0,
             freevars: Vec::new(),
             source_span: Span::default(),

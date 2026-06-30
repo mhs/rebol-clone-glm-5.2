@@ -32,12 +32,12 @@
 use std::mem::{align_of, size_of, MaybeUninit};
 use std::rc::Rc;
 
-use red_core::value::{FuncDef, Span, Symbol, Value};
+use red_core::value::{ClosureDef, FuncDef, Span, Symbol, Value};
 use red_core::vm_ir::{CompiledBlock, Frame, Instr};
 use red_core::{CompileErrorKind, Context, Env, EvalError, RefineArgs};
 
 use crate::binding::{bind_function_body, deep_clone_series};
-use crate::interp::{call_user_func, eval_get_path, set_path_value};
+use crate::interp::{call_closure_func, call_user_func, eval_get_path, set_path_value};
 use crate::natives::enrich_error;
 use crate::natives::extract_spec;
 use crate::vm::compiler::{compile_block_for_func_body, stub_block, NativeRegistry};
@@ -46,7 +46,15 @@ use crate::vm::lex::Scope;
 /// Return type of `Vm::prepare_call`: the func definition, its compiled block,
 /// and the populated `locals` Vec (args in `[0..argc]`). Shared by `call_user`,
 /// `call_user_global`, and `tail_call` so each can push/overwrite a frame.
-type PreparedCall = (Rc<FuncDef>, Rc<CompiledBlock>, Vec<Value>);
+type PreparedCall = (
+    Rc<FuncDef>,
+    Rc<CompiledBlock>,
+    Vec<Value>,
+    // M60: closure capture cell — `Some` iff the resolved value was a
+    // `Value::Closure`. The call-site (`call_user`/`call_user_global`/
+    // `tail_call`) sets the new `Frame.captures` from this.
+    Option<Rc<Vec<std::cell::RefCell<Value>>>>,
+);
 
 /// M30.1.A: capacity of the stack-allocated native-args fast path. Natives
 /// with argc ≤ this copy args into a `[Value; INLINE_ARGS_CAP]` on the call
@@ -118,6 +126,7 @@ pub fn run(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
         depth: 0,
         block,
         pc: 0,
+        captures: None,
     });
     vm.frame_gen = vm.frame_gen.wrapping_add(1);
     let result = vm.run_loop();
@@ -169,6 +178,7 @@ pub fn run_reduce(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalErro
         depth: 0,
         block,
         pc: 0,
+        captures: None,
     });
     vm.frame_gen = vm.frame_gen.wrapping_add(1);
     let result = vm.run_loop_reduce();
@@ -549,6 +559,54 @@ impl<'env> Vm<'env> {
                     let fd = self.build_func_def(spec_val, body_val, freevars)?;
                     self.stack.push(Value::Func(Rc::new(fd)));
                 }
+                Instr::MakeClosure(spec_idx, body_idx, cap_idx) => {
+                    // M60: build a Value::Closure with snapshotted freevar values.
+                    let block = self.cached_block.as_ref().expect("cache invariant").clone();
+                    let spec_val = block_pool(&block, spec_idx as usize, self.err_span(frame_idx))?;
+                    let body_val = block_pool(&block, body_idx as usize, self.err_span(frame_idx))?;
+                    let cap_specs = block
+                        .captures_table
+                        .get(cap_idx as usize)
+                        .cloned()
+                        .unwrap_or_default();
+                    let cd = self.build_closure_def(spec_val, body_val, &cap_specs)?;
+                    self.stack.push(Value::Closure(Rc::new(cd)));
+                }
+                Instr::LoadCapture(idx) => {
+                    // M60: read from the current frame's closure capture cell.
+                    let frame = &self.frames[frame_idx];
+                    let captures = frame.captures.as_ref().ok_or_else(|| EvalError::Native {
+                        message: "LoadCapture: frame has no closure captures".into(),
+                        span: self.err_span(frame_idx),
+                    })?;
+                    let idx = idx as usize;
+                    let v = captures
+                        .get(idx)
+                        .ok_or_else(|| EvalError::Native {
+                            message: format!("LoadCapture: index {idx} out of bounds"),
+                            span: self.err_span(frame_idx),
+                        })?
+                        .borrow()
+                        .clone();
+                    self.stack.push(v);
+                }
+                Instr::SetCapture(idx) => {
+                    // M60: write to the current frame's closure capture cell.
+                    let val = self.stack.pop().unwrap_or(Value::None);
+                    let span = self.err_span(frame_idx);
+                    let frame = &mut self.frames[frame_idx];
+                    let captures = frame.captures.as_ref().ok_or_else(|| EvalError::Native {
+                        message: "SetCapture: frame has no closure captures".into(),
+                        span,
+                    })?;
+                    let idx = idx as usize;
+                    let cell = captures.get(idx).ok_or_else(|| EvalError::Native {
+                        message: format!("SetCapture: index {idx} out of bounds"),
+                        span,
+                    })?;
+                    *cell.borrow_mut() = val.clone();
+                    self.stack.push(val);
+                }
                 Instr::EnterBlock => {
                     // No-op for M25 — `DropTo` restores height. M26 may use
                     // this to mark a reduce-style nested scope boundary.
@@ -851,6 +909,54 @@ impl<'env> Vm<'env> {
                 let fd = self.build_func_def(spec_val, body_val, freevars)?;
                 self.stack.push(Value::Func(Rc::new(fd)));
             }
+            Instr::MakeClosure(spec_idx, body_idx, cap_idx) => {
+                // M60: build a Value::Closure with snapshotted freevar values.
+                let block = self.cached_block.as_ref().expect("cache invariant").clone();
+                let spec_val = block_pool(&block, spec_idx as usize, self.err_span(frame_idx))?;
+                let body_val = block_pool(&block, body_idx as usize, self.err_span(frame_idx))?;
+                let cap_specs = block
+                    .captures_table
+                    .get(cap_idx as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                let cd = self.build_closure_def(spec_val, body_val, &cap_specs)?;
+                self.stack.push(Value::Closure(Rc::new(cd)));
+            }
+            Instr::LoadCapture(idx) => {
+                // M60: read from the current frame's closure capture cell.
+                let frame = &self.frames[frame_idx];
+                let captures = frame.captures.as_ref().ok_or_else(|| EvalError::Native {
+                    message: "LoadCapture: frame has no closure captures".into(),
+                    span: self.err_span(frame_idx),
+                })?;
+                let idx = idx as usize;
+                let v = captures
+                    .get(idx)
+                    .ok_or_else(|| EvalError::Native {
+                        message: format!("LoadCapture: index {idx} out of bounds"),
+                        span: self.err_span(frame_idx),
+                    })?
+                    .borrow()
+                    .clone();
+                self.stack.push(v);
+            }
+            Instr::SetCapture(idx) => {
+                // M60: write to the current frame's closure capture cell.
+                let val = self.stack.pop().unwrap_or(Value::None);
+                let span = self.err_span(frame_idx);
+                let frame = &mut self.frames[frame_idx];
+                let captures = frame.captures.as_ref().ok_or_else(|| EvalError::Native {
+                    message: "SetCapture: frame has no closure captures".into(),
+                    span,
+                })?;
+                let idx = idx as usize;
+                let cell = captures.get(idx).ok_or_else(|| EvalError::Native {
+                    message: format!("SetCapture: index {idx} out of bounds"),
+                    span,
+                })?;
+                *cell.borrow_mut() = val.clone();
+                self.stack.push(val);
+            }
             Instr::EnterBlock => {}
             Instr::DropTo(n) => {
                 self.stack.truncate(n as usize);
@@ -1062,8 +1168,15 @@ impl<'env> Vm<'env> {
         // Func values (which carry no span); `current_span()` is a worse
         // fallback there since it points at the *body* block, not the call.
         let call_span = func_val.span_or_default();
-        let fd = match func_val {
-            Value::Func(fd) => fd,
+        // M60: extract the FuncDef (and optional captures) from either a
+        // `Value::Func` or a `Value::Closure`.
+        let (fd, captures) = match func_val {
+            Value::Func(fd) => (fd, None),
+            Value::Closure(cd) => {
+                let captures = Rc::clone(&cd.captures);
+                let fd = Rc::clone(&cd.func);
+                (fd, Some(captures))
+            }
             other => {
                 // M31: use the offending value's span (the non-Func value
                 // stored in the slot), falling back to the current block's
@@ -1117,7 +1230,7 @@ impl<'env> Vm<'env> {
         self.stack.truncate(start);
         // Refinement slots default to none/logic false. M25's tests don't
         // exercise user-func refinements; M26 wires full refinement dispatch.
-        Ok((fd, compiled, locals))
+        Ok((fd, compiled, locals, captures))
     }
 
     /// Invoke a user function stored in a slot. Reads `Value::Func(fd)` from
@@ -1128,7 +1241,7 @@ impl<'env> Vm<'env> {
     /// `Call` handler (not here), which pops the function frame and pushes
     /// `v` onto the caller's stack.
     fn call_user(&mut self, slot: usize, argc: usize) -> Result<(), EvalError> {
-        let (fd, compiled, locals) = self.prepare_call(slot, argc, false)?;
+        let (fd, compiled, locals, captures) = self.prepare_call(slot, argc, false)?;
         // Walker fallback: if the body couldn't be compiled to bytecode
         // (e.g. it contains a higher-order pattern the compiler can't
         // statically resolve, like a func-valued param called in operator
@@ -1138,7 +1251,7 @@ impl<'env> Vm<'env> {
         // dispatch correctly. Args were already popped into `locals` by
         // `prepare_call`; repack them as the walker's arg vec.
         if compiled.needs_rebind {
-            return self.invoke_via_walker(fd, locals);
+            return self.invoke_via_walker(fd, locals, captures);
         }
         self.frames.push(Frame {
             func: Some(Rc::clone(&fd)),
@@ -1146,6 +1259,7 @@ impl<'env> Vm<'env> {
             depth: self.frames.last().map(|f| f.depth + 1).unwrap_or(1),
             block: compiled,
             pc: 0,
+            captures,
         });
         self.frame_gen = self.frame_gen.wrapping_add(1);
         #[cfg(feature = "stats")]
@@ -1158,9 +1272,9 @@ impl<'env> Vm<'env> {
     /// M30.3.4: like `call_user` but the func is known to be in a global slot.
     /// Skips the `frames.last().and_then(...)` local-slot check in `prepare_call`.
     fn call_user_global(&mut self, slot: usize, argc: usize) -> Result<(), EvalError> {
-        let (fd, compiled, locals) = self.prepare_call(slot, argc, true)?;
+        let (fd, compiled, locals, captures) = self.prepare_call(slot, argc, true)?;
         if compiled.needs_rebind {
-            return self.invoke_via_walker(fd, locals);
+            return self.invoke_via_walker(fd, locals, captures);
         }
         self.frames.push(Frame {
             func: Some(Rc::clone(&fd)),
@@ -1168,6 +1282,7 @@ impl<'env> Vm<'env> {
             depth: self.frames.last().map(|f| f.depth + 1).unwrap_or(1),
             block: compiled,
             pc: 0,
+            captures,
         });
         self.frame_gen = self.frame_gen.wrapping_add(1);
         #[cfg(feature = "stats")]
@@ -1193,13 +1308,13 @@ impl<'env> Vm<'env> {
     /// compiler's `patch_tail_call` only emits `TailCall` inside compiled
     /// func bodies.)
     fn tail_call(&mut self, slot: usize, argc: usize) -> Result<(), EvalError> {
-        let (fd, compiled, locals) = self.prepare_call(slot, argc, false)?;
+        let (fd, compiled, locals, captures) = self.prepare_call(slot, argc, false)?;
         // Walker fallback for tail calls: same rationale as `call_user`.
         // We can't reuse the current VM frame (the walker manages its own
         // CallFrame), so invoke through the walker and push the result.
         // The current frame stays; its `Return` will surface the result.
         if compiled.needs_rebind {
-            return self.invoke_via_walker(fd, locals);
+            return self.invoke_via_walker(fd, locals, captures);
         }
         let frame_idx = self.frames.len() - 1;
         let depth = self.frames[frame_idx].depth;
@@ -1213,6 +1328,7 @@ impl<'env> Vm<'env> {
                 depth: depth + 1,
                 block: compiled, // M30.3.1: Rc move (was (*compiled).clone())
                 pc: 0,
+                captures,
             });
             self.frame_gen = self.frame_gen.wrapping_add(1);
             #[cfg(feature = "stats")]
@@ -1261,6 +1377,7 @@ impl<'env> Vm<'env> {
         }
         self.frames[frame_idx].block = compiled; // M30.3.1: Rc move (was (*compiled).clone())
         self.frames[frame_idx].pc = 0;
+        self.frames[frame_idx].captures = captures; // M60
         self.frame_gen = self.frame_gen.wrapping_add(1);
         // No stats bump: a reused frame doesn't increase call-stack depth.
         Ok(())
@@ -1280,10 +1397,21 @@ impl<'env> Vm<'env> {
     /// Refinements aren't supported on this path (user-func refinement
     /// dispatch already falls back to the walker at the compiler level —
     /// see `compile_user_call`'s `MalformedSpec` return).
-    fn invoke_via_walker(&mut self, fd: Rc<FuncDef>, locals: Vec<Value>) -> Result<(), EvalError> {
+    fn invoke_via_walker(
+        &mut self,
+        fd: Rc<FuncDef>,
+        locals: Vec<Value>,
+        captures: Option<Rc<Vec<std::cell::RefCell<Value>>>>,
+    ) -> Result<(), EvalError> {
         let argc = fd.params.len();
         let args: Vec<Value> = locals.into_iter().take(argc).collect();
-        let result = call_user_func(&fd, args, &RefineArgs::empty(), self.env)?;
+        let result = if let Some(caps) = captures {
+            // M60: closure — invoke through the walker's closure path so the
+            // CallFrame gets the captures cell.
+            call_closure_func(&fd, args, &RefineArgs::empty(), self.env, &caps)?
+        } else {
+            call_user_func(&fd, args, &RefineArgs::empty(), self.env)?
+        };
         self.stack.push(result);
         Ok(())
     }
@@ -1431,6 +1559,92 @@ impl<'env> Vm<'env> {
         };
         bind_function_body(&mut fd, &self.env.user_ctx);
         Ok(fd)
+    }
+
+    /// M60: Build a `ClosureDef` — a `FuncDef` plus a captures cell whose
+    /// values are snapshotted from the current frame chain / user_ctx at
+    /// `MakeClosure` time. `cap_specs` is `Vec<(Symbol, depth, slot)>`:
+    /// each entry tells the VM where to read the freevar's current value.
+    /// `depth == 0` → `env.user_ctx.slot_value(slot)` (global);
+    /// `depth >= 1` → `self.frames[len-1-depth].locals[slot]` (ancestor func).
+    ///
+    /// After building the FuncDef (via `bind_function_body` — which preserves
+    /// any `Binding::Closure` the analyzer already set on the body), the
+    /// captures cell is populated. The FuncDef's `freevars` field is set to
+    /// the freevar names (for introspection / `bind_closure_body` if needed).
+    fn build_closure_def(
+        &self,
+        spec_val: Value,
+        body_val: Value,
+        cap_specs: &[(Symbol, usize, usize)],
+    ) -> Result<ClosureDef, EvalError> {
+        let spec = match &spec_val {
+            Value::Block { .. } => extract_spec(&spec_val).map_err(|e| EvalError::Native {
+                message: e.to_string(),
+                span: spec_val.span_or_default(),
+            })?,
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "block! for closure spec",
+                    found: crate::natives::type_name(&spec_val),
+                    span: spec_val.span_or_default(),
+                });
+            }
+        };
+        let body_series = match &body_val {
+            Value::Block { series, .. } => series.clone(),
+            _ => {
+                return Err(EvalError::TypeError {
+                    expected: "block! for closure body",
+                    found: crate::natives::type_name(&body_val),
+                    span: body_val.span_or_default(),
+                });
+            }
+        };
+        let freevar_names: Vec<Symbol> = cap_specs.iter().map(|(s, _, _)| s.clone()).collect();
+        let mut fd = FuncDef {
+            params: spec.params,
+            refinements: spec.refinements,
+            locals: spec.locals,
+            freevars: freevar_names,
+            compiled: None,
+            body: body_series,
+            ctx: Context::new(),
+            native: None,
+            variadic: false,
+            infix: false,
+        };
+        // Bind params/locals. The body's freevar words already have
+        // `Binding::Closure(idx)` from the analyzer; `bind_function_body`'s
+        // `attach_func_bindings` guard preserves them.
+        bind_function_body(&mut fd, &self.env.user_ctx);
+
+        // Snapshot capture values from the current frame chain / user_ctx.
+        let frames_len = self.frames.len();
+        let mut captures: Vec<std::cell::RefCell<Value>> = Vec::with_capacity(cap_specs.len());
+        for (_sym, depth, slot) in cap_specs {
+            let val = if *depth == 0 {
+                // Global (user_ctx) slot.
+                self.env.user_ctx.slot_value(*slot)
+            } else {
+                // Ancestor function-local slot: walk the frame chain.
+                let frame_idx = frames_len.saturating_sub(1 + *depth);
+                if frame_idx < frames_len {
+                    self.frames[frame_idx]
+                        .locals
+                        .get(*slot)
+                        .cloned()
+                        .unwrap_or(Value::None)
+                } else {
+                    Value::None
+                }
+            };
+            captures.push(std::cell::RefCell::new(val));
+        }
+        Ok(ClosureDef {
+            func: Rc::new(fd),
+            captures: Rc::new(captures),
+        })
     }
 }
 

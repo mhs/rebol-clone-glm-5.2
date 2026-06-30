@@ -11,6 +11,7 @@
 //! dispatches them. M22 just lays the type foundation so the value model
 //! (`FuncDef`) can carry a compiled-cache slot.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::value::{FuncDef, Span, Symbol, Value};
@@ -89,6 +90,19 @@ pub enum Instr {
     /// (Was `MakeFunc(u32, u32, Vec<Symbol>)` — the `Vec` bloated the enum to
     /// ~40 bytes and forced a heap alloc per `MakeFunc` emission.)
     MakeFunc(u32, u32, u32),
+    /// M60: build a `Value::Closure` at runtime. Like `MakeFunc` but also
+    /// snapshots the free-variable *values* into a `ClosureDef.captures`
+    /// cell. `captures_idx` indexes into `CompiledBlock::captures_table`
+    /// (a `Vec<Vec<(Symbol, usize, usize)>>` — each entry is
+    /// `(freevar_name, depth, slot)` so the VM can read
+    /// `self.frames[len-1-depth].locals[slot]` at `MakeClosure` time).
+    MakeClosure(u32, u32, u32),
+    /// M60: read `captures[idx]` of the current frame's closure cell. The
+    /// frame's `captures` field is `Some` iff the frame was pushed by a
+    /// `Value::Closure` call. Emits for body words with `Binding::Closure(idx)`.
+    LoadCapture(u32),
+    /// M60: write `captures[idx]` of the current frame's closure cell.
+    SetCapture(u32),
     EnterBlock,
     DropTo(u32),
     GetPath,
@@ -125,6 +139,14 @@ pub struct CompiledBlock {
     /// list for one `MakeFunc` emission. M30.2.E: `Rc`-backed (same reason
     /// as `symbols`).
     pub freevars_table: Rc<[Vec<Symbol>]>,
+    /// M60: captures table for `MakeClosure`. Indexed by the `captures_idx`
+    /// carried by `MakeClosure`. Each entry is the per-closure
+    /// `Vec<(Symbol, depth, slot)>` capture list: for each freevar, the
+    /// `(depth, slot)` to read from the current frame chain at snapshot time
+    /// (`self.frames[len-1-depth].locals[slot]`). The `Symbol` is kept for
+    /// `bind_closure_body` (which keys on name) and for disasm readability.
+    /// `Rc`-backed (same reason as `symbols`/`freevars_table`).
+    pub captures_table: Rc<[Vec<(Symbol, usize, usize)>]>,
     pub n_locals: usize,
     pub freevars: Vec<Symbol>,
     pub source_span: Span,
@@ -157,6 +179,13 @@ pub struct Frame {
     pub depth: usize,
     pub block: Rc<CompiledBlock>,
     pub pc: usize,
+    /// M60: closure capture cell, present iff the frame was pushed by a
+    /// `Value::Closure` call (`call_user`/`call_user_global` set this to
+    /// `Some(Rc::clone(&cd.captures))`). `LoadCapture`/`SetCapture` read/write
+    /// this; `None` for plain `func` frames (those instrs never execute on a
+    /// plain-func frame — the body's freevar words have `Binding::Lexical` /
+    /// `Binding::Local`, not `Binding::Closure`).
+    pub captures: Option<Rc<Vec<RefCell<Value>>>>,
 }
 
 /// Format a `CompiledBlock` for debugging: one instr per line, with pool
@@ -277,6 +306,27 @@ pub fn disasm_with_spans(block: &CompiledBlock, src: Option<&str>, file: Option<
                     .unwrap_or_else(|| "<bad fv idx>".into());
                 let _ = writeln!(out, "MakeFunc({s}, {b}, [{fv}])");
             }
+            Instr::MakeClosure(s, b, cap_idx) => {
+                // M60: show the captures list (sym @ depth:slot) for readability.
+                let caps = block
+                    .captures_table
+                    .get(*cap_idx as usize)
+                    .map(|v| {
+                        let names: Vec<String> = v
+                            .iter()
+                            .map(|(sym, d, slot)| format!("{:?}@{}:{}", sym.as_str(), d, slot))
+                            .collect();
+                        names.join(", ")
+                    })
+                    .unwrap_or_else(|| "<bad captures idx>".into());
+                let _ = writeln!(out, "MakeClosure({s}, {b}, [{caps}])");
+            }
+            Instr::LoadCapture(idx) => {
+                let _ = writeln!(out, "LoadCapture({idx})");
+            }
+            Instr::SetCapture(idx) => {
+                let _ = writeln!(out, "SetCapture({idx})");
+            }
             Instr::EnterBlock => {
                 let _ = writeln!(out, "EnterBlock");
             }
@@ -377,6 +427,7 @@ mod tests {
             pool,
             symbols: Rc::from(&Vec::<Symbol>::new()[..]),
             freevars_table: Rc::from(&Vec::<Vec<Symbol>>::new()[..]),
+            captures_table: Rc::from(&Vec::<Vec<(Symbol, usize, usize)>>::new()[..]),
             n_locals: 0,
             freevars: Vec::new(),
             source_span: Span::new(0, 0),
@@ -402,6 +453,7 @@ mod tests {
             pool,
             symbols: Rc::from(&Vec::<Symbol>::new()[..]),
             freevars_table: Rc::from(&Vec::<Vec<Symbol>>::new()[..]),
+            captures_table: Rc::from(&Vec::<Vec<(Symbol, usize, usize)>>::new()[..]),
             n_locals: 0,
             freevars: Vec::new(),
             source_span: Span::new(3, 4),
@@ -430,6 +482,7 @@ mod tests {
             pool,
             symbols: Rc::from(&Vec::<Symbol>::new()[..]),
             freevars_table: Rc::from(&Vec::<Vec<Symbol>>::new()[..]),
+            captures_table: Rc::from(&Vec::<Vec<(Symbol, usize, usize)>>::new()[..]),
             n_locals: 0,
             freevars: Vec::new(),
             source_span: Span::new(3, 4),
@@ -458,6 +511,7 @@ mod tests {
             pool,
             symbols: Rc::from(&Vec::<Symbol>::new()[..]),
             freevars_table: Rc::from(&Vec::<Vec<Symbol>>::new()[..]),
+            captures_table: Rc::from(&Vec::<Vec<(Symbol, usize, usize)>>::new()[..]),
             n_locals: 0,
             freevars: Vec::new(),
             source_span: Span::new(0, 0),

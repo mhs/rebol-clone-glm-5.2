@@ -149,6 +149,7 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Block { .. } => "block!",
         Value::Paren { .. } => "paren!",
         Value::Func(_) => "function!",
+        Value::Closure(_) => "closure!",
         Value::Path { .. } => "path!",
         Value::GetPath { .. } => "get-path!",
         Value::LitPath { .. } => "lit-path!",

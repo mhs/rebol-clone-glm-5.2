@@ -84,6 +84,9 @@ pub fn mold(value: &Value, out: &mut String) {
             out.push(')');
         }
         Value::Func(_) => out.push_str("#[function]"),
+        // M60: closure molds as `#[closure]` placeholder (parity with
+        // `#[function]` — no spec/body molding; not reparseable as a literal).
+        Value::Closure(_) => out.push_str("#[closure]"),
         Value::Error(err) => {
             // M42: structured errors mold as `make error! [code: ... type:
             // 'word args: [...] message: "..."]` (only non-default fields
@@ -225,6 +228,8 @@ pub fn form(value: &Value, out: &mut String) {
             }
         }
         Value::Func(_) => out.push_str("#[function]"),
+        // M60: closure forms as `#[closure]` (parity with `#[function]`).
+        Value::Closure(_) => out.push_str("#[closure]"),
         Value::Error(err) => out.push_str(&err.message),
         Value::Path { parts, .. } => form_path_parts(parts, None, None, out),
         Value::GetPath { parts, .. } => form_path_parts(parts, Some(':'), None, out),
@@ -891,6 +896,17 @@ mod tests {
     fn mold_func_placeholder() {
         let fd = std::rc::Rc::new(crate::value::FuncDef::default());
         assert_eq!(mold_to_string(&Value::Func(fd)), "#[function]");
+    }
+
+    #[test]
+    fn mold_closure_placeholder() {
+        // M60: closure molds as `#[closure]` placeholder.
+        let cd = Value::closure(
+            std::rc::Rc::new(crate::value::FuncDef::default()),
+            std::rc::Rc::new(Vec::new()),
+        );
+        assert_eq!(mold_to_string(&cd), "#[closure]");
+        assert_eq!(form_to_string(&cd), "#[closure]");
     }
 
     #[test]

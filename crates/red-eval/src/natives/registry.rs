@@ -23,7 +23,10 @@ use super::control::{
     repeat, switch_native, throw_native, try_native, until, while_native,
 };
 use super::eval::{do_native, load_native, reduce};
-use super::func::{does_native, func_native, function_native, function_predicate, return_native};
+use super::func::{
+    closure_native, closure_predicate, does_native, func_native, function_native,
+    function_predicate, return_native,
+};
 use super::io::{prin, print, probe};
 use super::words::{
     bind_native, char_predicate, get_native, register_word_predicate_natives, set_native,
@@ -271,6 +274,15 @@ pub fn register_natives(env: &mut Env) {
     env.natives.insert(
         Symbol::new("function"),
         fixed_native(function_native as NativeFn, 2),
+    );
+    // M60: closures.
+    env.natives.insert(
+        Symbol::new("closure"),
+        fixed_native(closure_native as NativeFn, 2),
+    );
+    env.natives.insert(
+        Symbol::new("closure?"),
+        fixed_native(closure_predicate as NativeFn, 1),
     );
     env.natives.insert(
         Symbol::new("function?"),

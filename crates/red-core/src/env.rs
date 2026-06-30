@@ -346,9 +346,17 @@ impl Env {
 
 /// A function invocation record. `ctx` holds parameter slots; `func` is the
 /// definition being executed. Unused in M5 (no user functions yet).
+///
+/// M60: `captures` holds a closure's free-variable capture cell, present iff
+/// the frame was pushed by a `Value::Closure` call. `resolve_word`/
+/// `write_setword` read/write it via `Binding::Closure(idx)`.
 pub struct CallFrame {
     pub ctx: Context,
     pub func: Option<Rc<FuncDef>>,
+    /// M60: closure capture cell (shared `Rc` so the same closure's
+    /// invocations all see the same `RefCell<Value>`s). `None` for plain
+    /// `func`/`does`/`function` frames.
+    pub captures: Option<Rc<Vec<std::cell::RefCell<Value>>>>,
 }
 
 /// Evaluation failure. Every variant that originates from a value carries a
@@ -496,6 +504,7 @@ mod tests {
         env.call_stack.push(CallFrame {
             ctx: Context::new(),
             func: None,
+            captures: None,
         });
         env.record_frame_push();
         assert_eq!(env.max_frame_depth, 1);

@@ -50,6 +50,15 @@ pub struct Scope {
     bindings: HashMap<Symbol, (usize, usize)>,
     parent: Option<Box<Scope>>,
     depth: usize,
+    /// M60: true iff this scope is the body scope of a `closure` form.
+    /// When true, `attach_lexical` captures outer-scope words (both
+    /// ancestor function scope and globals) into `result.captures` and sets
+    /// `Binding::Closure(idx)` instead of `Binding::Lexical`/`Local`.
+    is_closure: bool,
+    /// M60: the closure's own name (identified from the preceding SetWord
+    /// at analyze time). A body word matching this name is NOT captured —
+    /// it resolves via the outer SetWord slot (late-binding for recursion).
+    closure_name: Option<Symbol>,
 }
 
 impl Scope {
@@ -65,6 +74,8 @@ impl Scope {
             bindings,
             parent: None,
             depth: 0,
+            is_closure: false,
+            closure_name: None,
         }
     }
 
@@ -77,6 +88,22 @@ impl Scope {
             bindings: HashMap::new(),
             parent: Some(Box::new(parent.clone())),
             depth: parent.depth + 1,
+            is_closure: false,
+            closure_name: None,
+        }
+    }
+
+    /// M60: like `child` but marks the scope as a `closure` body scope.
+    /// `attach_lexical` captures outer-scope words into `result.captures`
+    /// instead of emitting `Lexical`/`Local`. `closure_name` identifies the
+    /// closure's own name (for recursion via the outer slot).
+    pub fn child_closure(parent: &Scope, closure_name: Option<Symbol>) -> Self {
+        Self {
+            bindings: HashMap::new(),
+            parent: Some(Box::new(parent.clone())),
+            depth: parent.depth + 1,
+            is_closure: true,
+            closure_name,
         }
     }
 
@@ -125,6 +152,8 @@ impl Clone for Scope {
             bindings: self.bindings.clone(),
             parent: self.parent.as_ref().map(|p| Box::new(p.as_ref().clone())),
             depth: self.depth,
+            is_closure: self.is_closure,
+            closure_name: self.closure_name.clone(),
         }
     }
 }
@@ -147,6 +176,13 @@ pub struct AnalysisResult {
     /// `use [words] body` form or `make object!`/`object`/`context` spec —
     /// those are runtime-scoped and the VM must defer to the walker for them.
     pub needs_rebind: bool,
+    /// M60: closure capture specs — `Vec<(Symbol, depth, slot)>` for each
+    /// captured freevar. `depth == 0` → snapshot from `env.user_ctx.slot_value(slot)`
+    /// at `MakeClosure` time; `depth >= 1` → snapshot from
+    /// `frames[len-1-depth].locals[slot]`. Populated by `attach_lexical`
+    /// when `scope.is_closure` and a word resolves to an outer scope. The
+    /// index of an entry in this Vec is the `Binding::Closure(idx)` value.
+    pub captures: Vec<(Symbol, usize, usize)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -340,11 +376,16 @@ fn is_object_keyword_form(data: &[Value], i: usize) -> bool {
 /// we just return them via the parent `AnalysisResult`.
 fn analyze_func_form(data: &[Value], i: usize, scope: &mut Scope, result: &mut AnalysisResult) {
     // Locate the body block. For `does` it's `data[i+1]`; for `func`/
-    // `function` it's `data[i+2]`. We rely on `func_form_skip` having
-    // already validated the shape.
+    // `function`/`closure` it's `data[i+2]`. We rely on `func_form_skip`
+    // having already validated the shape.
+    let form_word = &data[i];
     let is_does = matches!(
-        &data[i],
+        form_word,
         Value::Word { sym, .. } if sym.as_str() == "does"
+    );
+    let is_closure = matches!(
+        form_word,
+        Value::Word { sym, .. } if sym.as_str() == "closure"
     );
     let body_idx = if is_does { i + 1 } else { i + 2 };
     let body_value = &data[body_idx];
@@ -368,11 +409,28 @@ fn analyze_func_form(data: &[Value], i: usize, scope: &mut Scope, result: &mut A
         }
     };
 
+    // M60: for closures, identify the closure's own name from the preceding
+    // SetWord (if any). `fact: closure [n][body]` → closure_name = "fact".
+    // The body's reference to `fact` (recursion) is NOT captured — it
+    // resolves via the outer SetWord slot for late-binding.
+    let closure_name = if is_closure && i > 0 {
+        match &data[i - 1] {
+            Value::SetWord { sym, .. } => Some(sym.clone()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     // Open a child scope for this function. Slot indices start at 0 within
     // the child frame (matching `bind_function_body`'s slot allocation order:
     // params, then refinement flag+args, then locals, then body-local
     // SetWords).
-    let mut child = Scope::child(scope);
+    let mut child = if is_closure {
+        Scope::child_closure(scope, closure_name)
+    } else {
+        Scope::child(scope)
+    };
     for p in &spec.params {
         child.slot_index(p.clone());
     }
@@ -404,6 +462,12 @@ fn analyze_func_form(data: &[Value], i: usize, scope: &mut Scope, result: &mut A
         if !result.freevars.contains(&fv) {
             result.freevars.push(fv);
         }
+    }
+    // M60: propagate captures up too — a nested closure's captures are
+    // visible to the enclosing block (the captures list is stored in the
+    // `CompiledBlock.captures_table` at the enclosing block's level).
+    for cap in body_result.captures.drain(..) {
+        result.captures.push(cap);
     }
     if body_result.needs_rebind {
         result.needs_rebind = true;
@@ -457,31 +521,66 @@ fn analyze_value_mut(data: &mut [Value], i: usize, scope: &mut Scope, result: &m
 ///   compiler emits `LoadGlobal`). NOT a freevar.
 /// - Not found → leave as `Unbound`. The compiler emits `LoadDynamic`.
 ///
-/// If the binding is already something other than `Unbound`/`Local`/`Lexical`
-/// (e.g. `Func` from `bind_function_body`), we overwrite with `Lexical` — M23
-/// runs *after* `bind_pass`/`bind_function_body` in the M24 pipeline, so its
-/// attachments take precedence. For M23's opt-in tests the binding starts
-/// `Unbound` (or `Local` for user-ctx words) and we attach fresh.
+/// M60: when `scope.is_closure`, outer-scope words (both ancestor function
+/// scope AND globals at depth 0) are CAPTURED instead of left as `Lexical`/
+/// `Local`. `Binding::Closure(capture_idx)` is set, and
+/// `(sym, found_depth, slot)` is recorded in `result.captures`. The closure's
+/// own name (`scope.closure_name`) is excluded — it resolves via the outer
+/// SetWord slot for late-binding recursion.
 fn attach_lexical(sym: &Symbol, binding: &mut Binding, scope: &Scope, result: &mut AnalysisResult) {
     let Some((found_depth, slot)) = scope.lookup(sym) else {
         return; // Unbound — leave as-is.
     };
-    if found_depth == 0 {
-        // Global (user-ctx) reference. `bind_pass` has already attached
-        // `Binding::Local(user_ctx, slot)` if the word is a known global;
-        // we leave it alone so the M24 compiler can emit `LoadGlobal`. If
-        // it's still `Unbound` here, it's a truly unbound word — leave it.
-        return;
-    }
-    // Found in a function scope. Compute the depth difference from the
-    // current scope (the innermost) to the defining scope.
     let current_depth = scope.depth();
     let depth_diff = current_depth - found_depth;
-    *binding = Binding::Lexical(depth_diff, slot);
-    // If the defining scope is an ancestor (not the current scope), this is
-    // a free variable of the current function — record it.
-    if depth_diff > 0 && !result.freevars.contains(sym) {
-        result.freevars.push(sym.clone());
+
+    if scope.is_closure && depth_diff > 0 {
+        // Closure scope: capture the outer-scope word. Exception: the
+        // closure's own name at root (for recursion via the outer slot).
+        if found_depth == 0 && scope.closure_name.as_ref() == Some(sym) {
+            // Recursion: leave as Binding::Local (the SetWord that stores the
+            // closure value). At MakeClosure time the slot holds `none`, but
+            // by call time the SetWord has fired. Late-binding is correct.
+            return;
+        }
+        // Record the capture (or reuse if already recorded for this sym —
+        // the body may be analyzed twice: once by `analyze_func_form` when
+        // the enclosing block is analyzed, and again by `compile_make_closure`
+        // to populate the captures_table). Both passes must agree on the
+        // capture index.
+        let existing_idx = result.captures.iter().position(|(s, _, _)| s == sym);
+        let capture_idx = if let Some(idx) = existing_idx {
+            idx
+        } else {
+            let idx = result.captures.len();
+            result.captures.push((sym.clone(), found_depth, slot));
+            idx
+        };
+        *binding = Binding::Closure(capture_idx);
+        if !result.freevars.contains(sym) {
+            result.freevars.push(sym.clone());
+        }
+    } else if !scope.is_closure && found_depth == 0 {
+        // Non-closure: global (user-ctx) reference. `bind_pass` has already
+        // attached `Binding::Local(user_ctx, slot)` if the word is a known
+        // global; we leave it alone so the M24 compiler can emit `LoadGlobal`.
+        // If it's still `Unbound` here, it's a truly unbound word — leave it.
+        return;
+    } else if !scope.is_closure && found_depth >= 1 {
+        // Non-closure: found in a function scope. Compute the depth difference
+        // from the current scope (the innermost) to the defining scope.
+        *binding = Binding::Lexical(depth_diff, slot);
+        // If the defining scope is an ancestor (not the current scope), this
+        // is a free variable of the current function — record it.
+        if depth_diff > 0 && !result.freevars.contains(sym) {
+            result.freevars.push(sym.clone());
+        }
+    }
+    // For closure scope with depth_diff == 0 (current scope local), the
+    // default `Lexical(0, slot)` would be set by the non-closure path above,
+    // but since scope.is_closure is true, we fall through. We need to set it:
+    if scope.is_closure && depth_diff == 0 && found_depth >= 1 {
+        *binding = Binding::Lexical(0, slot);
     }
 }
 

@@ -58,6 +58,21 @@ fn get_one(v: &Value, env: &mut Env, span: Span) -> Result<Value, EvalError> {
                     })?;
                 Ok(frame.ctx.slot_value(*idx))
             }
+            // M60: closure capture cell — read from the active frame's captures.
+            Binding::Closure(idx) => {
+                let frame = env
+                    .call_stack
+                    .last()
+                    .ok_or_else(|| EvalError::UnboundWord {
+                        sym: sym.clone(),
+                        span,
+                    })?;
+                let captures = frame.captures.as_ref().ok_or_else(|| EvalError::Native {
+                    message: format!("closure binding for {:?} has no capture cell", sym.as_str()),
+                    span,
+                })?;
+                Ok(captures[*idx].borrow().clone())
+            }
             Binding::Unbound => env.user_ctx.get(sym).ok_or_else(|| EvalError::UnboundWord {
                 sym: sym.clone(),
                 span,
@@ -140,6 +155,22 @@ fn set_one(v: &Value, val: Value, env: &mut Env) -> Result<(), EvalError> {
                         span: v.span_or_default(),
                     })?;
                 frame.ctx.set_slot(*idx, val);
+                Ok(())
+            }
+            // M60: closure capture cell — write to the active frame's captures.
+            Binding::Closure(idx) => {
+                let frame = env
+                    .call_stack
+                    .last_mut()
+                    .ok_or_else(|| EvalError::UnboundWord {
+                        sym: sym.clone(),
+                        span: v.span_or_default(),
+                    })?;
+                let captures = frame.captures.as_ref().ok_or_else(|| EvalError::Native {
+                    message: format!("closure binding for {:?} has no capture cell", sym.as_str()),
+                    span: v.span_or_default(),
+                })?;
+                *captures[*idx].borrow_mut() = val;
                 Ok(())
             }
             Binding::Unbound => {

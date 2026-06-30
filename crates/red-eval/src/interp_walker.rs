@@ -339,6 +339,7 @@ fn eval_prefix(
         | Value::LitWord { .. }
         | Value::Block { .. }
         | Value::Func(_)
+        | Value::Closure(_)
         | Value::Refinement { .. }
         | Value::Error(_)
         | Value::File { .. }
@@ -471,6 +472,12 @@ fn dispatch_call_with_refs(
         Value::Func(fd) => {
             let (args, refs) = collect_call_args(sym, fd, leading_refs, data, i, env, span)?;
             return call_user_func(fd, args, &refs, env);
+        }
+        // M60: closure invocation — use the closure's captures cell.
+        Value::Closure(cd) => {
+            let fd = Rc::clone(&cd.func);
+            let (args, refs) = collect_call_args(sym, &fd, leading_refs, data, i, env, span)?;
+            return call_closure_func(&fd, args, &refs, env, &cd.captures);
         }
         _ => return Ok(resolved),
     };
@@ -1346,6 +1353,19 @@ fn select_object_path(
                     env.user_ctx = saved;
                     result
                 }
+                // M60: closure stored in an object field — call it as a method
+                // (same pattern as Func, but the closure's captures cell is
+                // self-contained — no need to swap user_ctx for capture
+                // resolution, but we DO swap so the closure body's
+                // Binding::Local words (if any reference the object's ctx)
+                // still resolve).
+                Value::Closure(_) => {
+                    let obj_ctx = Rc::clone(&current_obj.borrow().ctx);
+                    let saved = std::mem::replace(&mut env.user_ctx, obj_ctx);
+                    let result = dispatch_call(field_val, &field_sym, data, i, env, path_span);
+                    env.user_ctx = saved;
+                    result
+                }
                 other => Ok(other),
             };
         }
@@ -1512,6 +1532,7 @@ pub(crate) fn call_user_func(
     env.call_stack.push(crate::CallFrame {
         ctx: call_ctx,
         func: Some(Rc::clone(fd)),
+        captures: None,
     });
     #[cfg(feature = "stats")]
     {
@@ -1531,6 +1552,60 @@ pub(crate) fn call_user_func(
     // (top-level body compiled successfully), the VM's `CallUser` handler
     // is the path that invokes functions — it uses `vm.frames`, not
     // `env.call_stack`.
+    let result = eval(&body_block, env);
+    env.call_stack.pop();
+    match result {
+        Ok(v) => Ok(v),
+        Err(EvalError::Return(v)) => Ok(v),
+        Err(e) => Err(e),
+    }
+}
+
+/// M60: Invoke a closure — like `call_user_func` but pushes a `CallFrame`
+/// with the closure's captures cell attached. The body's freevar words have
+/// `Binding::Closure(idx)` (set by the analyzer or `bind_closure_body`),
+/// resolved via `resolve_word`/`write_setword` against `frame.captures`.
+pub(crate) fn call_closure_func(
+    fd: &Rc<FuncDef>,
+    args: Vec<Value>,
+    refs: &RefineArgs,
+    env: &mut Env,
+    captures: &Rc<Vec<std::cell::RefCell<Value>>>,
+) -> Result<Value, EvalError> {
+    let call_ctx = fd.ctx.clone();
+    let mut slot = 0;
+    for arg in args.iter() {
+        call_ctx.set_slot(slot, arg.clone());
+        slot += 1;
+    }
+    for (ref_name, ref_args_spec) in &fd.refinements {
+        let active = refs.has(ref_name);
+        call_ctx.set_slot(slot, Value::Logic(active));
+        slot += 1;
+        if active {
+            if let Some(collected) = refs.get(ref_name) {
+                for v in collected {
+                    call_ctx.set_slot(slot, v.clone());
+                    slot += 1;
+                }
+            }
+        } else {
+            for _ in 0..ref_args_spec.len() {
+                call_ctx.set_slot(slot, Value::None);
+                slot += 1;
+            }
+        }
+    }
+    env.call_stack.push(crate::CallFrame {
+        ctx: call_ctx,
+        func: Some(Rc::clone(fd)),
+        captures: Some(Rc::clone(captures)),
+    });
+    #[cfg(feature = "stats")]
+    {
+        env.record_frame_push();
+    }
+    let body_block = Value::block(fd.body.clone());
     let result = eval(&body_block, env);
     env.call_stack.pop();
     match result {
@@ -1580,6 +1655,21 @@ fn resolve_word(
                 })?;
             Ok(frame.ctx.slot_value(*idx))
         }
+        // M60: closure capture cell — read from the active frame's captures.
+        Binding::Closure(idx) => {
+            let frame = env
+                .call_stack
+                .last()
+                .ok_or_else(|| EvalError::UnboundWord {
+                    sym: sym.clone(),
+                    span,
+                })?;
+            let captures = frame.captures.as_ref().ok_or_else(|| EvalError::Native {
+                message: format!("closure binding for {:?} has no capture cell", sym.as_str()),
+                span,
+            })?;
+            Ok(captures[*idx].borrow().clone())
+        }
         Binding::Unbound => {
             if let Some(fd) = env.natives.get(sym) {
                 Ok(Value::Func(Rc::clone(fd)))
@@ -1625,12 +1715,28 @@ fn write_setword(
             // Write to the current call frame's function-local slot.
             let frame = env
                 .call_stack
-                .last()
+                .last_mut()
                 .ok_or_else(|| EvalError::UnboundWord {
                     sym: sym.clone(),
                     span,
                 })?;
             frame.ctx.set_slot(*idx, val);
+            Ok(())
+        }
+        // M60: closure capture cell — write to the active frame's captures.
+        Binding::Closure(idx) => {
+            let frame = env
+                .call_stack
+                .last_mut()
+                .ok_or_else(|| EvalError::UnboundWord {
+                    sym: sym.clone(),
+                    span,
+                })?;
+            let captures = frame.captures.as_ref().ok_or_else(|| EvalError::Native {
+                message: format!("closure binding for {:?} has no capture cell", sym.as_str()),
+                span,
+            })?;
+            *captures[*idx].borrow_mut() = val;
             Ok(())
         }
         Binding::Unbound => Err(EvalError::UnboundWord {

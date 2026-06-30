@@ -183,8 +183,16 @@ impl FuncArityTable {
         let names = user_ctx.names.borrow();
         for (_, idx) in names.iter() {
             let val = user_ctx.slot_value(*idx);
-            if let Value::Func(fd) = val {
-                self.arities.insert((0, *idx), fd.params.len());
+            match val {
+                // M60: closures are callable like funcs — record their arity
+                // so `f 5` emits `CallUser` instead of `LoadGlobal`.
+                Value::Func(fd) => {
+                    self.arities.insert((0, *idx), fd.params.len());
+                }
+                Value::Closure(cd) => {
+                    self.arities.insert((0, *idx), cd.func.params.len());
+                }
+                _ => {}
             }
         }
     }
@@ -220,6 +228,12 @@ struct Compiler<'a> {
     /// capture list. The instr carries the index instead of the `Vec<Symbol>`,
     /// so `Instr` can be `Copy`.
     freevars_table: Vec<Vec<Symbol>>,
+    /// M60: side table for `MakeClosure`. Each entry is one closure's
+    /// captures list: `Vec<(Symbol, depth, slot)>` — for each freevar, the
+    /// `(depth, slot)` to read at snapshot time (`depth == 0` → read from
+    /// `env.user_ctx`, `depth >= 1` → read from `frames[len-1-depth].locals`).
+    /// Populated by `compile_make_closure` via `intern_captures`.
+    captures_table: Vec<Vec<(Symbol, usize, usize)>>,
     /// Slots that *might* hold a `Value::Func` at runtime but whose arity
     /// wasn't statically recorded in `func_arities`. Populated for:
     ///  - SetWord targets whose RHS is a `GetWord` (`g: :dbl`) or a `get
@@ -304,6 +318,7 @@ pub(crate) fn compile_block_reduce(
         func_arities,
         symbols: Vec::new(),
         freevars_table: Vec::new(),
+        captures_table: Vec::new(),
         dynamic_func_slots: HashSet::new(),
     };
     let data = block.data.borrow();
@@ -322,6 +337,7 @@ pub(crate) fn compile_block_reduce(
         pool: compiler.pool.into_rc(),
         symbols: Rc::from(compiler.symbols.as_slice()),
         freevars_table: Rc::from(compiler.freevars_table.as_slice()),
+        captures_table: Rc::from(compiler.captures_table.as_slice()),
         n_locals: scope_locals_count(scope),
         freevars: analysis.freevars,
         source_span: span,
@@ -385,6 +401,7 @@ fn compile_block_inner(
         func_arities,
         symbols: Vec::new(),
         freevars_table: Vec::new(),
+        captures_table: Vec::new(),
         dynamic_func_slots,
     };
 
@@ -413,13 +430,13 @@ fn compile_block_inner(
     // Block ends with `Return`: the VM pops the frame, returning top-of-stack
     // (or `None` if the stack is empty — matches the walker's `last` value).
     compiler.emit_with_span(Instr::Return, block_source_span(block));
-
     let span = block_source_span(block);
     Ok(CompiledBlock {
         instrs: Rc::from(compiler.instrs.as_slice()),
         pool: compiler.pool.into_rc(),
         symbols: Rc::from(compiler.symbols.as_slice()),
         freevars_table: Rc::from(compiler.freevars_table.as_slice()),
+        captures_table: Rc::from(compiler.captures_table.as_slice()),
         n_locals: scope_locals_count(scope),
         freevars: analysis.freevars,
         source_span: span,
@@ -438,6 +455,7 @@ pub(crate) fn stub_block(block: &Series, analysis: AnalysisResult) -> CompiledBl
         pool: Rc::from([]),
         symbols: Rc::from(&Vec::<Symbol>::new()[..]),
         freevars_table: Rc::from(&Vec::<Vec<Symbol>>::new()[..]),
+        captures_table: Rc::from(&Vec::<Vec<(Symbol, usize, usize)>>::new()[..]),
         n_locals: 0,
         freevars: analysis.freevars,
         source_span: span,
@@ -495,6 +513,14 @@ impl<'a> Compiler<'a> {
     fn intern_freevars(&mut self, fv: Vec<Symbol>) -> u32 {
         let idx = self.freevars_table.len() as u32;
         self.freevars_table.push(fv);
+        idx
+    }
+
+    /// M60: intern a captures list `Vec<(Symbol, depth, slot)>` into the
+    /// `captures_table` side table. Returns the index for `Instr::MakeClosure`.
+    fn intern_captures(&mut self, caps: Vec<(Symbol, usize, usize)>) -> u32 {
+        let idx = self.captures_table.len() as u32;
+        self.captures_table.push(caps);
         idx
     }
 
@@ -597,17 +623,32 @@ fn compile_prefix(
             kind: CompileErrorKind::MalformedSpec,
         });
     }
-    // `func`/`does`/`function` — emit `MakeFunc` and advance `*i` past the form.
+    // `func`/`does`/`function`/`closure` — emit `MakeFunc`/`MakeClosure` and
+    // advance `*i` past the form.
     if let Some(skip) = func_form_skip(data, *i) {
-        *i += 1; // consume the calling word itself; `compile_make_func` reads spec/body from `*i`
-        compile_make_func(c, data, i, scope, cur, span)?;
-        // `func_form_skip` returned the *total* skip including the calling word.
-        // We've consumed `1 + (spec + body)` = `skip` values total.
-        // Adjust: we already advanced 1; advance the remaining `skip - 1`.
+        let is_closure = matches!(
+            cur,
+            Value::Word { sym, .. } if sym.as_str() == "closure"
+        );
+        // M60: identify the closure's own name from the preceding SetWord
+        // (if any). `fact: closure [n][body]` → closure_name = "fact". The
+        // body's reference to `fact` (recursion) is NOT captured — it
+        // resolves via the outer SetWord slot for late-binding.
+        let closure_name = if is_closure && *i > 0 {
+            match &data[*i - 1] {
+                Value::SetWord { sym, .. } => Some(sym.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        *i += 1; // consume the calling word itself
+        if is_closure {
+            compile_make_closure(c, data, i, scope, closure_name, span)?;
+        } else {
+            compile_make_func(c, data, i, scope, cur, span)?;
+        }
         *i += skip - 1;
-        // SetWord-RHS path: the MakeFunc pushes a `Value::Func` onto the stack,
-        // which the enclosing SetWord stores. In value position, the func
-        // is left on the stack — `Pop` if non-tail (handled by the caller).
         return Ok(());
     }
 
@@ -635,6 +676,7 @@ fn compile_prefix(
         | Value::LitWord { .. }
         | Value::Block { .. }
         | Value::Func(_)
+        | Value::Closure(_)
         | Value::Refinement { .. }
         | Value::Error(_)
         | Value::File { .. }
@@ -846,6 +888,13 @@ fn compile_word(
             // Function-local slot (set by `bind_function_body`'s older path).
             // M23 overwrites these with `Lexical` when it runs, but defensive.
             (0, *s)
+        }
+        // M60: closure capture — not a callable slot; the word resolves to the
+        // captured value at runtime via `LoadCapture`. Emit `LoadCapture` here
+        // and return (don't enter the `CallUser` path below).
+        Binding::Closure(idx) => {
+            c.emit(Instr::LoadCapture(*idx as u32));
+            return Ok(());
         }
         // M31: was `unreachable!()`. The earlier `if let Binding::Unbound`
         // arm above returns for unbound words that name a native, or emits
@@ -1494,6 +1543,75 @@ fn compile_make_func(
     Ok(())
 }
 
+/// M60: compile a `closure [spec] [body]` form. Like `compile_make_func` but:
+/// - Opens a `Scope::child_closure` (with `is_closure=true` + `closure_name`)
+///   so `attach_lexical` captures outer-scope words into `result.captures`
+///   and sets `Binding::Closure(idx)` on body freevar words.
+/// - Stores the captures list `Vec<(Symbol, depth, slot)>` in the
+///   `CompiledBlock.captures_table` side table.
+/// - Emits `Instr::MakeClosure(spec_idx, body_idx, captures_idx)`.
+///
+/// Pre: `*i` points just past the `closure` calling word (at the spec block).
+fn compile_make_closure(
+    c: &mut Compiler,
+    data: &[Value],
+    i: &mut usize,
+    scope: &Scope,
+    closure_name: Option<Symbol>,
+    span: Span,
+) -> Result<(), CompileError> {
+    if *i + 1 >= data.len() {
+        return Err(CompileError {
+            span,
+            kind: CompileErrorKind::MalformedSpec,
+        });
+    }
+    let spec_val = data[*i].clone();
+    let body_val = data[*i + 1].clone();
+    if !matches!(spec_val, Value::Block { .. }) || !matches!(body_val, Value::Block { .. }) {
+        return Err(CompileError {
+            span,
+            kind: CompileErrorKind::MalformedSpec,
+        });
+    }
+    let spec = extract_spec(&spec_val).map_err(|_| CompileError {
+        span,
+        kind: CompileErrorKind::MalformedSpec,
+    })?;
+    // Open a closure-aware child scope so `attach_lexical` captures outer
+    // words instead of emitting `Lexical`/leaving `Local`.
+    let mut child = Scope::child_closure(scope, closure_name);
+    for p in &spec.params {
+        child.slot_index(p.clone());
+    }
+    for (ref_name, ref_args) in &spec.refinements {
+        child.slot_index(ref_name.clone());
+        for arg in ref_args {
+            child.slot_index(arg.clone());
+        }
+    }
+    for local in &spec.locals {
+        child.slot_index(local.clone());
+    }
+    let body_series = match &body_val {
+        Value::Block { series, .. } => series.clone(),
+        _ => {
+            return Err(CompileError {
+                span: body_val.span_or_default(),
+                kind: CompileErrorKind::MalformedBody,
+            });
+        }
+    };
+    collect_setwords_inline(&body_series, &mut child);
+    let body_analysis = analyze_block(&body_series, &mut child);
+
+    let spec_idx = c.push_const(spec_val);
+    let body_idx = c.push_const(body_val);
+    let cap_idx = c.intern_captures(body_analysis.captures);
+    c.emit(Instr::MakeClosure(spec_idx, body_idx, cap_idx));
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Load / store emission
 // ---------------------------------------------------------------------------
@@ -1502,6 +1620,7 @@ fn compile_make_func(
 /// - `Lexical(d, slot)` → `LoadLocal(d, slot)`
 /// - `Local(_, slot)` → `LoadGlobal(slot)` (user-ctx global)
 /// - `Unbound` → `LoadDynamic(sym)` (resolved at VM entry from `env.user_ctx`)
+/// - `Closure(idx)` → `LoadCapture(idx)` (M60)
 fn emit_load(
     c: &mut Compiler,
     binding: &Binding,
@@ -1516,6 +1635,7 @@ fn emit_load(
             c.emit(Instr::LoadDynamic(idx));
         }
         Binding::Func(s) => c.emit(Instr::LoadLocal(0, *s as u32)), // defensive
+        Binding::Closure(idx) => c.emit(Instr::LoadCapture(*idx as u32)),
     }
     Ok(())
 }
@@ -1524,6 +1644,7 @@ fn emit_load(
 /// - `Lexical(d, slot)` → `SetLocal(d, slot)`
 /// - `Local(_, slot)` → `SetGlobal(slot)`
 /// - `Unbound` → `SetDynamic(sym)`
+/// - `Closure(idx)` → `SetCapture(idx)` (M60)
 fn emit_store(
     c: &mut Compiler,
     binding: &Binding,
@@ -1538,6 +1659,7 @@ fn emit_store(
             c.emit(Instr::SetDynamic(idx));
         }
         Binding::Func(s) => c.emit(Instr::SetLocal(0, *s as u32)), // defensive
+        Binding::Closure(idx) => c.emit(Instr::SetCapture(*idx as u32)),
     }
     Ok(())
 }
@@ -1598,11 +1720,31 @@ fn peek_func_arity(data: &[Value], i: usize) -> Option<usize> {
 /// Returns false for `func`/`does`/`make function!` forms (those have their
 /// arity peeked by `peek_func_arity` and go through `CallUser`), and for
 /// everything else (the slot holds a non-Func value).
+/// Does the RHS starting at `data[i]` resolve to a `Value::Func`/
+/// `Value::Closure` at runtime without the compiler being able to see its
+/// arity? Returns true for:
+/// - `:word` (GetWord) — fetches a Func value without invoking.
+/// - `get 'word` / `get word` — the `get` native returns a slot's value,
+///   which is frequently a Func (the canonical way to fetch a function value
+///   for higher-order use).
+/// - M60: `word args...` (a `CallUser` whose result might be a func/closure,
+///   e.g. `add5: make-adder 5` where `make-adder` returns a closure). The
+///   compiler can't see the return type, so mark the slot dynamic to force
+///   the walker to dispatch at runtime.
+///
+/// Used by the SetWord arm to mark the target slot as `dynamic_func_slots`,
+/// so a later operator-position reference (`f 10`) falls back to the walker
+/// instead of emitting a plain load that would return `#[function]`/
+/// `#[closure]`.
+///
+/// Returns false for `func`/`does`/`make function!`/`closure` forms (those
+/// have their arity peeked by `peek_func_arity` and go through `CallUser`).
 fn rhs_might_be_func(data: &[Value], i: usize) -> bool {
     match &data[i] {
         Value::GetWord { .. } => true,
         Value::Word { sym, binding, .. } => {
-            matches!(binding, Binding::Unbound)
+            // `get 'word` / `get word` — the `get` native.
+            if matches!(binding, Binding::Unbound)
                 && sym.as_str() == "get"
                 && data.get(i + 1).is_some_and(|arg| {
                     matches!(
@@ -1610,6 +1752,22 @@ fn rhs_might_be_func(data: &[Value], i: usize) -> bool {
                         Value::LitWord { .. } | Value::Word { .. } | Value::GetWord { .. }
                     )
                 })
+            {
+                return true;
+            }
+            // M60: a bound or unbound word in operator position (a `CallUser`
+            // or native call) whose result might be a func/closure. Exclude
+            // `func`/`does`/`function`/`closure` forms (arity recorded by
+            // `peek_func_arity`) and `make function!` (arity recorded).
+            if func_form_skip(data, i).is_some() || is_make_function_form(data, i) {
+                return false;
+            }
+            // Require at least one trailing arg (a word with no args is just a
+            // value load, not a func-producing call).
+            matches!(
+                binding,
+                Binding::Local(_, _) | Binding::Lexical(_, _) | Binding::Unbound
+            ) && data.get(i + 1).is_some()
         }
         _ => false,
     }
@@ -1648,6 +1806,9 @@ fn slot_coords(binding: &Binding) -> (usize, usize) {
         Binding::Lexical(d, s) => (*d, *s),
         Binding::Local(_, s) => (0, *s),
         Binding::Func(s) => (0, *s),
+        // M60: closure captures don't participate in func-arity keying —
+        // a captured word is read via LoadCapture, not CallUser.
+        Binding::Closure(_) => (0, 0),
         Binding::Unbound => (0, 0),
     }
 }
@@ -2070,6 +2231,7 @@ mod tests {
             func_arities: FuncArityTable::default(),
             symbols: Vec::new(),
             freevars_table: Vec::new(),
+            captures_table: Vec::new(),
             dynamic_func_slots: HashSet::new(),
         };
         c.func_arities.record(0, fact_slot, 1); // fact is global arity-1

@@ -17,8 +17,12 @@
 //!   while the user context is shadowed by the call frame.
 //!
 //! Closures (function values that capture a fresh per-call frame with their
-//! definition context as parent) are explicitly out of scope for the POC —
-//! `func` uses shallow per-call clones of `FuncDef.ctx` only.
+//! definition context as parent) are implemented via `Value::Closure` (M60):
+//! the `closure` native / `Instr::MakeClosure` snapshots freevar values into a
+//! `ClosureDef.captures` cell at creation time. `Binding::Closure(idx)` on
+//! body freevar words resolves to that cell via the active call frame's
+//! `captures` Vec. `func`/`does`/`function` keep their shallow per-call clone
+//! semantics (back-compat with v0.2–v0.4 golden fixtures).
 //!
 //! `in context 'word` is also deferred: it returns a word bound to a context
 //! value, but objects (`make object!`) — the only context-producing construct
@@ -91,7 +95,8 @@ pub(crate) fn use_body_index(data: &[Value], i: usize) -> Option<usize> {
 /// `function_native`/`does_native` via `bind_function_body`.
 ///
 /// Forms:
-/// - `func [spec] [body]` / `function [spec] [body]` → consumes 3 values.
+/// - `func [spec] [body]` / `function [spec] [body]` / `closure [spec] [body]`
+///   → consumes 3 values.
 /// - `does [body]` → consumes 2 values.
 ///
 /// `make function! [...]` is handled at eval time (not a bare word form) and
@@ -107,7 +112,7 @@ pub(crate) fn func_form_skip(data: &[Value], i: usize) -> Option<usize> {
         return None;
     };
     match sym.as_str() {
-        "func" | "function" => {
+        "func" | "function" | "closure" => {
             // `func [spec] [body]` — need at least 3 values (word + spec + body).
             if i + 2 < data.len()
                 && matches!(&data[i + 1], Value::Block { .. })
@@ -479,9 +484,37 @@ fn attach_use_inner(data: &mut [Value], child_ctx: &Rc<Context>, user_ctx: &Rc<C
 /// Like `attach_local_bindings` but distinguishes function-local words
 /// (`Binding::Func(idx)` via `func_ctx`) from outer user-context words
 /// (`Binding::Local(user_ctx, idx)`). Function-local names shadow outer ones.
+///
+/// M60: words already carrying `Binding::Closure(idx)` (set by the VM's
+/// lexical analyzer for `closure` freevars) are preserved — `bind_function_body`
+/// runs at `MakeFunc`/`MakeClosure` time, AFTER the analyzer has attached
+/// capture bindings, so we must not clobber them. (For the walker path,
+/// `closure_native` overlays `Binding::Closure` AFTER `bind_function_body`,
+/// so this guard is a no-op there.)
+///
+/// M60: skips `func`/`does`/`function`/`closure` body blocks (via
+/// `func_form_skip`) — those have their own scopes and are bound by their
+/// own `bind_function_body`/`closure_native` calls. Without this skip, an
+/// enclosing func's binding pass would clobber closure-body freevar words
+/// with `Binding::Func` (pointing to the enclosing func's params), breaking
+/// the capture.
 fn attach_func_bindings(series: &Series, func_ctx: &Context, user_ctx: &Rc<Context>) {
     let mut data = series.data.borrow_mut();
-    for i in 0..data.len() {
+    let n = data.len();
+    let mut i = 0;
+    while i < n {
+        // Skip `func`/`does`/`function`/`closure` bodies — their words belong
+        // to their own scopes, not this func's. (M60: without this skip, an
+        // enclosing func's binding pass would clobber closure-body freevar
+        // words with `Binding::Func`, breaking the capture.)
+        // Note: `use [words] body` is NOT skipped — the use body's references
+        // to the enclosing func's params are valid and must be bound here
+        // (use_native's `attach_use_bindings` only checks child_ctx + user_ctx,
+        // not the func ctx).
+        if let Some(skip) = func_form_skip(&data, i) {
+            i += skip;
+            continue;
+        }
         match &mut data[i] {
             Value::Block { series, .. } | Value::Paren { series, .. } => {
                 let child = series.clone();
@@ -490,6 +523,11 @@ fn attach_func_bindings(series: &Series, func_ctx: &Context, user_ctx: &Rc<Conte
             Value::Word { sym, binding, .. }
             | Value::SetWord { sym, binding, .. }
             | Value::GetWord { sym, binding, .. } => {
+                // M60: don't clobber capture bindings set by the analyzer.
+                if matches!(binding, Binding::Closure(_)) {
+                    i += 1;
+                    continue;
+                }
                 if let Some(idx) = func_ctx.index_of(sym) {
                     *binding = Binding::Func(idx);
                 } else if let Some(idx) = user_ctx.index_of(sym) {
@@ -503,6 +541,11 @@ fn attach_func_bindings(series: &Series, func_ctx: &Context, user_ctx: &Rc<Conte
                 if let Some(Value::Word { sym, binding, .. })
                 | Some(Value::GetWord { sym, binding, .. }) = parts.first_mut()
                 {
+                    // M60: don't clobber capture bindings set by the analyzer.
+                    if matches!(binding, Binding::Closure(_)) {
+                        i += 1;
+                        continue;
+                    }
                     if let Some(idx) = func_ctx.index_of(sym) {
                         *binding = Binding::Func(idx);
                     } else if let Some(idx) = user_ctx.index_of(sym) {
@@ -512,6 +555,7 @@ fn attach_func_bindings(series: &Series, func_ctx: &Context, user_ctx: &Rc<Conte
             }
             _ => {}
         }
+        i += 1;
     }
 }
 
@@ -604,6 +648,80 @@ fn rebind_inner(
 }
 
 // ---------------------------------------------------------------------------
+// Closure capture binding (M60)
+// ---------------------------------------------------------------------------
+
+/// Overlay `Binding::Closure(idx)` on every `Word`/`SetWord`/`GetWord` (and
+/// path head) in `series` whose name matches an entry in `captures_map`.
+/// `captures_map` maps freevar names → capture-cell index. Used by the
+/// walker's `closure_native` AFTER `bind_function_body` has run (so params/
+/// locals already have `Binding::Func`, and globals have `Binding::Local`).
+/// This overwrites those with `Binding::Closure(idx)` for captured words.
+///
+/// Recurses into nested `Block`/`Paren` (freevar references may appear in
+/// nested blocks that are `do`ne at call time). Does NOT recurse into
+/// `func`/`does`/`function`/`closure` body blocks — those have their own
+/// scopes (a nested func's body references ITS params, not the outer
+/// closure's captures).
+pub(crate) fn set_closure_bindings(
+    series: &Series,
+    captures_map: &std::collections::HashMap<Symbol, usize>,
+) {
+    let mut data = series.data.borrow_mut();
+    set_closure_bindings_inner(&mut data, captures_map);
+}
+
+fn set_closure_bindings_inner(
+    data: &mut [Value],
+    captures_map: &std::collections::HashMap<Symbol, usize>,
+) {
+    let mut i = 0;
+    while i < data.len() {
+        // Skip nested func/does/function/closure bodies — their words belong
+        // to their own scope, not the closure's captures.
+        if use_body_index(data, i).is_some() {
+            i += 3;
+            continue;
+        }
+        if let Some(skip) = func_form_skip(data, i) {
+            i += skip;
+            continue;
+        }
+        match &mut data[i] {
+            Value::Block { series, .. } | Value::Paren { series, .. } => {
+                let child = series.clone();
+                set_closure_bindings_inner(
+                    // Borrow the child's RefCell (different from the outer).
+                    &mut child.data.borrow_mut(),
+                    captures_map,
+                );
+            }
+            Value::Word { sym, binding, .. }
+            | Value::SetWord { sym, binding, .. }
+            | Value::GetWord { sym, binding, .. } => {
+                if let Some(&idx) = captures_map.get(sym) {
+                    *binding = Binding::Closure(idx);
+                }
+            }
+            Value::Path { parts, .. }
+            | Value::GetPath { parts, .. }
+            | Value::LitPath { parts, .. }
+            | Value::SetPath { parts, .. } => {
+                if let Some(Value::Word { sym, binding, .. })
+                | Some(Value::GetWord { sym, binding, .. }) = parts.first_mut()
+                {
+                    if let Some(&idx) = captures_map.get(sym) {
+                        *binding = Binding::Closure(idx);
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VM dispatch helpers (M26)
 // ---------------------------------------------------------------------------
 
@@ -635,6 +753,9 @@ fn has_foreign_binding_value(v: &Value, user_ctx: &Rc<Context>) -> bool {
         | Value::GetWord { binding, .. } => match binding {
             Binding::Local(ctx, _) => !Rc::ptr_eq(ctx, user_ctx),
             Binding::Func(_) => true, // M29: VM can't resolve via env.call_stack
+            // M60: Closure bindings resolve via the frame's captures cell,
+            // not a foreign context — VM-safe.
+            Binding::Closure(_) => false,
             _ => false,
         },
         Value::Block { series, .. } | Value::Paren { series, .. } => {

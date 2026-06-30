@@ -88,7 +88,7 @@ via `closure`.
 
 ---
 
-## Milestone 60 — `closure!` value + capture cells
+## Milestone 60 — `closure!` value + capture cells ✅ LANDED
 
 The foundational milestone. Adds the `Value::Closure` variant, the
 `ClosureDef` struct, the `Instr::MakeClosure` instruction, the `closure`
@@ -97,7 +97,7 @@ alone. The freevar *capture* fix lands here (the v0.3 escaping-closure bug).
 
 ### Files
 
-- [ ] **Edit: `crates/red-core/src/value.rs`** — add `Value::Closure(Rc<ClosureDef>)`
+- [x] **Edit: `crates/red-core/src/value.rs`** — add `Value::Closure(Rc<ClosureDef>)`
   variant after `Value::Func` (value.rs:254). Define `ClosureDef`:
   ```rust
   pub struct ClosureDef {
@@ -107,11 +107,11 @@ alone. The freevar *capture* fix lands here (the v0.3 escaping-closure bug).
   ```
   Add `Value::closure(func, captures)` constructor. Derive `Debug` for
   `ClosureDef` (delegates to `FuncDef`).
-- [ ] **Edit: `crates/red-core/src/printer.rs`** — `mold`/`form` of
+- [x] **Edit: `crates/red-core/src/printer.rs`** — `mold`/`form` of
   `Value::Closure(_)` emits `#[closure]` placeholder (matches the
   `#[function]` style; no spec/body molding — POC parity with `Func`).
   Inline test: `mold(closure) == "#[closure]"`.
-- [ ] **Edit: `crates/red-core/src/value.rs`** — extend `Binding` with
+- [x] **Edit: `crates/red-core/src/value.rs`** — extend `Binding` with
   `Closure(usize)` variant (the index into `ClosureDef::captures`). Update
   `is_lexical`/`as_lexical` helpers to return false for `Closure`. Update
   every exhaustive `match binding` site (the M22 audit cataloged them:
@@ -121,31 +121,31 @@ alone. The freevar *capture* fix lands here (the v0.3 escaping-closure bug).
   from the closure's capture cell via a new `Env::closure_captures:
   Vec<Vec<Value>>` stack (pushed on closure call, popped on return). VM arm:
   `Instr::LoadCapture(idx)` — see below.
-- [ ] **Edit: `crates/red-core/src/vm_ir.rs`** — add
+- [x] **Edit: `crates/red-core/src/vm_ir.rs`** — add
   `Instr::MakeClosure(spec_idx, body_idx, fv_idx)` (mirrors `MakeFunc`) and
   `Instr::LoadCapture(u32)` / `Instr::SetCapture(u32)` (read/write the current
   frame's capture cell). Add `Frame::captures:
   Option<Rc<Vec<RefCell<Value>>>>` field (None for plain funcs, Some for
   closures) — sized at frame push from the `FuncDef` if it's a closure.
-- [ ] **Edit: `crates/red-eval/src/binding.rs`** — add
+- [x] **Edit: `crates/red-eval/src/binding.rs`** — add
   `bind_closure_body(&mut fd, &env.user_ctx, captures: &[Value])` analogous
   to `bind_function_body` but: (a) for each `sym` in `fd.freevars`, the body
   word's `Binding` becomes `Closure(idx)` (new `Binding` variant) instead of
   `Lexical(d, slot)`; (b) the closure's own `FuncDef.ctx` is seeded with the
   captured values so the walker can read them. **Update the doc at
   binding.rs:19–21** to remove the "closures explicitly out of scope" line.
-- [ ] **Edit: `crates/red-eval/src/vm/lex.rs`** — in `attach_lexical`, when a
+- [x] **Edit: `crates/red-eval/src/vm/lex.rs`** — in `attach_lexical`, when a
   word resolves to a *closure* scope (a new `Scope::is_closure` flag set by
   the `closure` native's analyzer arm), emit `Binding::Closure(idx)` instead
   of `Binding::Lexical(d, slot)`. The freevar *names* still propagate up via
   `AnalysisResult.freevars` as today.
-- [ ] **Edit: `crates/red-eval/src/vm/compiler.rs`** — in
+- [x] **Edit: `crates/red-eval/src/vm/compiler.rs`** — in
   `compile_word`/`compile_setword`, when `Binding::Closure(idx)` is found,
   emit `LoadCapture(idx)`/`SetCapture(idx)` instead of `LoadLocal`/
   `SetLocal`. In the `func`/`does`/`function` detection path, add a parallel
   `closure` form that emits `MakeClosure` (the analyzer already computes
   freevars; reuse `analyze_func_form`).
-- [ ] **Edit: `crates/red-eval/src/vm/vm.rs`** — implement `Instr::MakeClosure`
+- [x] **Edit: `crates/red-eval/src/vm/vm.rs`** — implement `Instr::MakeClosure`
   (analogous to `MakeFunc` but reads the freevar *values* from the current
   frame's `captures`/locals at construction time and stores them into the new
   `ClosureDef.captures`), `Instr::LoadCapture`/`SetCapture` (read/write
@@ -155,7 +155,7 @@ alone. The freevar *capture* fix lands here (the v0.3 escaping-closure bug).
   `func = Some(Rc::clone(&cd.func))`. `ensure_compiled` for a closure
   compiles `cd.func.body` (the body's freevar words now have
   `Binding::Closure(idx)` so the compiler emits `LoadCapture`).
-- [ ] **Edit: `crates/red-eval/src/interp_walker.rs`** — `eval_prefix` arm
+- [x] **Edit: `crates/red-eval/src/interp_walker.rs`** — `eval_prefix` arm
   for `Value::Closure(_)`: invoke the closure's `FuncDef` body with a
   `CallFrame` whose `ctx` is seeded from the captures (clone each capture
   into a fresh slot under the freevar's name), so `resolve_word`'s
@@ -164,7 +164,7 @@ alone. The freevar *capture* fix lands here (the v0.3 escaping-closure bug).
   **Decision: the latter** — seed `fd.ctx` with capture values at call time
   (matches the existing shallow-copy pattern), so the walker needs no new
   `Env` field; only the VM uses `Frame::captures` directly.
-- [ ] **Edit: `crates/red-eval/src/natives/func.rs`** — add `closure_native`
+- [x] **Edit: `crates/red-eval/src/natives/func.rs`** — add `closure_native`
   (arity 2: spec block, body block) and `does_closure_native` (arity 1: body
   block, zero-arg closure). Both build a `FuncDef`, compute freevars via
   `analyze_block`, read the freevar *values* from the current scope (walker:
@@ -172,19 +172,19 @@ alone. The freevar *capture* fix lands here (the v0.3 escaping-closure bug).
   the native handler runs with `&mut Env` so it can read `env.call_stack`),
   build a `ClosureDef`, return `Value::Closure(Rc::new(cd))`. Register in
   `natives/registry.rs` alongside `func`/`does`.
-- [ ] **Edit: `crates/red-eval/src/natives/registry.rs`** — register
+- [x] **Edit: `crates/red-eval/src/natives/registry.rs`** — register
   `closure`, `does` (extended to detect closure? No — add `closure` as a
   distinct word; `does` keeps its `func`-style semantics for back-compat).
   Add `closure?` predicate.
 
 ### Natives
 
-- [ ] `closure [spec] [body]` — like `func` but captures freevar values into
+- [x] `closure [spec] [body]` — like `func` but captures freevar values into
       a `ClosureDef`. Returns `Value::Closure`.
-- [ ] `closure [] [body]` — zero-arg closure (explicit empty spec; covers the
+- [x] `closure [] [body]` — zero-arg closure (explicit empty spec; covers the
       `does`-equivalent case). No separate `does-closure` word.
-- [ ] `closure?` predicate — true on `Value::Closure`.
-- [ ] `function?` extended to return true on `Value::Closure` too (a closure
+- [x] `closure?` predicate — true on `Value::Closure`.
+- [x] `function?` extended to return true on `Value::Closure` too (a closure
       is a function). `closure?`/`function?` are in subset relation.
 
 ### Capture semantics (matches upstream Red, with documented deviation)
@@ -214,46 +214,46 @@ alone. The freevar *capture* fix lands here (the v0.3 escaping-closure bug).
 
 ### Golden fixtures
 
-- [ ] `closure_basic` — `f: closure [x][x + y] y: 10 f 5` → `15`; then
+- [x] `closure_basic` — `f: closure [x][x + y] y: 10 f 5` → `15`; then
       `y: 99 f 5` → still `15` (capture is by value at creation time).
-- [ ] `closure_escape` — `make-adder: func [n][closure [x][x + n]] add5:
+- [x] `closure_escape` — `make-adder: func [n][closure [x][x + n]] add5:
       make-adder 5 add5 10` → `15` (the closure escapes its defining frame;
       the v0.3 frame-chain-walking bug would have returned wrong values or
       panicked here).
-- [ ] `closure_internal_mutation` — `c: closure [][count: 0]` then a wrapper
+- [x] `closure_internal_mutation` — `c: closure [][count: 0]` then a wrapper
       that calls `c` twice with `count: count + 1` in the body — verify the
       closure's own `count` slot persists across invocations (the
       `RefCell<Value>` cell).
-- [ ] `closure_local_shadow` — `c: closure [][acc: 0 acc: 10]` (the closure
+- [x] `closure_local_shadow` — `c: closure [][acc: 0 acc: 10]` (the closure
       has its own `acc` local; outer `acc` is not the capture). Confirm
       closure-local `acc` is independent.
-- [ ] `closure_in_object` — `o: object [base: 100 adder: closure [x][x + base]]
+- [x] `closure_in_object` — `o: object [base: 100 adder: closure [x][x + base]]
       o/adder 5` → `105` (closure captures object field at `closure`-eval
       time — `base` is set before `adder` in the spec, so it's in scope).
       Include the *failing* form `o: object [adder: closure [x][x + base]
       base: 100]` as an error fixture (base unbound at closure creation time).
-- [ ] `closure_recursive` — `fact: closure [n][either n <= 1 [1] [n * fact
+- [x] `closure_recursive` — `fact: closure [n][either n <= 1 [1] [n * fact
       n - 1]] fact 5` → `120` (recursion via the outer `fact` slot, not via
       capture).
 
 ### Tests
 
-- [ ] Inline `#[test]`: `closure` returns a `Value::Closure`.
-- [ ] Inline `#[test]`: `closure? closure [] []` → true; `closure? func [] []`
+- [x] Inline `#[test]`: `closure` returns a `Value::Closure`.
+- [x] Inline `#[test]`: `closure? closure [] []` → true; `closure? func [] []`
       → false.
-- [ ] Inline `#[test]`: `function? closure [] []` → true.
-- [ ] Inline `#[test]`: escaping closure returns the captured value, not a
+- [x] Inline `#[test]`: `function? closure [] []` → true.
+- [x] Inline `#[test]`: escaping closure returns the captured value, not a
       stale frame read (the v0.3 bug regression test).
-- [ ] Inline `#[test]`: capture is by-value (outer write after creation
+- [x] Inline `#[test]`: capture is by-value (outer write after creation
       doesn't propagate).
-- [ ] Inline `#[test]`: closure internal mutation persists across
+- [x] Inline `#[test]`: closure internal mutation persists across
       invocations (the `RefCell` cell).
-- [ ] Inline `#[test]`: closure in object spec captures the field's value at
+- [x] Inline `#[test]`: closure in object spec captures the field's value at
       `closure`-eval time.
-- [ ] Inline `#[test]`: recursive closure works via the outer slot.
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` clean.
-- [ ] Update `crates/red-core/tests/property.rs` to include `Closure` in
+- [x] Inline `#[test]`: recursive closure works via the outer slot.
+- [x] `cargo test --workspace` green; `--features force-walk` green.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- [x] Update `crates/red-core/tests/property.rs` to include `Closure` in
       round-trip (**skip** — `#[closure]` is a placeholder, not reparseable;
       add a separate test asserting `mold(closure)` is the stable string
       `#[closure]`).

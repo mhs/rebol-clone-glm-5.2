@@ -130,6 +130,12 @@ fn try_resolve_object(v: &Value, env: &Env) -> Option<Rc<RefCell<ObjectDef>>> {
     let val = match binding {
         Binding::Local(ctx, idx) => ctx.slot_value(*idx),
         Binding::Func(idx) => env.call_stack.last()?.ctx.slot_value(*idx),
+        // M60: closure capture cell — resolve from the active frame's captures.
+        Binding::Closure(idx) => {
+            let frame = env.call_stack.last()?;
+            let captures = frame.captures.as_ref()?;
+            captures.get(*idx)?.borrow().clone()
+        }
         // Lexical bindings are VM-only; object construction runs on the
         // walker, so a bound word here resolves via `Local`/`Func`/`Unbound`.
         // Treat `Lexical` as unresolvable (no object there).
