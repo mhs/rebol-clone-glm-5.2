@@ -17,7 +17,7 @@ const HELP: &str = "\
 red — a Red subset clone
 
 USAGE:
-    red [--allow-shell] [--walk] [--trace] <file.red> [args...]   Load and evaluate a Red source file
+    red [--allow-shell] [--walk] [--trace] [--module-path <dir>...] [--no-stdlib] <file.red> [args...]   Load and evaluate a Red source file
     red --disasm <file.red>                                       Compile and disassemble the script (no run)
     red --disasm-func <name> <file.red>                           Disassemble a named top-level func
     red                                                           Interactive REPL (quit with `quit`/`exit` or Ctrl-D)
@@ -39,6 +39,13 @@ run. `--disasm-func <name>` disassembles the named top-level
 printed by the CLI (use `print` in the script). Errors print to stderr
 as `*** Error: <msg>` and exit with code 1.
 
+`--module-path <dir>` (repeatable) appends a directory to
+`system/options/module-path`; `import %file.red` searches these
+directories when the file isn't found relative to the cwd. Defaults to
+`[%./]` (the cwd). `--no-stdlib` skips the auto-import of the stdlib
+module (so stdlib words like `str-upper` stay unbound) — useful for
+testing the stdlib's absence.
+
 In REPL mode each line is evaluated against the persistent user context;
 the molded result of each line is printed unless it is `none`. Multi-line
 blocks are supported: an unclosed `[` or `(` prompts for continuation
@@ -56,6 +63,8 @@ fn main() -> ExitCode {
     let mut walk = false;
     let mut trace = false;
     let mut disasm = false;
+    let mut no_stdlib = false;
+    let mut module_paths: Vec<std::path::PathBuf> = Vec::new();
     // `--disasm-func <name>` consumes the next arg as the func name.
     let mut disasm_func: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
@@ -70,6 +79,16 @@ fn main() -> ExitCode {
             trace = true;
         } else if a == "--disasm" {
             disasm = true;
+        } else if a == "--no-stdlib" {
+            no_stdlib = true;
+        } else if a == "--module-path" {
+            // Consume the next arg as a directory; repeatable.
+            if i + 1 >= args.len() {
+                eprintln!("*** Error: --module-path requires a directory argument");
+                return ExitCode::from(1);
+            }
+            module_paths.push(std::path::PathBuf::from(&args[i + 1]));
+            i += 1;
         } else if a == "--disasm-func" {
             // Consume the next arg as the func name; the file path is the
             // positional after it.
@@ -104,11 +123,27 @@ fn main() -> ExitCode {
             println!("{VERSION}");
             ExitCode::SUCCESS
         }
-        [path, rest @ ..] => run_file(path, rest, allow_shell, walk, trace),
+        [path, rest @ ..] => run_file(
+            path,
+            rest,
+            allow_shell,
+            walk,
+            trace,
+            no_stdlib,
+            &module_paths,
+        ),
     }
 }
 
-fn run_file(path: &str, args: &[String], allow_shell: bool, walk: bool, trace: bool) -> ExitCode {
+fn run_file(
+    path: &str,
+    args: &[String],
+    allow_shell: bool,
+    walk: bool,
+    trace: bool,
+    no_stdlib: bool,
+    module_paths: &[std::path::PathBuf],
+) -> ExitCode {
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -121,6 +156,8 @@ fn run_file(path: &str, args: &[String], allow_shell: bool, walk: bool, trace: b
         args: args.to_vec(),
         walk,
         trace,
+        no_stdlib,
+        module_paths: module_paths.to_vec(),
     };
     match red_eval::run_source_with_exit_opts(&src, Box::new(io::stdout()), &opts) {
         Ok((_, code)) => {

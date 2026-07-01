@@ -412,6 +412,13 @@ fn install_system(ctx: &Context) {
         Symbol::new("path"),
         Value::file(StdRc::from(cwd.to_string_lossy().as_ref())),
     );
+    // M63: `module-path` — a block of file! directories searched by
+    // `import %file` when the file isn't found relative to `cwd`. Defaults
+    // to `[%./]` (the cwd); the CLI `--module-path` flag appends entries.
+    opts.ctx.set(
+        Symbol::new("module-path"),
+        Value::block(Series::new(vec![Value::file(StdRc::from("./"))])),
+    );
 
     // system object: options.
     let sys = ObjectDef::new();

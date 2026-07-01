@@ -61,12 +61,19 @@ pub fn run_source_with_exit_output(
 /// (`EvalMode::Walk`) instead of the default bytecode VM — set by the CLI's
 /// `--walk` flag (M29) for debugging and parity comparison, and `trace`
 /// enables per-instr VM tracing to stderr (M31, `--trace` flag).
+///
+/// M63 additions: `module_paths` populates `system/options/module-path` (a
+/// `block!` of `file!` directories searched by `import %file`); `no_stdlib`
+/// skips the auto-import of the stdlib module (so `--no-stdlib` makes stdlib
+/// words unbound — useful for testing the stdlib's absence).
 #[derive(Clone, Debug, Default)]
 pub struct RunOptions {
     pub allow_shell: bool,
     pub args: Vec<String>,
     pub walk: bool,
     pub trace: bool,
+    pub module_paths: Vec<std::path::PathBuf>,
+    pub no_stdlib: bool,
 }
 
 /// Like `run_source_with_exit_output` but applies CLI `RunOptions` (allow-shell
@@ -165,6 +172,37 @@ fn run_series_inner_opts(
                     .ctx
                     .set(Symbol::new("args"), Value::block(args_block));
             }
+        }
+    }
+    // M63: populate `system/options/module-path` from CLI `--module-path`
+    // flags. Overwrites the default `[%./]` set by `install_system`.
+    if !opts.module_paths.is_empty() {
+        let mp_block = Series::new(
+            opts.module_paths
+                .iter()
+                .map(|p| Value::file(std::rc::Rc::from(p.to_string_lossy().as_ref())))
+                .collect(),
+        );
+        if let Some(Value::Object(sys)) = env.user_ctx.get(&Symbol::new("system")) {
+            if let Some(Value::Object(opts_obj)) = sys.borrow().ctx.get(&Symbol::new("options")) {
+                opts_obj
+                    .borrow()
+                    .ctx
+                    .set(Symbol::new("module-path"), Value::block(mp_block));
+            }
+        }
+    }
+    // M63: auto-import the stdlib unless `--no-stdlib`. The stdlib is a
+    // small embedded module (M64 stub surfaced here); its exported words
+    // are aliased bare into `user_ctx` so a script can `print str-upper
+    // "hi"` without an explicit `import`. The compiled module is cached on
+    // `env.stdlib` so the REPL doesn't recompile per line.
+    if !opts.no_stdlib {
+        if let Err(e) = crate::stdlib::ensure_stdlib(&mut env) {
+            // A stdlib failure indicates a build/setup problem (the source
+            // is `include_str!`-embedded; it should never fail at runtime).
+            // Propagate as a hard error so the failure is visible.
+            return Err(Error::Eval(e));
         }
     }
     let block = Value::block(body);
@@ -737,5 +775,139 @@ mod tests {
         assert!(out.contains("Call("), "got:\n{out}");
         // No stdout was captured (we used `io::sink()`), so correctness is
         // "didn't panic / didn't error" — the print native wasn't invoked.
+    }
+
+    // --- M63: CLI flags + system/options extension -------------------------
+
+    use std::cell::RefCell;
+    use std::io::Write;
+    use std::rc::Rc;
+
+    struct BufferWriter(Rc<RefCell<Vec<u8>>>);
+
+    impl Write for BufferWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn run_opts_capture(src: &str, opts: &RunOptions) -> (Result<Value, Error>, Vec<u8>) {
+        let buf = Rc::new(RefCell::new(Vec::<u8>::new()));
+        let result = run_source_with_exit_opts(src, Box::new(BufferWriter(Rc::clone(&buf))), opts);
+        let out = buf.borrow().clone();
+        match result {
+            Ok((v, _code)) => (Ok(v), out),
+            Err(e) => (Err(e), out),
+        }
+    }
+
+    fn out_opts(src: &str, opts: &RunOptions) -> String {
+        String::from_utf8(run_opts_capture(src, opts).1).unwrap()
+    }
+
+    #[test]
+    fn stdlib_auto_import_makes_bare_word_resolvable() {
+        // Default RunOptions auto-imports the stdlib; `str-upper` is an
+        // exported stdlib word, so bare use resolves.
+        assert_eq!(
+            out_opts("print str-upper \"hi\"", &RunOptions::default()).trim(),
+            "HI"
+        );
+    }
+
+    #[test]
+    fn no_stdlib_makes_stdlib_words_unbound() {
+        // `--no-stdlib` skips auto-import; `str-upper` stays unbound.
+        let opts = RunOptions {
+            no_stdlib: true,
+            ..Default::default()
+        };
+        let (res, _) = run_opts_capture("print str-upper \"hi\"", &opts);
+        match res {
+            Err(Error::Eval(EvalError::UnboundWord { sym, .. })) => {
+                assert_eq!(sym.as_str(), "str-upper");
+            }
+            other => panic!("expected UnboundWord, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn module_path_flag_populates_system_options() {
+        // `--module-path /tmp` overwrites the default `[%./]` block. PathBuf
+        // normalization strips the trailing slash, so the mold is `[%/tmp]`.
+        let mut opts = RunOptions::default();
+        opts.module_paths.push(std::path::PathBuf::from("/tmp"));
+        let (v, _) = run_opts_capture("system/options/module-path", &opts);
+        let v = v.expect("module-path probe should succeed");
+        assert_eq!(mold_to_string(&v), "[%/tmp]");
+    }
+
+    #[test]
+    fn module_path_flag_repeatable_appends() {
+        let mut opts = RunOptions::default();
+        opts.module_paths.push(std::path::PathBuf::from("/tmp"));
+        opts.module_paths.push(std::path::PathBuf::from("/usr/lib"));
+        let (v, _) = run_opts_capture("system/options/module-path", &opts);
+        let v = v.expect("module-path probe should succeed");
+        assert_eq!(mold_to_string(&v), "[%/tmp %/usr/lib]");
+    }
+
+    #[test]
+    fn module_path_default_is_cwd_block() {
+        // With no `--module-path`, the default `[%./]` set by install_system
+        // is preserved.
+        let (v, _) = run_opts_capture("system/options/module-path", &RunOptions::default());
+        let v = v.expect("module-path probe should succeed");
+        assert_eq!(mold_to_string(&v), "[%./]");
+    }
+
+    #[test]
+    fn import_file_searches_module_path_when_cwd_misses() {
+        // Write a temp module into a scratch dir, then `import %name.red`
+        // without referencing the dir — `--module-path` should find it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mod_path = dir.path().join("m63_search.red");
+        std::fs::write(&mod_path, "module [x: 42 export 'x]").expect("write");
+        let src = "import %m63_search.red print x";
+        let mut opts = RunOptions::default();
+        opts.module_paths.push(dir.path().to_path_buf());
+        assert_eq!(out_opts(src, &opts).trim(), "42");
+    }
+
+    #[test]
+    fn import_file_without_module_path_still_errors_when_missing() {
+        // Without `--module-path`, a cwd-missing import errors (search
+        // didn't kick in).
+        let src = "import %definitely_not_here_m63.red print x";
+        let (res, _) = run_opts_capture(src, &RunOptions::default());
+        let err = res.expect_err("expected import error");
+        let msg = match err {
+            Error::Eval(EvalError::Native { message, .. }) => message,
+            Error::Eval(EvalError::Raised(ev)) => ev.message.clone(),
+            other => panic!("expected Native/Raised error, got {other:?}"),
+        };
+        assert!(msg.contains("cannot read"), "{msg}");
+    }
+
+    #[test]
+    fn stdlib_cached_across_repeated_calls() {
+        // Calling ensure_stdlib twice shouldn't panic or recompile; the
+        // second call re-aliases the cached module.
+        let src = "print str-upper \"a\" print str-upper \"b\"";
+        assert_eq!(out_opts(src, &RunOptions::default()).trim(), "A\nB");
+    }
+
+    #[test]
+    fn stdlib_does_not_shadow_user_definitions() {
+        // A user-defined `gcd` should shadow the stdlib's `gcd` (Red's
+        // import-shadows-locals behavior — but here the user defines the
+        // word AFTER auto-import, so the SetWord overwrites the aliased
+        // slot).
+        let src = "gcd: func [a b][a + b] print gcd 3 4";
+        assert_eq!(out_opts(src, &RunOptions::default()).trim(), "7");
     }
 }

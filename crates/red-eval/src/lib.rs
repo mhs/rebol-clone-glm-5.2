@@ -26,6 +26,7 @@ pub mod object;
 pub mod parse;
 pub mod path;
 pub mod series;
+pub mod stdlib;
 pub mod strings;
 pub mod vm;
 

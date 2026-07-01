@@ -98,3 +98,30 @@ fn examples_all_run_clean() {
         );
     }
 }
+
+/// M64: targeted test for `examples/modules/main.red` — the end-to-end
+/// integration demo that imports sibling module files (`mathutils.red`,
+/// `stringutils.red`, `tree.red`, `counter.red`) and exercises their
+/// exports. The top-level `examples_all_run_clean` harness is
+/// non-recursive, so it doesn't pick up `examples/modules/*.red`;
+/// furthermore the module files are pure module definitions (not
+/// standalone scripts), so they shouldn't be run individually. This
+/// test runs only `main.red` with `current_dir` set to
+/// `examples/modules/` so the relative `import %name.red` paths resolve.
+#[test]
+fn examples_modules_main_runs_clean() {
+    let root = workspace_root();
+    let modules_dir = root.join("examples/modules");
+    let main_red = modules_dir.join("main.red");
+
+    assert!(
+        main_red.exists(),
+        "examples/modules/main.red not found — harness misconfigured"
+    );
+
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    // Run from `examples/modules/` so `import %mathutils.red` etc.
+    // resolve relative to cwd.
+    cmd.current_dir(&modules_dir).arg(&main_red);
+    cmd.assert().success();
+}

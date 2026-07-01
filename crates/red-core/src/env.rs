@@ -247,6 +247,12 @@ pub struct Env {
     /// so `LoadCapture`/`SetCapture` instrs in closure-body sub-blocks find
     /// their capture cell. `None` outside a closure context.
     pub current_vm_captures: Option<Rc<Vec<RefCell<Value>>>>,
+    /// M63: cache of the auto-imported stdlib module (parsed + evaluated
+    /// once on first `ensure_stdlib` call). Re-aliased into `user_ctx` on
+    /// every `run_source*` call so a fresh REPL-line ctx still gets the
+    /// stdlib words. `None` when `--no-stdlib` is set or `ensure_stdlib`
+    /// hasn't run yet.
+    pub stdlib: Option<Rc<RefCell<crate::value::ModuleDef>>>,
     /// High-water mark of `call_stack.len()` since the last
     /// [`Self::reset_stats`] call. Used by the v0.3 VM milestones to prove
     /// tail-call stack bounds. Only present under the `stats` cargo feature;
@@ -300,6 +306,7 @@ impl Env {
             modules: HashMap::new(),
             modules_by_path: HashMap::new(),
             current_vm_captures: None,
+            stdlib: None,
             #[cfg(feature = "stats")]
             max_frame_depth: 0,
             #[cfg(feature = "stats")]

@@ -319,7 +319,20 @@ fn alias_exports_into_user_ctx(m: &Rc<RefCell<ModuleDef>>, env: &mut Env) {
 /// Form 2 of `import`: read the file, parse it, evaluate it, and produce (or
 /// wrap) a `ModuleDef`. Cached by canonical path on `env.modules_by_path`.
 fn import_file(path: &str, env: &mut Env, span: Span) -> Result<Rc<RefCell<ModuleDef>>, EvalError> {
+    // M63: resolve against cwd first (preserving the existing behavior);
+    // if the file doesn't exist there, search `system/options/module-path`
+    // entries (set by the CLI `--module-path` flag). Falls back to the
+    // original cwd-relative path if no module-path entry matches — so the
+    // error from the final `read_to_string` is unchanged.
     let resolved = crate::io::resolve_path(path, env);
+    let resolved = if resolved.exists() {
+        resolved
+    } else {
+        match search_module_paths(path, env) {
+            Some(p) => p,
+            None => resolved, // preserve the original for the read error
+        }
+    };
     // Canonicalize when possible (so `import %./mod.red` and
     // `import %mod.red` hit the same cache entry). Fall back to the resolved
     // path if canonicalization fails (file missing / permission).
@@ -355,6 +368,61 @@ fn import_file(path: &str, env: &mut Env, span: Span) -> Result<Rc<RefCell<Modul
     module_rc.borrow_mut().source = Some(Rc::from(canonical.to_string_lossy().as_ref()));
     env.modules_by_path.insert(canonical, Rc::clone(&module_rc));
     Ok(module_rc)
+}
+
+/// Public thin wrapper around `eval_body_for_module` for `stdlib`'s use
+/// (M63): the stdlib loader needs to evaluate the embedded stdlib source
+/// as a module body and adopt the resulting `ModuleDef`. The helper is
+/// `pub(crate)` so it doesn't widen the public API surface beyond the crate.
+pub(crate) fn eval_body_for_module_pub(
+    body: &Series,
+    env: &mut Env,
+) -> Result<Option<Rc<RefCell<ModuleDef>>>, EvalError> {
+    eval_body_for_module(body, env)
+}
+
+/// M63: search `system/options/module-path` for `path_str` when the cwd-
+/// relative resolution misses. Returns the first matching existing file;
+/// `None` if no module-path entry contains the file (caller falls back to
+/// the original cwd-relative path so the read error stays informative).
+///
+/// Reads `system/options/module-path` (a `block!` of `file!` values) from
+/// `env.user_ctx`. Best-effort: silently returns `None` if the `system`
+/// object or its `module-path` slot is absent (e.g. in tests that don't
+/// install the full `system` object).
+fn search_module_paths(path_str: &str, env: &Env) -> Option<std::path::PathBuf> {
+    let p = std::path::Path::new(path_str);
+    // Absolute paths skip the search (they were already checked by
+    // `import_file`'s `resolve_path` call).
+    if p.is_absolute() {
+        return None;
+    }
+    let sys = match env.user_ctx.get(&Symbol::new("system")) {
+        Some(Value::Object(obj)) => obj,
+        _ => return None,
+    };
+    let sys_borrow = sys.borrow();
+    let opts = match sys_borrow.ctx.get(&Symbol::new("options")) {
+        Some(Value::Object(o)) => o,
+        _ => return None,
+    };
+    let opts_borrow = opts.borrow();
+    let mp = match opts_borrow.ctx.get(&Symbol::new("module-path")) {
+        Some(Value::Block { series, .. }) => series.clone(),
+        _ => return None,
+    };
+    drop(opts_borrow);
+    drop(sys_borrow);
+    let data = mp.data.borrow();
+    for v in data.iter().skip(mp.index) {
+        if let Value::File { path: dir, .. } = v {
+            let candidate = std::path::Path::new(dir.as_ref()).join(p);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 /// Evaluate `body` in a throwaway child context and return the final value

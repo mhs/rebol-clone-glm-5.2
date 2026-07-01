@@ -396,3 +396,98 @@ fn tempfile_dir() -> PathBuf {
     fs::create_dir_all(&dir).unwrap();
     dir
 }
+
+// --- M63: --module-path / --no-stdlib CLI flags ---------------------------
+
+#[test]
+fn no_stdlib_flag_makes_stdlib_words_unbound() {
+    // `--no-stdlib` skips the auto-import; `str-upper` (a stdlib export)
+    // stays unbound.
+    let dir = tempfile_dir();
+    let path = dir.join("no_stdlib.red");
+    fs::write(&path, "Red [] print str-upper \"hi\"").unwrap();
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg("--no-stdlib")
+        .arg(&path)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("*** Error:"))
+        .stderr(predicates::str::contains("str-upper"));
+}
+
+#[test]
+fn stdlib_auto_imported_by_default() {
+    // Without `--no-stdlib`, the stdlib is auto-imported; `str-upper`
+    // resolves bare.
+    let dir = tempfile_dir();
+    let path = dir.join("stdlib.red");
+    fs::write(&path, "Red [] print str-upper \"hi\"").unwrap();
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg(&path).assert().success().stdout("HI\n");
+}
+
+#[test]
+fn module_path_flag_lets_import_find_off_cwd_module() {
+    // `--module-path <dir>` lets `import %file.red` find a module file
+    // that isn't in the cwd.
+    let dir = tempfile_dir();
+    let mods_dir = dir.join("mods");
+    fs::create_dir_all(&mods_dir).unwrap();
+    fs::write(mods_dir.join("m63cli.red"), "module [x: 42 export 'x]").unwrap();
+    let script = dir.join("main.red");
+    fs::write(&script, "Red [] import %m63cli.red print x").unwrap();
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg("--module-path")
+        .arg(&mods_dir)
+        .arg(&script)
+        .assert()
+        .success()
+        .stdout("42\n");
+}
+
+#[test]
+fn module_path_flag_populates_system_options() {
+    // `--module-path /tmp` is reflected in `system/options/module-path`.
+    let dir = tempfile_dir();
+    let path = dir.join("probe_mp.red");
+    fs::write(&path, "Red [] probe system/options/module-path").unwrap();
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg("--module-path")
+        .arg("/tmp")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("%/tmp"));
+}
+
+#[test]
+fn module_path_repeatable() {
+    // Multiple `--module-path` flags accumulate.
+    let dir = tempfile_dir();
+    let path = dir.join("probe_mp2.red");
+    fs::write(&path, "Red [] probe system/options/module-path").unwrap();
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg("--module-path")
+        .arg("/tmp")
+        .arg("--module-path")
+        .arg("/usr/lib")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("%/tmp"))
+        .stdout(predicates::str::contains("%/usr/lib"));
+}
+
+#[test]
+fn help_documents_module_path_and_no_stdlib() {
+    // `--help` mentions both new flags.
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    let binding = cmd.arg("--help").assert().success();
+    let output = binding.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--module-path"),
+        "help missing --module-path"
+    );
+    assert!(stdout.contains("--no-stdlib"), "help missing --no-stdlib");
+}
