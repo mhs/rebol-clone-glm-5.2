@@ -254,8 +254,17 @@ pub(crate) fn closure_native(
     let spec_block = expect_block(args, 0, "closure")?;
     let body_block = expect_block(args, 1, "closure")?;
     let spec = extract_spec(&spec_block)?;
+    // Deep-clone the body so each `closure_native` invocation starts from
+    // pristine source bindings. Without this, the first call mutates the
+    // shared source-tree body (via `bind_function_body` +
+    // `set_closure_bindings`), leaving `Binding::Closure(idx)` on the
+    // freevar words. The second call's capture scanner then skips them
+    // (`_ => {}` arm in `try_capture_word`), producing an empty captures
+    // cell while the body still references index 0 → panic. Mirrors the
+    // pattern used by `dispatch_block` (interp_walker.rs:143) and
+    // `ensure_compiled` (vm.rs:1480).
     let body_series = match &body_block {
-        Value::Block { series, .. } => series.clone(),
+        Value::Block { series, .. } => crate::binding::deep_clone_series(series),
         _ => unreachable!("expect_block guarantees Block"),
     };
     let mut fd = FuncDef {
@@ -504,6 +513,17 @@ mod tests {
         assert_eq!(mold_to_string(&val(src)), "15");
     }
 
+    // --- two closures from the same factory (Bug 1 regression) ---
+
+    #[test]
+    fn two_closures_from_same_factory() {
+        // Without deep-cloning the body, the second `make-adder` call sees
+        // stale `Binding::Closure(0)` from the first call, skips capture,
+        // and produces an empty captures cell → panic on invocation.
+        let src = "make-adder: func [n][closure [x][x + n]] add5: make-adder 5 add10: make-adder 10 add5 100 add10 100";
+        assert_eq!(mold_to_string(&val(src)), "110");
+    }
+
     // --- closure internal mutation ---
 
     #[test]
@@ -554,5 +574,29 @@ mod tests {
     #[test]
     fn closure_molds_as_placeholder() {
         assert_eq!(mold_to_string(&val("closure [] []")), "#[closure]");
+    }
+
+    // --- Bug 3: control-flow inside closure bodies (capture propagation) ---
+
+    #[test]
+    fn closure_with_do_inside_body() {
+        let src = "count: 0 c: closure [] [do [count: count + 1] count] c c c";
+        assert_eq!(mold_to_string(&val(src)), "3");
+    }
+
+    #[test]
+    fn closure_with_if_inside_body() {
+        let src = "count: 0 c: closure [] [if true [count: count + 1] count] c c c";
+        assert_eq!(mold_to_string(&val(src)), "3");
+    }
+
+    #[test]
+    fn closure_method_with_if_in_module() {
+        // Module method dispatch routes through the walker's
+        // `call_closure_func`, which invokes `eval` on the body; the `if`
+        // native then calls `dispatch_block` → fresh `vm::run`. Without
+        // capture propagation, `LoadCapture` fails.
+        let src = "m: module 'm [count: 0 bump: closure [] [if true [count: count + 1] count] export 'bump] m/bump m/bump m/bump";
+        assert_eq!(mold_to_string(&val(src)), "3");
     }
 }

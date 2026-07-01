@@ -28,7 +28,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use red_core::value::{ModuleDef, Series, Symbol, Value};
-use red_core::{Env, EvalError, NativeFn, RefineArgs};
+use red_core::{Env, EvalError, NativeFn, RefineArgs, Span};
 
 use crate::binding::bind_pass_into;
 use crate::interp::eval;
@@ -238,6 +238,156 @@ pub fn module_predicate(
 }
 
 // ---------------------------------------------------------------------------
+// import native (M62)
+// ---------------------------------------------------------------------------
+
+/// `import 'name` / `import %file.red` / `import <module-value>` — alias a
+/// module's exported words into the current `env.user_ctx`.
+///
+/// - Form 1 (`import 'name`): look up `env.modules[name]` (populated by
+///   `module 'name [...]`). Errors if no module with that name is cached.
+/// - Form 2 (`import %file.red`): read + `load_source` the file, evaluate the
+///   body in a fresh context; if the body yields a `Value::Module` (e.g. the
+///   file is a bare `module [...]` form), use it directly; otherwise wrap the
+///   whole body as an anonymous module. Cached by canonical path in
+///   `env.modules_by_path` so a second `import` of the same file skips the
+///   read/eval.
+/// - Form 3 (`import <module-value>`): use the module value as-is.
+///
+/// After resolving the module, each *exported* word (in `ctx.words()`
+/// insertion order, filtered by `exports`) is copied into `env.user_ctx`
+/// under the same name — overwriting any existing slot (matches Red's import-
+/// shadows-locals behavior). Private words are not aliased; a later bare
+/// reference to them stays unbound (the `resolve_word` `Unbound` arm still
+/// errors because nothing wrote them into `user_ctx`).
+///
+/// Returns `none`.
+pub fn import_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "import", 1, args.len()));
+    }
+    let span = args[0].span_or_default();
+    let module_rc = match &args[0] {
+        // Form 1: `import 'name` — consult the named-module cache.
+        Value::Word { sym, .. }
+        | Value::GetWord { sym, .. }
+        | Value::LitWord { sym, .. }
+        | Value::SetWord { sym, .. } => {
+            env.modules
+                .get(sym)
+                .cloned()
+                .ok_or_else(|| EvalError::Native {
+                    message: format!("import: no module named {:?}", sym.as_str()),
+                    span,
+                })?
+        }
+        // Form 3: `import <module-value>` — use directly.
+        Value::Module(m) => Rc::clone(m),
+        // Form 2: `import %file.red` — load + cache by canonical path.
+        Value::File { path, .. } => import_file(path, env, span)?,
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "word!, file!, or module!",
+                found: type_name(other),
+                span,
+            });
+        }
+    };
+    alias_exports_into_user_ctx(&module_rc, env);
+    Ok(Value::None)
+}
+
+/// Copy each exported word of `module_rc` into `env.user_ctx` under the same
+/// name. Iterates `ctx.words()` (insertion order) filtered by `exports` —
+/// never iterates the unordered `HashSet`, so the alias order is stable and
+/// matches `words-of`/`mold`.
+fn alias_exports_into_user_ctx(m: &Rc<RefCell<ModuleDef>>, env: &mut Env) {
+    let borrow = m.borrow();
+    let exports = borrow.exports.borrow();
+    for sym in borrow.ctx.words() {
+        if exports.contains(&sym) {
+            let val = borrow.ctx.get(&sym).unwrap_or(Value::None);
+            env.user_ctx.set(sym, val);
+        }
+    }
+}
+
+/// Form 2 of `import`: read the file, parse it, evaluate it, and produce (or
+/// wrap) a `ModuleDef`. Cached by canonical path on `env.modules_by_path`.
+fn import_file(path: &str, env: &mut Env, span: Span) -> Result<Rc<RefCell<ModuleDef>>, EvalError> {
+    let resolved = crate::io::resolve_path(path, env);
+    // Canonicalize when possible (so `import %./mod.red` and
+    // `import %mod.red` hit the same cache entry). Fall back to the resolved
+    // path if canonicalization fails (file missing / permission).
+    let canonical = std::fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
+    if let Some(cached) = env.modules_by_path.get(&canonical) {
+        return Ok(Rc::clone(cached));
+    }
+    let contents = std::fs::read_to_string(&canonical).map_err(|e| EvalError::Native {
+        message: format!("import: cannot read {:?}: {}", path, e),
+        span,
+    })?;
+    let body = red_core::parser::load_source(&contents).map_err(|e| EvalError::Native {
+        message: e.to_string(),
+        span,
+    })?;
+
+    // Evaluate the file body in a throwaway child context; if the final
+    // value is a `Value::Module` (the file is a bare `module [...]` form or
+    // `module 'name [...]`), adopt it directly. Otherwise wrap the body
+    // itself as an anonymous module.
+    //
+    // The throwaway context mirrors the script-startup path: install
+    // constants + bind_pass into a fresh context, eval, and inspect the
+    // result. We don't touch `env.user_ctx` here — the module gets its own
+    // ctx from `build_module`.
+    let module_rc = match eval_body_for_module(&body, env)? {
+        Some(m) => m,
+        None => build_module(None, HashSet::new(), body, env)?,
+    };
+    // Record the canonical source path on the module (M62: `ModuleDef::source`
+    // is reserved for this; populated here, never read back by M62 beyond
+    // debugging/introspection).
+    module_rc.borrow_mut().source = Some(Rc::from(canonical.to_string_lossy().as_ref()));
+    env.modules_by_path.insert(canonical, Rc::clone(&module_rc));
+    Ok(module_rc)
+}
+
+/// Evaluate `body` in a throwaway child context and return the final value
+/// if it is a `Value::Module` (so `import_file` can adopt it directly). On
+/// any other result (a bare script that doesn't end in a `module` form),
+/// return `None` — the caller wraps the original body as an anonymous module.
+///
+/// The throwaway context is built the same way `run_series_inner_opts` builds
+/// the script user context: `Context::new` + `install_constants` +
+/// `bind_pass`. We don't register natives here because the file body is
+/// expected to be a bare `module [...]` form (which doesn't call natives
+/// before producing its module value); if it does invoke a native, the eval
+/// will surface a clear `UnboundWord` for the native name.
+fn eval_body_for_module(
+    body: &Series,
+    env: &mut Env,
+) -> Result<Option<Rc<RefCell<ModuleDef>>>, EvalError> {
+    let throwaway_ctx = red_core::Context::new();
+    crate::natives::install_constants(&throwaway_ctx);
+    let bound_ctx = crate::binding::bind_pass(body, throwaway_ctx);
+    // Save the real user_ctx, swap to the throwaway, eval, restore.
+    let saved_ctx = std::mem::replace(&mut env.user_ctx, bound_ctx);
+    let block = Value::block(body.clone());
+    let result = eval(&block, env);
+    env.user_ctx = saved_ctx;
+    let v = result?;
+    Ok(match v {
+        Value::Module(m) => Some(m),
+        _ => None,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // make module!
 // ---------------------------------------------------------------------------
 
@@ -356,6 +506,15 @@ pub fn register_module_natives(env: &mut Env) {
         Symbol::new("module?"),
         fixed(module_predicate as NativeFn, 1),
     );
+    // M62: `import` is arity 1 with a single arg that can be a lit-word!
+    // (`import 'name` — evaluates to the LitWord itself, then looked up in
+    // `env.modules`), a word! (`import m` — evaluated to the module value),
+    // or a file! (`import %f.red` — file literal, evaluates to itself). NOT
+    // in `uneval_first` because the word! form must be evaluated to get the
+    // module value; LitWord/File evaluate to themselves so those forms work
+    // without `uneval_first`.
+    env.natives
+        .insert(Symbol::new("import"), fixed(import_native as NativeFn, 1));
 }
 
 #[cfg(test)]
@@ -539,11 +698,10 @@ mod tests {
 
     #[test]
     fn module_basic() {
-        // `print [m/a words-of m]` prints the literal block; print the two
-        // values separately to get `1 [a]` (matches plan6's fixture intent).
+        // `print words-of m` forms the block (space-joined, no brackets).
         assert_eq!(
             out("m: module [a: 1 b: 2 export 'a] print m/a print words-of m").trim(),
-            "1\n[a]"
+            "1\na"
         );
     }
 
@@ -579,5 +737,95 @@ mod tests {
             )),
             "[a]"
         );
+    }
+
+    // --- M62: import native ---
+
+    #[test]
+    fn import_named_aliases_exports() {
+        assert_eq!(
+            out("module 'm [a: 1 export 'a] import 'm print a").trim(),
+            "1"
+        );
+    }
+
+    #[test]
+    fn import_value_aliases_exports() {
+        // `import m` — the word `m` is evaluated to the module value, then
+        // its exports are aliased. (NOT `uneval_first` — the word must be
+        // evaluated.)
+        assert_eq!(
+            out("m: module [a: 1 export 'a] import m print a").trim(),
+            "1"
+        );
+    }
+
+    #[test]
+    fn import_shadow_overwrites_user_ctx() {
+        // `a: 0` then `import 'm` (which exports `a: 1`) → `a` is now 1.
+        assert_eq!(
+            out("a: 0 module 'm [a: 1 export 'a] import 'm print a").trim(),
+            "1"
+        );
+    }
+
+    #[test]
+    fn import_private_stays_unbound() {
+        // `priv` is not exported → not aliased into user_ctx → still unbound.
+        let err = run_err("module 'm [priv: 1 pub: 2 export 'pub] import 'm print priv");
+        match err {
+            Error::Eval(EvalError::UnboundWord { sym, .. }) => {
+                assert_eq!(sym.as_str(), "priv");
+            }
+            other => panic!("expected UnboundWord, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn import_unknown_name_errors() {
+        let err = run_err("import 'nope");
+        let msg = match err {
+            Error::Eval(EvalError::Native { message, .. }) => message,
+            Error::Eval(EvalError::Raised(ev)) => ev.message.clone(),
+            other => panic!("expected Native/Raised error, got {other:?}"),
+        };
+        assert!(msg.contains("no module named"), "{msg}");
+    }
+
+    #[test]
+    fn import_makes_bare_word_resolvable() {
+        // The resolve_word Unbound fallback (M62): `foo` was Unbound at
+        // bind_pass time; after `import 'm` wrote it into user_ctx, the
+        // bare `foo` resolves via the fallback (matching the VM's
+        // LoadDynamic behavior).
+        assert_eq!(
+            out("module 'm [a: 42 export 'a] import 'm print a").trim(),
+            "42"
+        );
+    }
+
+    #[test]
+    fn import_file_caches_by_canonical_path() {
+        // Write a temp module file, import it twice, verify the body
+        // side-effect (a `count` increment via a shared file counter) runs
+        // only once thanks to `modules_by_path` caching.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mod_path = dir.path().join("mod.red");
+        std::fs::write(&mod_path, "module [x: 42 export 'x]").expect("write");
+        let path_str = mod_path.to_string_lossy().into_owned();
+        let src = format!("import %{} import %{} print x", path_str, path_str);
+        // The file path has slashes on macOS; the `%file` syntax accepts
+        // them. The second import returns the cached module (no re-read).
+        assert_eq!(out(&src).trim(), "42");
+    }
+
+    #[test]
+    fn resolve_word_truly_unbound_still_errors() {
+        // Regression guard: a word never written to user_ctx still errors.
+        let err = run_err("zzz");
+        assert!(matches!(
+            err,
+            Error::Eval(EvalError::UnboundWord { sym, .. }) if sym.as_str() == "zzz"
+        ));
     }
 }

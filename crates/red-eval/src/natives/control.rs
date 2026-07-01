@@ -11,7 +11,7 @@
 //! `needs_rebind`).
 
 use super::{arity_err, expect_block, truthy, type_name, values_equal};
-use crate::interp::{dispatch_block, eval_expression, resolve_compiled_block};
+use crate::interp::{active_captures, dispatch_block, eval_expression, resolve_compiled_block};
 use red_core::printer::mold_to_string;
 use red_core::value::{ErrorValue, Series, Span, Symbol, Value};
 use red_core::{Env, EvalError, RefineArgs};
@@ -69,7 +69,8 @@ pub(crate) fn loop_native(
     let body = expect_block(args, 0, "loop")?;
     if let Some(compiled) = resolve_compiled_block(&body, env) {
         loop {
-            match crate::vm::run((*compiled).clone(), env) {
+            let caps = active_captures(env);
+            match crate::vm::run((*compiled).clone(), env, caps) {
                 Ok(_) => {}
                 Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
                 Err(EvalError::Continue) => continue,
@@ -97,17 +98,6 @@ pub(crate) fn repeat(
     if args.len() != 3 {
         return Err(arity_err(args, "repeat", 3, args.len()));
     }
-    let sym = match &args[0] {
-        Value::LitWord { sym, .. } => sym.clone(),
-        Value::Word { sym, .. } => sym.clone(),
-        other => {
-            return Err(EvalError::TypeError {
-                expected: "word!",
-                found: type_name(other),
-                span: other.span_or_default(),
-            })
-        }
-    };
     let count = match &args[1] {
         Value::Integer { n, .. } => *n,
         other => {
@@ -119,19 +109,14 @@ pub(crate) fn repeat(
         }
     };
     let body = expect_block(args, 2, "repeat")?;
-    let idx = env
-        .user_ctx
-        .index_of(&sym)
-        .ok_or_else(|| EvalError::UnboundWord {
-            sym: sym.clone(),
-            span: args[0].span_or_default(),
-        })?;
+    let slot = crate::series::resolve_loop_slot(&args[0], env)?;
     // M30.2.E: resolve the compiled block once. If VM-mode + cacheable,
     // run a tight `vm::run` loop (no per-iteration dispatch overhead).
     if let Some(compiled) = resolve_compiled_block(&body, env) {
         for n in 1..=count {
-            env.user_ctx.set_slot(idx, Value::integer(n));
-            match crate::vm::run((*compiled).clone(), env) {
+            crate::series::write_loop_slot(&slot, Value::integer(n), env);
+            let caps = active_captures(env);
+            match crate::vm::run((*compiled).clone(), env, caps) {
                 Ok(_) => {}
                 Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
                 Err(EvalError::Continue) => continue,
@@ -142,7 +127,7 @@ pub(crate) fn repeat(
     }
     // Fallback: Walk mode or non-VM-able block.
     for n in 1..=count {
-        env.user_ctx.set_slot(idx, Value::integer(n));
+        crate::series::write_loop_slot(&slot, Value::integer(n), env);
         match dispatch_block(&body, env) {
             Ok(_) => {}
             Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
@@ -159,7 +144,8 @@ pub(crate) fn until(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result
     let body = expect_block(args, 0, "until")?;
     if let Some(compiled) = resolve_compiled_block(&body, env) {
         loop {
-            match crate::vm::run((*compiled).clone(), env) {
+            let caps = active_captures(env);
+            match crate::vm::run((*compiled).clone(), env, caps) {
                 Ok(v) => {
                     if truthy(&v) {
                         return Ok(Value::Logic(true));
@@ -201,11 +187,13 @@ pub(crate) fn while_native(
     let body_compiled = resolve_compiled_block(&body, env);
     if let (Some(cond_c), Some(body_c)) = (cond_compiled, body_compiled) {
         loop {
-            let c = crate::vm::run((*cond_c).clone(), env)?;
+            let caps = active_captures(env);
+            let c = crate::vm::run((*cond_c).clone(), env, caps)?;
             if !truthy(&c) {
                 return Ok(Value::None);
             }
-            match crate::vm::run((*body_c).clone(), env) {
+            let caps = active_captures(env);
+            match crate::vm::run((*body_c).clone(), env, caps) {
                 Ok(_) => {}
                 Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
                 Err(EvalError::Continue) => continue,

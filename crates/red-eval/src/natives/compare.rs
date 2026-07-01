@@ -85,6 +85,15 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
             let b = b.borrow();
             a.len == b.len && a.bits.borrow().as_slice() == b.bits.borrow().as_slice()
         }
+        // Word-family equality by name. Deviation from Red: real Red `=`
+        // on `word!` compares bound values, not names; only `lit-word!`
+        // compares by identity. The POC compares by name for all three
+        // (strictly better than the prior `_ => false` catch-all, which
+        // made any word-family pair unequal). Documented in
+        // `project-brief.md`.
+        (Value::LitWord { sym: x, .. }, Value::LitWord { sym: y, .. }) => x == y,
+        (Value::Word { sym: x, .. }, Value::Word { sym: y, .. }) => x == y,
+        (Value::GetWord { sym: x, .. }, Value::GetWord { sym: y, .. }) => x == y,
         _ => false,
     }
 }
@@ -239,4 +248,43 @@ pub(crate) fn not_op(
     _env: &mut Env,
 ) -> Result<Value, EvalError> {
     Ok(Value::Logic(!truthy(&args[0])))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use red_core::value::{Symbol, Value};
+    use red_core::Span;
+
+    fn lw(s: &str) -> Value {
+        Value::LitWord {
+            sym: Symbol::new(s),
+            span: Span::default(),
+        }
+    }
+    fn word(s: &str) -> Value {
+        Value::Word {
+            sym: Symbol::new(s),
+            binding: red_core::value::Binding::Unbound,
+            span: Span::default(),
+        }
+    }
+
+    #[test]
+    fn litword_equality_by_name() {
+        assert!(values_equal(&lw("foo"), &lw("foo")));
+        assert!(!values_equal(&lw("foo"), &lw("bar")));
+    }
+
+    #[test]
+    fn word_equality_by_name() {
+        assert!(values_equal(&word("foo"), &word("foo")));
+        assert!(!values_equal(&word("foo"), &word("bar")));
+    }
+
+    #[test]
+    fn litword_word_not_equal() {
+        // Different variants are unequal even with the same name.
+        assert!(!values_equal(&lw("foo"), &word("foo")));
+    }
 }

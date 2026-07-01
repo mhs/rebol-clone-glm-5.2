@@ -1,6 +1,6 @@
-"circle area=75"
+circle area=75
 75
-"rect area=24"
+rect area=24
 24
-[name area describe radius]
-[name area describe w h]
+name area describe radius
+name area describe w h

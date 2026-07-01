@@ -602,6 +602,6 @@ mod tests {
     #[test]
     fn object_print_field() {
         let src = "o: make object! [msg: \"hello\"] print o/msg";
-        assert_eq!(out(src), "\"hello\"\n");
+        assert_eq!(out(src), "hello\n");
     }
 }

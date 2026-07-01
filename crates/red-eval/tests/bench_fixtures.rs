@@ -130,7 +130,7 @@ fn parse_heavy_fixture_deterministic() {
 
 #[test]
 fn string_concat_fixture_deterministic() {
-    assert_eq!(run_captured(&load_fixture("string_concat")), "\"1000-\"");
+    assert_eq!(run_captured(&load_fixture("string_concat")), "1000-");
 }
 
 #[test]

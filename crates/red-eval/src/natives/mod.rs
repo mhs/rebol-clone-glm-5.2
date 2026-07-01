@@ -259,24 +259,23 @@ mod tests {
 
     #[test]
     fn prin_concat() {
-        // mold-everything: strings render quoted, so `prin "a" prin "b"`
-        // yields `"a""b"`. Each `prin` takes exactly one argument.
-        assert_eq!(
-            s(&run_capture("prin \"a\" prin \"b\"").unwrap()),
-            "\"a\"\"b\""
-        );
+        // form-based: strings render without quotes, so `prin "a" prin "b"`
+        // yields `ab` (no trailing newline — `prin` doesn't add one).
+        assert_eq!(s(&run_capture("prin \"a\" prin \"b\"").unwrap()), "ab");
     }
 
     #[test]
     fn print_block() {
-        assert_eq!(s(&run_capture("print [1 2 3]").unwrap()), "[1 2 3]\n");
+        // `print` of a block forms each element (space-joined, no brackets).
+        assert_eq!(s(&run_capture("print [1 2 3]").unwrap()), "1 2 3\n");
     }
 
     #[test]
-    fn print_string_molded() {
+    fn print_string_formed() {
+        // `print` forms (not molds) — strings render without quotes.
         assert_eq!(
             s(&run_capture("print \"Hello, World!\"").unwrap()),
-            "\"Hello, World!\"\n"
+            "Hello, World!\n"
         );
     }
 

@@ -234,6 +234,19 @@ pub struct Env {
     /// "module is a singleton by name"). M62's `import 'name` consults
     /// this; M61 only populates it.
     pub modules: HashMap<Symbol, Rc<RefCell<ModuleDef>>>,
+    /// M62: cache of file-imported modules, keyed by canonical source path.
+    /// Populated by `import %file.red`; a second `import %same-file` returns
+    /// the cached module without re-reading/re-evaluating. Mirrors `modules`
+    /// (keyed by name) for the file case.
+    pub modules_by_path: HashMap<PathBuf, Rc<RefCell<ModuleDef>>>,
+    /// Bug 3 fix: the active VM frame's closure captures, made visible to
+    /// `dispatch_block` calls from within natives (`if`/`either`/`do`/loops).
+    /// `Vm::call_native` saves/restores this around each native call, setting
+    /// it to `self.frames.last().captures`. When `dispatch_block` spins up a
+    /// fresh `vm::run`, it reads this to seed the new root frame's `captures`
+    /// so `LoadCapture`/`SetCapture` instrs in closure-body sub-blocks find
+    /// their capture cell. `None` outside a closure context.
+    pub current_vm_captures: Option<Rc<Vec<RefCell<Value>>>>,
     /// High-water mark of `call_stack.len()` since the last
     /// [`Self::reset_stats`] call. Used by the v0.3 VM milestones to prove
     /// tail-call stack bounds. Only present under the `stats` cargo feature;
@@ -285,6 +298,8 @@ impl Env {
             trace_out: None,
             module_stack: Vec::new(),
             modules: HashMap::new(),
+            modules_by_path: HashMap::new(),
+            current_vm_captures: None,
             #[cfg(feature = "stats")]
             max_frame_depth: 0,
             #[cfg(feature = "stats")]

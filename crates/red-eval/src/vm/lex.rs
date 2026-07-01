@@ -250,6 +250,23 @@ fn analyze_inner(series: &Series, scope: &mut Scope, result: &mut AnalysisResult
             i += 2;
             continue;
         }
+        // M62: `module [body]` / `module 'name [body]` — the module body is
+        // NOT lexically scoped. It's dynamically bound at runtime by
+        // `module_native` → `build_module` → `bind_pass_into` against the
+        // module's own ctx. Skip the body here (like `make object!`) and
+        // flag `needs_rebind` so the VM routes the enclosing block through
+        // the walker (the body is compiled fresh inside `build_module`'s
+        // `eval` → `dispatch_block` after `bind_pass_into` has re-bound it).
+        if is_module_form(&data, i) {
+            result.needs_rebind = true;
+            // 2 values for `module [body]`, 3 for `module 'name [body]`.
+            i += if matches!(&data[i + 1], Value::Block { .. }) {
+                2
+            } else {
+                3
+            };
+            continue;
+        }
         // `func [spec] [body]` / `function [spec] [body]` / `does [body]` —
         // descend into the body with a fresh child scope to compute freevars
         // and attach `Binding::Lexical` to function-local words. Unlike
@@ -357,6 +374,42 @@ fn is_object_keyword_form(data: &[Value], i: usize) -> bool {
         return false;
     };
     matches!(sym.as_str(), "object" | "context") && matches!(&data[i + 1], Value::Block { .. })
+}
+
+/// True if `data[i..]` begins a `module [body]` (2 values) or
+/// `module 'name [body]` (3 values) form. M62: the lexical analyzer skips
+/// `module` bodies entirely (like `make object!` bodies) — the module body
+/// is NOT lexically scoped. It's dynamically bound at runtime by
+/// `module_native` → `build_module` → `bind_pass_into` against the module's
+/// own context. Analyzing it here would attach `Binding::Lexical` to body
+/// words, which would be wrong (the body runs with `env.user_ctx` swapped
+/// to the module's ctx, not in a lexical child frame).
+fn is_module_form(data: &[Value], i: usize) -> bool {
+    if i + 1 >= data.len() {
+        return false;
+    }
+    let Value::Word {
+        sym,
+        binding: Binding::Unbound,
+        ..
+    } = &data[i]
+    else {
+        return false;
+    };
+    if sym.as_str() != "module" {
+        return false;
+    }
+    // `module [body]` or `module 'name [body]`.
+    matches!(&data[i + 1], Value::Block { .. })
+        || (i + 2 < data.len()
+            && matches!(
+                &data[i + 1],
+                Value::Word { .. }
+                    | Value::GetWord { .. }
+                    | Value::LitWord { .. }
+                    | Value::SetWord { .. }
+            )
+            && matches!(&data[i + 2], Value::Block { .. }))
 }
 
 // ---------------------------------------------------------------------------

@@ -260,14 +260,14 @@ alone. The freevar *capture* fix lands here (the v0.3 escaping-closure bug).
 
 ---
 
-## Milestone 61 — `module!` value + `module` native
+## Milestone 61 — `module!` value + `module` native ✅ LANDED
 
 Adds the `Value::Module` variant, `ModuleDef` struct, the `module`/`export`
 natives, and the module-context machinery. No `import` yet (M62).
 
 ### Files
 
-- [ ] **Edit: `crates/red-core/src/value.rs`** — add
+- [x] **Edit: `crates/red-core/src/value.rs`** — add
   `Value::Module(Rc<RefCell<ModuleDef>>)` variant (synthetic, no span — like
   `Object`). Define:
   ```rust
@@ -280,14 +280,22 @@ natives, and the module-context machinery. No `import` yet (M62).
   }
   ```
   Add `Value::module(ctx, exports, name)` constructor. Derive `Debug`.
-- [ ] **Edit: `crates/red-core/src/printer.rs`** — `mold`/`form` of
+  *(Deviation: the constructor takes a `ModuleDef` rather than the
+  individual fields — matches `Value::object`'s `ObjectDef`-taking shape.
+  `HashSet` import added to value.rs.)*
+- [x] **Edit: `crates/red-core/src/printer.rs`** — `mold`/`form` of
   `Value::Module(_)` emits `make module! [name: <name> exports: [words] ...]`
   (a reparseable form — `make module!` is a real constructor, and molding a
   module round-trips through `make module!` + the exported-word list. Inline
   test: `mold(m) == "make module! [...]"`.) Follow the `make map!` template
   (`printer.rs` `Map` arm).
-- [ ] **New: `crates/red-eval/src/natives/module.rs`** —
-  - [ ] `module_native` — arity 1–2. Form 1: `module [body]` (anonymous).
+- [x] **New: `crates/red-eval/src/module.rs`** *(top-level, matching
+  `object.rs`/`map.rs`/`bitset.rs` rather than `natives/` per the plan text —
+  the closest structural analog is `object.rs`, which `module` mirrors for
+  the `env.user_ctx` swap; plan6's `natives/module.rs` reference was a
+  plan-vs-tree discrepancy; chose top-level for consistency with the object
+  machinery it reuses).* —
+  - [x] `module_native` — arity 1–2. Form 1: `module [body]` (anonymous).
         Form 2: `module 'name [body]` (named). Form 3: `module/cached 'name
         [body]` (named + cache by name). Builds a fresh `Context`, **swaps
         `env.user_ctx` to it** (mirrors `make_object` at object.rs:104), runs
@@ -295,35 +303,76 @@ natives, and the module-context machinery. No `import` yet (M62).
         collects exported words from a per-module `exports` RefCell, returns
         `Value::Module`. **`export` inside the body** is a native that writes
         to `env.current_module().exports` — see below.
-  - [ ] `export_native` — arity 1. `export 'word` adds `word` to the current
+        *(Form 3 `/cached` refinement deferred — only Forms 1–2 land in M61;
+        caching for Form 2 named modules IS implemented via `env.modules`.)
+        Variable-arity dispatch: `module` is registered as arity 1 with a
+        variable-arity peek in both collectors (walker `collect_call_args` +
+        VM compiler `collect_args`) that gathers 2 args when the next value
+        is a Word-family (named form) and 1 when it's a Block (anonymous).
+        `module` added to `uneval_first` so the name arg is pushed as-is.
+        Avoids the variadic collector's over-collection problem.)*
+  - [x] `export_native` — arity 1. `export 'word` adds `word` to the current
         module's `exports` set (the current module is tracked on
         `Env::module_stack: Vec<Rc<RefCell<ModuleDef>>>` — see below).
         `export [w1 w2 ...]` adds each. Outside a module body, `export` errors
         (`EvalError::Native "export used outside module"`).
-  - [ ] `module?` predicate.
-- [ ] **Edit: `crates/red-core/src/env.rs`** — add
+  - [x] `module?` predicate.
+  - [x] `make_module` (`make module! [...]`) — the mold inverse; interprets
+        `name:`/`exports:` keyword pairs in the spec to pre-populate the
+        module's name/exports, then evaluates the remaining spec items as the
+        body. Added beyond plan6's explicit list because the mold form
+        `make module! [...]` must be evaluable for `do load mold m` to
+        reconstruct.
+- [x] **Edit: `crates/red-core/src/env.rs`** — add
   `pub module_stack: Vec<Rc<RefCell<ModuleDef>>>` (default empty).
   `Env::current_module() -> Option<&Rc<RefCell<ModuleDef>>>` returns
   `module_stack.last()`. Add
   `pub modules: HashMap<Symbol, Rc<RefCell<ModuleDef>>>` for named-module
   caching (M62 `import` consults this; M61 populates it for `module 'name`
   forms).
-- [ ] **Edit: `crates/red-eval/src/natives/registry.rs`** —
+- [x] **Edit: `crates/red-eval/src/natives/registry.rs`** —
   `pub mod module;`, call `module::register_module_natives(&mut env)`
-  alongside the other `register_*` calls.
+  alongside the other `register_*` calls. *(Wired via `lib.rs` `pub mod
+  module;` + `crate::module::register_module_natives(env)` in registry.rs
+  alongside `crate::object::register_object_natives`.)*
+
+### Additional edits beyond plan6's file list (required for exhaustiveness)
+
+- [x] **Edit: `crates/red-eval/src/natives/mod.rs`** — `type_name` gains a
+      `Value::Module(_) => "module!"` arm (otherwise non-exhaustive).
+- [x] **Edit: `crates/red-eval/src/object.rs`** — `words-of`/`values-of`/
+      `reflect` extended with `Value::Module` arms (exports only, `ctx`
+      insertion order — iterate `ctx.words()` and filter by `exports`, never
+      iterate the unordered `HashSet`).
+- [x] **Edit: `crates/red-eval/src/convert.rs`** — `make` native gains a
+      `"module!" | "module"` arm dispatching to `module::make_module`.
+- [x] **Edit: `crates/red-eval/src/interp_walker.rs`** — `Value::Module`
+      arms in `eval_prefix` (data-return), `eval_path_call` (new
+      `select_module_path` helper with method-call semantics), `eval_get_path`
+      (new `get_module_path` helper), `write_path_slot` (export-restricted
+      set-path); plus `select_module_field`/`inside_module_body` helpers
+      enforcing export visibility (private → `UnboundWord` from outside;
+      unrestricted inside the module body via `Rc::ptr_eq` against
+      `env.module_stack` top). `module` variable-arity peek +
+      `uneval_first` addition in `collect_call_args`.
+- [x] **Edit: `crates/red-eval/src/vm/compiler.rs`** — `Value::Module` arm
+      in the const-fold match; `module` variable-arity peek +
+      `uneval_first` addition in `collect_args` (mirrors the walker).
+- [x] **Edit: `crates/red-core/src/lib.rs`** — re-export `ModuleDef` (and
+      `ClosureDef`, which M60 had left un-re-exported).
 
 ### Natives
 
-- [ ] `module [body]` — anonymous module; returns `Value::Module`. Body
+- [x] `module [body]` — anonymous module; returns `Value::Module`. Body
       evaluated in the module's context.
-- [ ] `module 'name [body]` — named module; cached in `env.modules[name]`.
+- [x] `module 'name [body]` — named module; cached in `env.modules[name]`.
       Re-evaluating `module 'name [different body]` returns the *cached*
       module (the body is ignored — matches Red's "module is a singleton by
       name"). Document.
-- [ ] `export 'word` / `export [words]` — marks words for public visibility.
+- [x] `export 'word` / `export [words]` — marks words for public visibility.
       Only valid inside a `module` body.
-- [ ] `module?` predicate.
-- [ ] `words-of`/`values-of` extended to accept `module!` — returns only
+- [x] `module?` predicate.
+- [x] `words-of`/`values-of` extended to accept `module!` — returns only
       *exported* words/values (the public surface). `reflect module 'words` /
       `'values` same. **Inside the module body**, all words are visible;
       `words-of` from outside returns exports only.
@@ -336,37 +385,55 @@ natives, and the module-context machinery. No `import` yet (M62).
 - **Outside the module:** `module/word` path resolves only into `exports`.
   `m/private-word` from outside → `UnboundWord` error (or a `Native` error
   "private word" — decision: `UnboundWord` for consistency with `in_native`'s
-  absent-word behavior at object.rs:334–339).
+  absent-word behavior at object.rs:334–339). *(Implemented: `UnboundWord`,
+  matching plan6's decision note.)*
 - **Bare-word `import`-aliased access:** deferred to M62.
 
 ### Golden fixtures
 
-- [ ] `module_basic` — `m: module [a: 1 b: 2 export 'a] print [m/a words-of m]`
-      → `1 [a]`.
-- [ ] `module_named` — `m: module 'utils [helper: func [x][x * 2] export
+- [x] `module_basic` — `m: module [a: 1 b: 2 export 'a] print [m/a words-of m]`
+      → `1 [a]`. *(Fixture adjusted: `print [m/a words-of m]` would print the
+      literal block since `print` molds rather than reduces; the fixture
+      prints the two values separately to match plan6's intent —
+      `print m/a print words-of m` → `1\n[a]`.)*
+- [x] `module_named` — `m: module 'utils [helper: func [x][x * 2] export
       'helper] print m/helper 5` → `10`. (Named modules are reachable via the
       returned `Value::Module` only until M62.)
-- [ ] `module_private` — `m: module [priv: 42 pub: priv export 'pub] print
+- [x] `module_private` — `m: module [priv: 42 pub: priv export 'pub] print
       m/pub` → `42`; `print m/priv` → `*** Error: ... UnboundWord: priv`.
-- [ ] `module_export_block` — `module [a: 1 b: 2 c: 3 export [a c]] words-of
+      *(Split: the `m/pub` success case is covered by
+      `module_words_of_exports_only`; the `m/priv` error is the
+      `programs_errors/module_private` fixture.)*
+- [x] `module_export_block` — `module [a: 1 b: 2 c: 3 export [a c]] words-of
       m` → `[a c]`.
-- [ ] `module_singleton` — `m1: module 'once [x: 1] m2: module 'once [x: 999]
-      print m2/x` → `1` (cached; second body ignored).
-- [ ] `module_words_of_exports_only` — `m: module [priv: 1 pub: 2 export
+- [x] `module_singleton` — `m1: module 'once [x: 1] m2: module 'once [x: 999]
+      print m2/x` → `1` (cached; second body ignored). *(Fixture adds
+      `export 'x` to the body so `m2/x` is reachable from outside per the
+      visibility rule — plan6's original fixture accessed an unexported `x`
+      from outside, which contradicts its own visibility rule; the fixture
+      exports `x` to make the caching demonstration consistent.)*
+- [x] `module_words_of_exports_only` — `m: module [priv: 1 pub: 2 export
       'pub] words-of m` → `[pub]` (not `[priv pub]`).
-- [ ] `module_mold_roundtrip` — `m: module [a: 1 export 'a] load mold m` →
-      reparseable.
+- [x] `module_mold_roundtrip` — `m: module [a: 1 export 'a] load mold m` →
+      reparseable. *(Fixture is `module_mold.red` using `probe m` since `mold`
+      isn't a script-level native — `probe` molds via the printer internally.
+      Inline `module_mold_load_roundtrips` test covers the `load mold m`
+      parse-round-trip directly.)*
 
 ### Tests
 
-- [ ] Inline `#[test]`: `module` returns `Value::Module`.
-- [ ] Inline `#[test]`: `module? module []` → true; `module? object []` →
+- [x] Inline `#[test]`: `module` returns `Value::Module`.
+- [x] Inline `#[test]`: `module? module []` → true; `module? object []` →
       false.
-- [ ] Inline `#[test]`: `export` outside module errors.
-- [ ] Inline `#[test]`: `words-of` returns exports only.
-- [ ] Inline `#[test]`: private word path from outside errors.
-- [ ] Inline `#[test]`: named module is cached by name.
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+- [x] Inline `#[test]`: `export` outside module errors.
+- [x] Inline `#[test]`: `words-of` returns exports only.
+- [x] Inline `#[test]`: private word path from outside errors.
+- [x] Inline `#[test]`: named module is cached by name.
+- [x] `cargo test --workspace` green; `--features force-walk` green.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` clean *(added
+      beyond plan6's M61 test list, matching M60's bar)*.
+- [x] `cargo fmt --all --check` clean *(added beyond plan6's M61 test list,
+      matching M65's bar)*.
 
 ---
 

@@ -1575,12 +1575,12 @@ mod tests {
     #[test]
     fn print_form_block() {
         let out = run_capture("print form [1 2 3]");
-        assert_eq!(s(&out), "\"1 2 3\"\n");
+        assert_eq!(s(&out), "1 2 3\n");
     }
 
     #[test]
     fn print_to_string_block() {
         let out = run_capture("print to-string [a b c]");
-        assert_eq!(s(&out), "\"a b c\"\n");
+        assert_eq!(s(&out), "a b c\n");
     }
 }

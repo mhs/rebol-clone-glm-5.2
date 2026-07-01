@@ -36,8 +36,8 @@ pub use crate::interp_runner::{
 // of the external `red_eval::` surface — they're `pub(crate)` in
 // `interp_walker`):
 pub(crate) use crate::interp_walker::{
-    call_closure_func, call_user_func, dispatch_block, dispatch_block_reduce, eval_expression,
-    eval_get_path, resolve_compiled_block, set_path_value,
+    active_captures, call_closure_func, call_user_func, dispatch_block, dispatch_block_reduce,
+    eval_expression, eval_get_path, resolve_compiled_block, set_path_value,
 };
 
 use red_core::{Env, EvalError, EvalMode, Value};

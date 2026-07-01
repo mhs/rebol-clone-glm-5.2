@@ -872,9 +872,21 @@ fn compile_word(
             // Generic native call.
             return compile_native_call(c, data, i, scope, sym, idx, fd, span);
         }
-        // Unbound non-native word in operator position: load as dynamic and
-        // let the VM/runtime resolve it (M25 falls back to walker-style
-        // dispatch). For M24 we emit `LoadDynamic` with no args.
+        // Bug 4: unbound non-native word. If it's in operator position
+        // (followed by a potential argument and not the last value), we
+        // can't statically know whether it will resolve at runtime to a
+        // user-func (e.g. via `import` mid-eval) or to a plain value.
+        // Return `MalformedSpec` so `dispatch_block`/`ensure_compiled`
+        // route the enclosing block through the walker, whose
+        // `dispatch_call` handles dynamic func dispatch correctly.
+        // In value position (last value, or followed by an infix native),
+        // emit `LoadDynamic` — the word is meant as a value, not a call.
+        if *i < data.len() && c.infix_native_at(&data[*i]).is_none() {
+            return Err(CompileError {
+                span,
+                kind: CompileErrorKind::MalformedSpec,
+            });
+        }
         let idx = c.intern_symbol(sym.clone());
         c.emit(Instr::LoadDynamic(idx));
         return Ok(());
@@ -1318,8 +1330,10 @@ fn compile_user_call(
 ///   `cause-error`/`exit`/`quit` — `fd.variadic == true`): collect args until
 ///   the next value is an unbound `Word`/`GetWord` naming a native, or block end.
 /// - **`uneval_first`** natives (`repeat`/`foreach`/`forall`/`make`/`to`/
-///   `default`): first arg is pushed as `Const` (the literal value, not
+///   `default`/`module`): first arg is pushed as `Const` (the literal value, not
 ///   evaluated) — matches the walker, which takes the word/name as-is.
+///   (`import` is NOT in this set — `import m` needs `m` evaluated to the
+///   module value, while `import 'name` is a LitWord that evaluates to itself.)
 /// - **Refinements**: walked in `fd.refinements` spec order; for each, if it
 ///   appears in `leading_refs` (path form) or the next value is a matching
 ///   `Value::Refinement` token (spaced form), emit `MarkRefine(ref)` +

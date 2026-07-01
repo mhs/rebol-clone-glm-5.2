@@ -1,7 +1,7 @@
-make map! [a: 1 2 "two" #"c" 3]
-[a 2 #"c"]
-[1 "two" 3]
+make map! [a 1 2 two #"c" 3]
+a 2 c
+1 two 3
 1
-"two"
+two
 3
 3

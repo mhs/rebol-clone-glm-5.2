@@ -1,8 +1,9 @@
 Red []
 ; Milestone 15: string transformation natives — trim, replace, case
 ; changes, suffix?, and the string extensions to find/copy. `print`
-; molds its argument; `none` (from `suffix?` with no extension, or
-; `find` with no match) molds to the bare word `none`.
+; forms its argument (no quotes for strings); `none` (from `suffix?`
+; with no extension, or `find` with no match) forms to the bare word
+; `none`.
 
 print trim "  hi  "
 print trim/all "  a  b  "

@@ -16,16 +16,14 @@ fn workspace_root() -> PathBuf {
 
 #[test]
 fn hello_world_prints_molded_string() {
-    // mold-everything: `print "Hello, World!"` outputs the string with quotes.
+    // `print "Hello, World!"` outputs the string without quotes (form-based
+    // printing, matching Red semantics).
     // The fixture lives under `red-eval`'s golden program suite (the
     // canonical copy with its `.expected` sibling); `examples/hello.red` was
     // removed in M35 to deduplicate.
     let script = workspace_root().join("crates/red-eval/tests/programs/hello.red");
     let mut cmd = Command::cargo_bin("red-cli").unwrap();
-    cmd.arg(script)
-        .assert()
-        .success()
-        .stdout("\"Hello, World!\"\n");
+    cmd.arg(script).assert().success().stdout("Hello, World!\n");
 }
 
 #[test]
@@ -115,7 +113,7 @@ fn trailing_args_exposed_via_system_options() {
         .arg("c")
         .assert()
         .success()
-        .stdout("[\"a\" \"b\" \"c\"]\n");
+        .stdout("a b c\n");
 }
 
 #[test]
@@ -230,7 +228,7 @@ fn flag_between_positional_args() {
         .arg("kept")
         .assert()
         .success()
-        .stdout("[\"kept\"]\n");
+        .stdout("kept\n");
 }
 
 #[test]

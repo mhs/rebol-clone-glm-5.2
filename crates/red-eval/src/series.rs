@@ -26,7 +26,7 @@ use red_core::value::{Series, Span, Symbol, Value};
 use red_core::{Env, EvalError, RefineArgs};
 use std::rc::Rc;
 
-use crate::interp::{dispatch_block, resolve_compiled_block};
+use crate::interp::{active_captures, dispatch_block, resolve_compiled_block};
 use crate::natives::{type_name, values_equal};
 
 // ---------------------------------------------------------------------------
@@ -90,6 +90,7 @@ fn pick_index(cursor: usize, len: usize, n: i64) -> Option<usize> {
 }
 
 /// Loop-variable name: `'word` or bare `word` form.
+#[allow(dead_code)] // kept for introspection; resolve_loop_slot supersedes it.
 fn loop_word(v: &Value) -> Result<Symbol, EvalError> {
     match v {
         Value::LitWord { sym, .. } => Ok(sym.clone()),
@@ -102,14 +103,108 @@ fn loop_word(v: &Value) -> Result<Symbol, EvalError> {
     }
 }
 
-/// Pre-declared slot for a loop word (allocated by the binding pass).
-fn loop_slot(sym: &Symbol, env: &Env) -> Result<usize, EvalError> {
-    env.user_ctx
-        .index_of(sym)
-        .ok_or_else(|| EvalError::UnboundWord {
-            sym: sym.clone(),
-            span: Span::default(),
-        })
+/// A writable location for a loop variable, resolved from the word's
+/// `Binding`. Mirrors `set_one`'s binding dispatch (`natives/words.rs`) so
+/// loop variables work inside `func` bodies (where the slot lives in
+/// `env.call_stack.last().ctx`, not `env.user_ctx`) and inside `closure`
+/// bodies (where the slot lives in the frame's capture cell).
+pub(crate) enum LoopSlot {
+    /// Write into a specific context slot (`Binding::Local` or `Unbound`
+    /// resolved to `user_ctx`).
+    Ctx(std::rc::Rc<red_core::Context>, usize),
+    /// Write into the active call frame's per-call context (`Binding::Func`).
+    Frame(usize),
+    /// Write into the active frame's closure capture cell (`Binding::Closure`).
+    Captures(usize),
+}
+
+/// Resolve `word` (the loop-variable operand) to a `LoopSlot` the loop native
+/// can write to each iteration. `word` is `args[0]` — a `LitWord` or `Word`.
+pub(crate) fn resolve_loop_slot(word: &Value, env: &Env) -> Result<LoopSlot, EvalError> {
+    let span = word.span_or_default();
+    match word {
+        Value::LitWord { sym, .. } => {
+            // `'word` form: no binding carried, resolve by name in user_ctx.
+            let idx = env
+                .user_ctx
+                .index_of(sym)
+                .ok_or_else(|| EvalError::UnboundWord {
+                    sym: sym.clone(),
+                    span,
+                })?;
+            Ok(LoopSlot::Ctx(std::rc::Rc::clone(&env.user_ctx), idx))
+        }
+        Value::Word { sym, binding, .. } => match binding {
+            red_core::value::Binding::Local(ctx, idx) => {
+                Ok(LoopSlot::Ctx(std::rc::Rc::clone(ctx), *idx))
+            }
+            red_core::value::Binding::Func(idx) => {
+                if env.call_stack.is_empty() {
+                    return Err(EvalError::UnboundWord {
+                        sym: sym.clone(),
+                        span,
+                    });
+                }
+                Ok(LoopSlot::Frame(*idx))
+            }
+            red_core::value::Binding::Closure(idx) => {
+                if env.call_stack.is_empty()
+                    || env
+                        .call_stack
+                        .last()
+                        .and_then(|f| f.captures.as_ref())
+                        .is_none()
+                {
+                    return Err(EvalError::UnboundWord {
+                        sym: sym.clone(),
+                        span,
+                    });
+                }
+                Ok(LoopSlot::Captures(*idx))
+            }
+            red_core::value::Binding::Unbound => {
+                let idx = env
+                    .user_ctx
+                    .index_of(sym)
+                    .ok_or_else(|| EvalError::UnboundWord {
+                        sym: sym.clone(),
+                        span,
+                    })?;
+                Ok(LoopSlot::Ctx(std::rc::Rc::clone(&env.user_ctx), idx))
+            }
+            red_core::value::Binding::Lexical(_, _) => Err(EvalError::Native {
+                message: format!(
+                    "lexical loop binding for {:?} not supported in walker",
+                    sym.as_str()
+                ),
+                span,
+            }),
+        },
+        other => Err(EvalError::TypeError {
+            expected: "word!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
+/// Write one iteration's value to the resolved loop slot.
+pub(crate) fn write_loop_slot(slot: &LoopSlot, val: Value, env: &mut Env) {
+    match slot {
+        LoopSlot::Ctx(ctx, idx) => ctx.set_slot(*idx, val),
+        LoopSlot::Frame(idx) => {
+            if let Some(frame) = env.call_stack.last_mut() {
+                frame.ctx.set_slot(*idx, val);
+            }
+        }
+        LoopSlot::Captures(idx) => {
+            if let Some(frame) = env.call_stack.last_mut() {
+                if let Some(caps) = frame.captures.as_ref() {
+                    *caps[*idx].borrow_mut() = val;
+                }
+            }
+        }
+    }
 }
 
 fn arity(args: &[Value], native: &str, expected: usize, got: usize) -> EvalError {
@@ -912,8 +1007,7 @@ fn foreach(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, E
     if args.len() != 3 {
         return Err(arity(args, "foreach", 3, args.len()));
     }
-    let sym = loop_word(&args[0])?;
-    let idx = loop_slot(&sym, env)?;
+    let slot = resolve_loop_slot(&args[0], env)?;
     let (series, _, _) = extract_series(&args[1])?;
     let body = body_block(args, 2, "foreach")?;
 
@@ -928,9 +1022,10 @@ fn foreach(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, E
             }
             data[i].clone()
         };
-        env.user_ctx.set_slot(idx, v);
+        write_loop_slot(&slot, v, env);
         let result = if let Some(ref c) = compiled {
-            crate::vm::run((**c).clone(), env)
+            let caps = active_captures(env);
+            crate::vm::run((**c).clone(), env, caps)
         } else {
             dispatch_block(&body, env)
         };
@@ -955,13 +1050,11 @@ fn forall(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
     if args.len() != 3 {
         return Err(arity(args, "forall", 3, args.len()));
     }
-    let sym = loop_word(&args[0])?;
-    let idx = loop_slot(&sym, env)?;
+    let slot = resolve_loop_slot(&args[0], env)?;
     let (mut series, span, is_paren) = extract_series(&args[1])?;
     let body = body_block(args, 2, "forall")?;
 
-    env.user_ctx
-        .set_slot(idx, mk_series(series.clone(), span, is_paren));
+    write_loop_slot(&slot, mk_series(series.clone(), span, is_paren), env);
     let compiled = resolve_compiled_block(&body, env);
     let mut last = Value::None;
     loop {
@@ -969,10 +1062,10 @@ fn forall(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
             break;
         }
         // Refresh the word so the body sees the current cursor.
-        env.user_ctx
-            .set_slot(idx, mk_series(series.clone(), span, is_paren));
+        write_loop_slot(&slot, mk_series(series.clone(), span, is_paren), env);
         let result = if let Some(ref c) = compiled {
-            crate::vm::run((**c).clone(), env)
+            let caps = active_captures(env);
+            crate::vm::run((**c).clone(), env, caps)
         } else {
             dispatch_block(&body, env)
         };
@@ -1181,7 +1274,7 @@ mod tests {
     fn append_visible_to_alias() {
         // Shared storage: appending through `b` is visible in `a`.
         let out = run_capture("a: [1 2] b: a append b 3 print a");
-        assert_eq!(s(&out), "[1 2 3]\n");
+        assert_eq!(s(&out), "1 2 3\n");
     }
 
     #[test]
@@ -1218,6 +1311,24 @@ mod tests {
         // forall binds word to the positioned series and prints each value.
         let out = run_capture("forall 'x [1 2 3][print first x]");
         assert_eq!(s(&out), "1\n2\n3\n");
+    }
+
+    // --- Bug 2: loop vars inside func bodies (binding dispatch) ---
+
+    #[test]
+    fn foreach_inside_func_body() {
+        let out = run_capture(
+            "to-chars: func [s][result: copy [] foreach ch s [append result ch] result] print to-chars [a b c]",
+        );
+        assert_eq!(s(&out), "a b c\n");
+    }
+
+    #[test]
+    fn repeat_inside_func_body() {
+        let out = run_capture(
+            "sum-to: func [n][total: 0 repeat i n [total: total + i] total] print sum-to 5",
+        );
+        assert_eq!(s(&out), "15\n");
     }
 
     // --- Predicates ---
@@ -1288,7 +1399,7 @@ mod tests {
     #[test]
     fn poke_mutates_shared_storage() {
         let out = run_capture("a: [1 2 3] poke a 2 9 print a");
-        assert_eq!(s(&out), "[1 9 3]\n");
+        assert_eq!(s(&out), "1 9 3\n");
     }
 
     // --- Mutation ---
@@ -1298,32 +1409,32 @@ mod tests {
         // `insert` mutates shared storage; check via an alias since the
         // returned series is positioned at the inserted element.
         let out = run_capture("a: [1 2 3] insert a 9 print a");
-        assert_eq!(s(&out), "[9 1 2 3]\n");
+        assert_eq!(s(&out), "9 1 2 3\n");
     }
 
     #[test]
     fn change_at_cursor() {
         let out = run_capture("a: [1 2 3] change a 9 print a");
-        assert_eq!(s(&out), "[9 2 3]\n");
+        assert_eq!(s(&out), "9 2 3\n");
     }
 
     #[test]
     fn remove_at_cursor() {
         let out = run_capture("a: [1 2 3] remove a print a");
-        assert_eq!(s(&out), "[2 3]\n");
+        assert_eq!(s(&out), "2 3\n");
     }
 
     #[test]
     fn clear_truncates_from_cursor() {
         let out = run_capture("a: [1 2 3] clear next a print a");
-        assert_eq!(s(&out), "[1]\n");
+        assert_eq!(s(&out), "1\n");
     }
 
     #[test]
     fn take_removes_and_returns() {
         assert_eq!(mold_val(&val("take [1 2 3]")), "1");
         let out = run_capture("a: [1 2 3] take a print a");
-        assert_eq!(s(&out), "[2 3]\n");
+        assert_eq!(s(&out), "2 3\n");
     }
 
     #[test]
@@ -1336,7 +1447,7 @@ mod tests {
     #[test]
     fn copy_is_independent() {
         let out = run_capture("a: [1 2] b: copy a append b 3 print a print b");
-        assert_eq!(s(&out), "[1 2]\n[1 2 3]\n");
+        assert_eq!(s(&out), "1 2\n1 2 3\n");
     }
 
     #[test]
@@ -1480,7 +1591,7 @@ mod tests {
     fn shared_storage_mutation_via_aliases() {
         // Multiple aliases of the same storage see appends.
         let out = run_capture("a: [1] b: a append a 2 append b 3 print a");
-        assert_eq!(s(&out), "[1 2 3]\n");
+        assert_eq!(s(&out), "1 2 3\n");
     }
 
     // --- M13: refinements ---

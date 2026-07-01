@@ -1,5 +1,5 @@
 == make error! "simple message"
 == make error! [code: 42 type: 'math message: "division failed"]
-'io
+io
 99
 == [1 2 3]

@@ -88,20 +88,28 @@ pub(crate) fn use_body_index(data: &[Value], i: usize) -> Option<usize> {
     }
 }
 
-/// If `data[i]` begins a `func`/`function`/`does` form, return the number of
-/// values the form consumes (so callers can skip the body block and avoid
-/// collecting its SetWords into the outer context). The body's locals are
-/// scoped to the function-local context built at runtime by `func_native`/
-/// `function_native`/`does_native` via `bind_function_body`.
+/// If `data[i]` begins a `func`/`function`/`does`/`closure`/`module` form,
+/// return the number of values the form consumes (so callers can skip the
+/// body block and avoid collecting its SetWords into the outer context).
+/// The body's locals are scoped to the function-local or module-local context
+/// built at runtime by `func_native`/`function_native`/`does_native`/
+/// `closure_native`/`module_native` via `bind_function_body`/
+/// `bind_pass_into`.
 ///
 /// Forms:
 /// - `func [spec] [body]` / `function [spec] [body]` / `closure [spec] [body]`
 ///   → consumes 3 values.
 /// - `does [body]` → consumes 2 values.
+/// - `module [body]` → consumes 2 values. (M62)
+/// - `module 'name [body]` → consumes 3 values. (M62)
 ///
-/// `make function! [...]` is handled at eval time (not a bare word form) and
-/// is not skipped here — its body SetWords are collected, but since the
-/// body is deep-cloned and bound at `make` time this is harmless.
+/// `make function! [...]` / `make object! [...]` are handled at eval time
+/// (not bare word forms) and are not skipped here — their body SetWords are
+/// collected, but since the body is deep-cloned and bound at `make` time
+/// this is harmless. (M62 note: `make object!` body SetWords do leak into
+/// `user_ctx` as `none`-valued slots; this is pre-existing M18 behavior and
+/// not changed by M62. The `module` native does not have this issue because
+/// `func_form_skip` skips its body here.)
 pub(crate) fn func_form_skip(data: &[Value], i: usize) -> Option<usize> {
     let Value::Word {
         sym,
@@ -127,6 +135,33 @@ pub(crate) fn func_form_skip(data: &[Value], i: usize) -> Option<usize> {
             // `does [body]` — need at least 2 values.
             if i + 1 < data.len() && matches!(&data[i + 1], Value::Block { .. }) {
                 Some(2)
+            } else {
+                None
+            }
+        }
+        "module" => {
+            // M62: `module [body]` (2 values) or `module 'name [body]` (3
+            // values). The name is a word-family literal (Word/GetWord/
+            // LitWord/SetWord). Skipping the body here prevents its
+            // SetWords from being pre-allocated in the outer user_ctx —
+            // they belong to the module's own ctx (allocated at eval time
+            // by `build_module` → `bind_pass_into`). Without this skip,
+            // `resolve_word`'s M62 `user_ctx` fallback would resolve bare
+            // references to private module words as `none` (the leaked
+            // pre-allocated slot value) instead of erroring `UnboundWord`.
+            if i + 1 < data.len() && matches!(&data[i + 1], Value::Block { .. }) {
+                Some(2)
+            } else if i + 2 < data.len()
+                && matches!(
+                    &data[i + 1],
+                    Value::Word { .. }
+                        | Value::GetWord { .. }
+                        | Value::LitWord { .. }
+                        | Value::SetWord { .. }
+                )
+                && matches!(&data[i + 2], Value::Block { .. })
+            {
+                Some(3)
             } else {
                 None
             }

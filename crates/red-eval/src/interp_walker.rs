@@ -81,6 +81,20 @@ pub fn eval(block: &Value, env: &mut Env) -> Result<Value, EvalError> {
 ///
 /// M29 flips `Env::mode` to `Vm` by default; until then, the shim exists so
 /// VM-mode tests can exercise native recursion through the VM (M26).
+/// Bug 3: derive the active closure captures to propagate into a fresh
+/// `vm::run` root frame. Checks the walker's call stack first (for
+/// walker-invoked closures, e.g. module method dispatch), then falls back
+/// to `env.current_vm_captures` (for VM-invoked closures, where
+/// `Vm::call_native` saved the current frame's captures before calling
+/// the native). Returns `None` outside a closure context — the common
+/// case, so the `or_else` short-circuits cheaply.
+pub(crate) fn active_captures(env: &Env) -> Option<Rc<Vec<std::cell::RefCell<Value>>>> {
+    env.call_stack
+        .last()
+        .and_then(|f| f.captures.clone())
+        .or_else(|| env.current_vm_captures.clone())
+}
+
 pub(crate) fn dispatch_block(block: &Value, env: &mut Env) -> Result<Value, EvalError> {
     if env.mode == EvalMode::Walk {
         return eval(block, env);
@@ -89,6 +103,8 @@ pub(crate) fn dispatch_block(block: &Value, env: &mut Env) -> Result<Value, Eval
         Value::Block { series, .. } | Value::Paren { series, .. } => series.clone(),
         _ => return Ok(block.clone()),
     };
+    // Bug 3: captures to seed the fresh `vm::run` root frame (if any).
+    let captures = active_captures(env);
     // M27: check the Env-level block cache by Series identity before
     // recompiling. Safe without explicit invalidation because `bind`/`use`
     // deep-clone the series (new `Rc` → new identity → miss) and `user_ctx`
@@ -117,7 +133,7 @@ pub(crate) fn dispatch_block(block: &Value, env: &mut Env) -> Result<Value, Eval
     if let Some(cached) = env.block_cache.get(&cache_key).cloned() {
         let expected_span = crate::vm::compiler::block_source_span(&series);
         if cached.source_span == expected_span {
-            return crate::vm::run((*cached).clone(), env);
+            return crate::vm::run((*cached).clone(), env, captures);
         }
     }
     // `bind`/`use` may rebind words to a child context the VM can't lexically
@@ -144,7 +160,7 @@ pub(crate) fn dispatch_block(block: &Value, env: &mut Env) -> Result<Value, Eval
     match crate::vm::compiler::compile_block(&compile_series, &mut scope, &registry) {
         Ok(compiled) if !compiled.needs_rebind => {
             env.block_cache.insert(cache_key, Rc::new(compiled.clone()));
-            crate::vm::run(compiled, env)
+            crate::vm::run(compiled, env, captures)
         }
         _ => eval(block, env),
     }
@@ -211,13 +227,15 @@ pub(crate) fn dispatch_block_reduce(block: &Value, env: &mut Env) -> Result<Valu
     if env.mode == EvalMode::Walk || has_foreign_bindings(&series, &env.user_ctx) {
         return reduce_walker(&series, env);
     }
+    // Bug 3: captures to propagate.
+    let captures = active_captures(env);
     // M27: Env-level block cache (same identity key + M29 safety fix as
     // `dispatch_block` — verify `source_span` to catch allocator-reuse).
     let cache_key = (Rc::as_ptr(&series.data) as usize, series.index);
     if let Some(cached) = env.block_cache.get(&cache_key).cloned() {
         let expected_span = crate::vm::compiler::block_source_span(&series);
         if cached.source_span == expected_span {
-            return crate::vm::run_reduce((*cached).clone(), env);
+            return crate::vm::run_reduce((*cached).clone(), env, captures);
         }
     }
     let registry = crate::vm::compiler::NativeRegistry::from_env(env);
@@ -227,7 +245,7 @@ pub(crate) fn dispatch_block_reduce(block: &Value, env: &mut Env) -> Result<Valu
     match crate::vm::compiler::compile_block_reduce(&compile_series, &mut scope, &registry) {
         Ok(compiled) if !compiled.needs_rebind => {
             env.block_cache.insert(cache_key, Rc::new(compiled.clone()));
-            crate::vm::run_reduce(compiled, env)
+            crate::vm::run_reduce(compiled, env, captures)
         }
         _ => reduce_walker(&series, env),
     }
@@ -1866,7 +1884,18 @@ fn resolve_word(
             Ok(captures[*idx].borrow().clone())
         }
         Binding::Unbound => {
-            if let Some(fd) = env.natives.get(sym) {
+            // M62: parity with the VM's `LoadDynamic` (vm.rs `LoadDynamic`
+            // arm) — consult `env.user_ctx` *first*, then the native
+            // registry. This is the one v0.5 behavior change: a bare word
+            // that was `Unbound` at `bind_pass` time (before any eval) can
+            // be resolved at eval time if a later `import`/`set` populated
+            // the user context. Flipping the order (user_ctx before
+            // natives) matches the VM, so a user `set 'print ...` shadows
+            // the `print` native in both modes. See plan6-closures-modules.md
+            // M62 "resolve_word behavior change".
+            if let Some(v) = env.user_ctx.get(sym) {
+                Ok(v)
+            } else if let Some(fd) = env.natives.get(sym) {
                 Ok(Value::Func(Rc::clone(fd)))
             } else {
                 Err(EvalError::UnboundWord {
@@ -1934,10 +1963,15 @@ fn write_setword(
             *captures[*idx].borrow_mut() = val;
             Ok(())
         }
-        Binding::Unbound => Err(EvalError::UnboundWord {
-            sym: sym.clone(),
-            span,
-        }),
+        Binding::Unbound => {
+            // M62: parity with the VM's `SetDynamic` (vm.rs `SetDynamic`
+            // arm) — write into `env.user_ctx`. `Context::set` allocates a
+            // fresh slot for unknown names, so a `SetWord` on a late-bound
+            // (imported) word succeeds. Previously this arm errored, which
+            // diverged from the VM.
+            env.user_ctx.set(sym.clone(), val);
+            Ok(())
+        }
         // See `resolve_word`: lexical bindings are VM-only; the walker never
         // writes through one. Surface as an error if reached.
         Binding::Lexical(_, _) => Err(EvalError::Native {

@@ -94,7 +94,11 @@ const _: () = assert!(
 /// match `run_series_inner_opts`'s top-level contract (the exit code is
 /// discarded here — M29 wires the VM into `run_source*` for CLI exit-code
 /// propagation).
-pub fn run(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
+pub fn run(
+    block: CompiledBlock,
+    env: &mut Env,
+    captures: Option<Rc<Vec<std::cell::RefCell<Value>>>>,
+) -> Result<Value, EvalError> {
     let (natives_by_idx, native_names_by_idx) = build_natives_by_idx(env);
     // M30.1.C: drain the reusable scratch Vecs from `env` instead of
     // allocating fresh ones. Each `dispatch_block`→`vm::run` call previously
@@ -126,7 +130,7 @@ pub fn run(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
         depth: 0,
         block,
         pc: 0,
-        captures: None,
+        captures,
     });
     vm.frame_gen = vm.frame_gen.wrapping_add(1);
     let result = vm.run_loop();
@@ -150,7 +154,11 @@ pub fn run(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
 /// remaining stack into a `Value::Block` — matching the walker's `reduce`
 /// semantics (one entry per expression). Used by the `reduce` native in VM
 /// mode (M26).
-pub fn run_reduce(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalError> {
+pub fn run_reduce(
+    block: CompiledBlock,
+    env: &mut Env,
+    captures: Option<Rc<Vec<std::cell::RefCell<Value>>>>,
+) -> Result<Value, EvalError> {
     let (natives_by_idx, native_names_by_idx) = build_natives_by_idx(env);
     // M30.1.C: reuse the scratch Vecs (same drain/restore as `run`).
     let frames_pool = std::mem::take(&mut env.vm_frames_pool);
@@ -178,7 +186,7 @@ pub fn run_reduce(block: CompiledBlock, env: &mut Env) -> Result<Value, EvalErro
         depth: 0,
         block,
         pc: 0,
-        captures: None,
+        captures,
     });
     vm.frame_gen = vm.frame_gen.wrapping_add(1);
     let result = vm.run_loop_reduce();
@@ -1072,6 +1080,16 @@ impl<'env> Vm<'env> {
         // for argc ≤ 8 (stack-allocated). The native can't touch
         // `self.stack` (it only has `&mut Env`), so we truncate *after*
         // the call returns.
+        // Bug 3: expose the current VM frame's captures to any
+        // `dispatch_block` call invoked from within the native (`if`/
+        // `either`/`do`/loops). `dispatch_block` reads
+        // `env.current_vm_captures` to seed the fresh `vm::run` root frame
+        // so `LoadCapture`/`SetCapture` instrs in closure-body sub-blocks
+        // find their capture cell.
+        let prev_captures = std::mem::replace(
+            &mut self.env.current_vm_captures,
+            self.frames.last().and_then(|f| f.captures.clone()),
+        );
         let result = if argc <= INLINE_ARGS_CAP {
             // M30.1.A: stack-allocated args fast path. `[Value; 8]` lives on
             // the call frame (512 bytes) — cheaper than a heap alloc for the
@@ -1095,6 +1113,8 @@ impl<'env> Vm<'env> {
         };
         // Pop argc args regardless of success/failure.
         self.stack.truncate(start);
+        // Bug 3: restore the captures context.
+        self.env.current_vm_captures = prev_captures;
         match result {
             Ok(v) => self.stack.push(v),
             Err(EvalError::Return(v)) => {
@@ -1768,7 +1788,7 @@ mod tests {
     /// Run `src` through the VM and return the result.
     fn run_vm(src: &str) -> Value {
         let (block, mut env) = compile_for_vm(src);
-        run(block, &mut env).expect("VM run failed")
+        run(block, &mut env, None).expect("VM run failed")
     }
 
     /// M37: every registered native's fixed arity fits within
@@ -1877,7 +1897,7 @@ mod tests {
     #[test]
     fn vm_foreach_print() {
         let (block, mut env, buf) = compile_for_vm_captured("foreach x [1 2 3][print x]");
-        let v = run(block, &mut env).expect("VM run failed");
+        let v = run(block, &mut env, None).expect("VM run failed");
         assert!(matches!(v, Value::None), "got {}", mold_to_string(&v));
         assert_eq!(buf.borrow().as_slice(), b"1\n2\n3\n");
     }
@@ -1946,7 +1966,7 @@ mod tests {
         // The top-level `compile_block` call in `compile_for_vm_captured`
         // bumps the counter by 1. Record the baseline after that.
         let baseline = crate::vm::compiler::read_compile_counter();
-        let v = run(block, &mut env).expect("VM run failed");
+        let v = run(block, &mut env, None).expect("VM run failed");
         // First `square 5` -> `ensure_compiled` compiles the body (+1); second
         // `square 6` -> cache hit (+0). Delta must be exactly 1.
         let after = crate::vm::compiler::read_compile_counter();
@@ -1976,7 +1996,7 @@ mod tests {
     fn vm_bind_func_invalidates_cache() {
         let (block, mut env, _buf) =
             compile_for_vm_captured("y: 0 f: func [x][x + 1] f 5 bind :f 'y");
-        let v = run(block, &mut env).expect("VM run failed");
+        let v = run(block, &mut env, None).expect("VM run failed");
         // `f 5` populates the cache; `bind :f 'y` invalidates f's entry.
         // The bind returns a new func (not called, not cached). Net: empty.
         assert_eq!(
@@ -2009,7 +2029,7 @@ mod tests {
         // `make function!` with no call -> func_cache stays empty (no
         // `CallUser` fires `ensure_compiled`).
         let (block, mut env, _buf) = compile_for_vm_captured("f: make function! [[x][x * x]]");
-        let _ = run(block, &mut env).expect("VM run failed");
+        let _ = run(block, &mut env, None).expect("VM run failed");
         assert!(
             env.func_cache.is_empty(),
             "make function! does not compile at make time"
@@ -2053,7 +2073,7 @@ mod tests {
     fn vm_repeat_one_million_no_overflow() {
         let (block, mut env, buf) =
             compile_for_vm_captured("repeat i 1000000 [ if i > 999999 [print i] ]");
-        let v = run(block, &mut env).expect("VM run failed");
+        let v = run(block, &mut env, None).expect("VM run failed");
         assert!(matches!(v, Value::None), "got {}", mold_to_string(&v));
         assert_eq!(
             String::from_utf8_lossy(&buf.borrow()),
@@ -2121,7 +2141,7 @@ mod tests {
         let trace_buf = BufferWriter::new();
         let trace_buf_handle = trace_buf.buf.clone();
         env.set_trace(Box::new(trace_buf));
-        let _ = run(block, &mut env).expect("VM run failed");
+        let _ = run(block, &mut env, None).expect("VM run failed");
         let trace = String::from_utf8_lossy(&trace_buf_handle.borrow()).into_owned();
         let line_count = trace.lines().count();
         assert!(
@@ -2147,7 +2167,7 @@ mod tests {
         env.set_trace(Box::new(trace_buf));
         // Clear it again — simulates the default (no `--trace` flag).
         env.clear_trace();
-        let _ = run(block, &mut env).expect("VM run failed");
+        let _ = run(block, &mut env, None).expect("VM run failed");
         assert!(
             trace_buf_handle.borrow().is_empty(),
             "trace buffer should be empty when tracing is off"

@@ -47,7 +47,10 @@ fn expect_file(v: &Value) -> Result<(&Rc<str>, Span), EvalError> {
 /// Resolve a `file!` path against `env.cwd`. Absolute paths and paths
 /// starting with `~` are returned as-is (the OS / a shell-expansion step
 /// handles `~`; POC leaves `~` literal — Red itself doesn't expand `~`).
-fn resolve_path(path_str: &str, env: &Env) -> PathBuf {
+///
+/// M62: exposed `pub(crate)` so the `import %file` native in `module.rs`
+/// can resolve a `file!` argument the same way `read`/`load` do.
+pub(crate) fn resolve_path(path_str: &str, env: &Env) -> PathBuf {
     let p = Path::new(path_str);
     if p.is_absolute() {
         p.to_path_buf()
