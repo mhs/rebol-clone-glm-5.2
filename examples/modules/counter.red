@@ -1,33 +1,36 @@
-; counter — closures with encapsulated mutable state at the module level.
-; Demonstrates: closures capturing module-context variables, the
-; RefCell cell mechanism (state persists across invocations), and
-; independent counters via separate module instances.
+; counter — a closure factory module demonstrating closures with
+; encapsulated mutable state. Each counter closure captures a state
+; block (snapshot at creation time; writes persist across invocations
+; of the SAME closure via the RefCell cell mechanism).
 ;
-; Note: the closure-factory pattern (func returning closures) has a VM
-; limitation with imported modules — the capture cells aren't set up
-; correctly when the func was compiled in a module context but called
-; from the script context. Module-level closures (defined directly in
-; the module body) work correctly in both VM and walk modes.
+; Uses a block as mutable state (poke) rather than SetWord, because
+; SetWord inside a closure body is treated as a local by the binding
+; pass (not a freevar capture) — a known limitation of the snapshot
+; capture model. Shared-cell closures (v0.6) would allow SetWord
+; capture directly.
 
 module 'counter [
-    count-a: 0
-    count-b: 100
-    count-c: 0
-
-    bump-a: closure [] [count-a: count-a + 1 count-a]
-    reset-a: closure [] [count-a: 0 count-a]
-    get-a: closure [] [count-a]
-
-    bump-b: closure [] [count-b: count-b + 1 count-b]
-    reset-b: closure [] [count-b: 100 count-b]
-
-    ; Clamped counter — won't exceed 3.
-    bump-clamped: closure [] [
-        count-c: count-c + 1
-        either count-c > 3 [count-c: 3] [count-c]
-        count-c
+    ; Create a counter closure starting at `start`. Each call increments
+    ; and returns the new value.
+    make-counter: func [start] [
+        state: reduce [start]
+        closure [] [
+            poke state 1 ((first state) + 1)
+            first state
+        ]
     ]
-    reset-clamped: closure [] [count-c: 0 count-c]
 
-    export [bump-a reset-a get-a bump-b reset-b bump-clamped reset-clamped]
+    ; Create a clamped counter that won't exceed `max`. Returns the
+    ; current count (clamped) on each call.
+    make-clamped: func [start max] [
+        state: reduce [start max]
+        closure [] [
+            cur: (first state) + 1
+            lim: second state
+            either cur > lim [poke state 1 lim] [poke state 1 cur]
+            first state
+        ]
+    ]
+
+    export [make-counter make-clamped]
 ]

@@ -381,8 +381,23 @@ fn try_capture_word(
                 capture_vals.push(val);
             }
         }
-        Binding::Unbound => {
-            // Check ancestor func frames (the walker's call stack).
+        Binding::Unbound | Binding::Closure(_) => {
+            // `Binding::Unbound`: the word wasn't bound by `bind_function_body`
+            // (not a param/local and not in `user_ctx`). Check ancestor func
+            // frames (the walker's call stack) — if found, capture its value.
+            //
+            // `Binding::Closure(idx)` (M60 bug fix): the VM's lexical analyzer
+            // (`vm/lex.rs`) may have already set `Binding::Closure(idx)` on
+            // closure-body freevars during `ensure_compiled`. When the body
+            // then falls back to the walker (`needs_rebind` →
+            // `invoke_via_walker` → `closure_native`), the deep-cloned body
+            // PRESERVES these analyzer bindings. Without this arm,
+            // `try_capture_word` would skip them, producing an empty captures
+            // cell while the body still references the index → panic at call
+            // time. Treating `Binding::Closure` the same as `Unbound` here
+            // re-scans the enclosing scope and populates the cell correctly.
+            // The subsequent `set_closure_bindings` call overwrites the
+            // analyzer's stale index with the correct one.
             for frame in env.call_stack.iter().rev() {
                 if let Some(slot) = frame.ctx.index_of(sym) {
                     let val = frame.ctx.slot_value(slot);
@@ -394,9 +409,10 @@ fn try_capture_word(
             }
             // Not found in any frame — truly unbound, don't capture.
         }
-        // Binding::Func (function-local) and Binding::Closure (already
-        // captured) and Binding::Lexical (VM-only) — don't capture.
-        _ => {}
+        // `Binding::Func` (function-local param/local — the closure's own
+        // params, not freevars) and `Binding::Lexical` (VM-only lexical
+        // addressing, not used in the walker path) — don't capture.
+        Binding::Func(_) | Binding::Lexical(_, _) => {}
     }
 }
 

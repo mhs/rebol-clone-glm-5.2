@@ -31,20 +31,21 @@ prin "pre-order = " print bst-walk-pre root    ; 5 3 1 4 8
 prin "in-order = " print bst-walk-in root     ; 1 3 4 5 8
 
 ; --- counter (closures with encapsulated state) ---
-; Module-level closures capture the module's ctx variables; writes
-; persist across invocations (the RefCell cell mechanism).
-prin "bump-a = " print bump-a       ; 1
-prin "bump-a = " print bump-a       ; 2
-prin "bump-a = " print bump-a       ; 3
-prin "bump-b = " print bump-b       ; 101
-prin "bump-a = " print bump-a       ; 4 (independent from bump-b)
-prin "reset-a = " print reset-a     ; 0
-prin "get-a = " print get-a         ; 0
+; The closure-factory pattern: make-counter returns a closure that
+; captures `count` (snapshot at creation time; writes persist across
+; invocations via the RefCell cell).
+c1: make-counter 0
+prin "c1 = " print c1           ; 1
+prin "c1 = " print c1           ; 2
+prin "c1 = " print c1           ; 3
+c2: make-counter 100
+prin "c2 = " print c2           ; 101
+prin "c1 = " print c1           ; 4 (c1 and c2 are independent)
 
-prin "clamped = " print bump-clamped ; 1
-prin "clamped = " print bump-clamped ; 2
-prin "clamped = " print bump-clamped ; 3
-prin "clamped = " print bump-clamped ; 3 (clamped at 3)
-prin "reset-clamped = " print reset-clamped ; 0
+clamped: make-clamped 0 3
+prin "clamped = " print clamped ; 1
+prin "clamped = " print clamped ; 2
+prin "clamped = " print clamped ; 3
+prin "clamped = " print clamped ; 3 (clamped at 3)
 
 print "done"
