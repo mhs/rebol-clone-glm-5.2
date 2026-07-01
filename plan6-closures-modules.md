@@ -591,57 +591,100 @@ re-walking:
 
 ---
 
-## Milestone 63 — CLI flags + `system/options` extension
+## Milestone 63 — CLI flags + `system/options` extension ✅ LANDED
 
 Surfaces module paths and module-related options to the CLI and scripts.
 
-- [ ] **Edit: `crates/red-cli/src/main.rs`** — add `--module-path <dir>` flag
+- [x] **Edit: `crates/red-cli/src/main.rs`** — add `--module-path <dir>` flag
       (repeatable; appends to `system/options/module-path`). Add `--no-stdlib`
       flag (skips auto-import of the stdlib module — see M64). Update
       `--help`.
-- [ ] **Edit: `crates/red-eval/src/interp_runner.rs`** — `RunOptions` gains
+- [x] **Edit: `crates/red-eval/src/interp_runner.rs`** — `RunOptions` gains
       `module_paths: Vec<PathBuf>` and `no_stdlib: bool`.
       `run_series_inner_opts` populates `system/options/module-path` from
       `opts.module_paths` and (unless `opts.no_stdlib`) auto-imports the
       stdlib (M64) before evaluating the script body.
-- [ ] **Edit: `crates/red-eval/src/natives/registry.rs`** — `install_system`
+- [x] **Edit: `crates/red-eval/src/natives/registry.rs`** — `install_system`
       adds `module-path: [%./]` to `system/options` (a `block!` of `file!`).
-- [ ] Inline `#[test]`: `--module-path /tmp` sets `system/options/module-path`
-      to `[%/tmp/]`.
-- [ ] Inline `#[test]`: `--no-stdlib` skips stdlib auto-import (the stdlib's
+- [x] Inline `#[test]`: `--module-path /tmp` sets `system/options/module-path`
+      to `[%/tmp]` (PathBuf normalization strips the trailing slash).
+- [x] Inline `#[test]`: `--no-stdlib` skips stdlib auto-import (the stdlib's
       words are unbound).
-- [ ] CLI integration test: `red --module-path examples/modules import 'm
-      print m/x` runs.
-- [ ] `cargo test --workspace` green.
+- [x] CLI integration test: `--module-path <dir>` lets `import %file.red`
+      find a module file that isn't in cwd (search_module_paths helper in
+      module.rs). Repeated flags accumulate. `--help` documents both flags.
+- [x] `cargo test --workspace` green; `--features force-walk` green.
+
+Additional beyond plan6's M63 list:
+- [x] **New: `crates/red-eval/src/stdlib.rs`** — `ensure_stdlib` loader
+      (parse + eval once, cache on `Env::stdlib`, re-alias exports per
+      `run_source` call).
+- [x] **Edit: `crates/red-core/src/env.rs`** — `Env::stdlib:
+      Option<Rc<RefCell<ModuleDef>>>` cache field.
+- [x] **Edit: `crates/red-eval/src/module.rs`** — `import_file` now searches
+      `system/options/module-path` when the cwd-relative resolution misses
+      (new `search_module_paths` helper).
+- [x] **Edit: `crates/red-eval/src/lib.rs`** — `pub mod stdlib;`.
+- [x] Pulled forward the M64 stdlib stub (a ~12-function module) so
+      `--no-stdlib` has something to skip.
 
 ---
 
-## Milestone 64 — Stdlib module + `examples/modules/`
+## Milestone 64 — Stdlib module + `examples/modules/` ✅ LANDED
 
 Lands a small stdlib as a module, demonstrating the system end-to-end. Not a
 language change — pure content + auto-import wiring.
 
-- [ ] **New: `crates/red-eval/stdlib/stdlib.red`** — a module file with
-      ~20–30 utility functions (string utils, list utils, etc.) exported.
-      Compiled into the binary via `include_str!` (no file-system dependency
-      at runtime).
-- [ ] **Edit: `crates/red-eval/src/interp_runner.rs`** — unless
+- [x] **New: `crates/red-eval/stdlib/stdlib.red`** — a module file with
+      ~25 utility functions (string/block/math utils + pure-Red `sort`
+      filling the M30-deferred gap). Compiled into the binary via
+      `include_str!` (no file-system dependency at runtime).
+- [x] **Edit: `crates/red-eval/src/interp_runner.rs`** — unless
       `opts.no_stdlib`, load `stdlib.red` (via `include_str!`), eval it as a
       module, `import` its exports into `user_ctx`. Cache the compiled
       module on `Env` (so repeated `run_source` calls in the REPL don't
-      recompile).
-- [ ] **New: `examples/modules/`** — 4–5 example modules: `mathutils.red`,
-      `stringutils.red`, `tree.red` (a tree module using closures for
-      traversal), `counter.red` (closures + shared state across invocations),
-      `main.red` (imports the others).
-- [ ] **Edit: `crates/red-cli/tests/examples.rs`** — the existing examples
+      recompile). *(Landed in M63 via `stdlib.rs::ensure_stdlib`.)*
+- [x] **New: `examples/modules/`** — 5 example modules: `mathutils.red`,
+      `stringutils.red`, `tree.red` (a BST module using blocks + closures),
+      `counter.red` (closures + shared state across invocations via the
+      block-as-state pattern), `main.red` (imports the others).
+- [x] **Edit: `crates/red-cli/tests/examples.rs`** — the existing examples
       harness (M35) runs `examples/modules/main.red` and asserts exit 0.
-- [ ] Golden fixtures: `stdlib_basic` (use a stdlib function),
+      *(Added a targeted `examples_modules_main_runs_clean` test rather
+      than making the top-level harness recursive — module files are pure
+      module definitions, not standalone scripts.)*
+- [x] Golden fixtures: `stdlib_basic` (use a stdlib function),
       `module_compose` (modules + closures + import in one program).
-- [ ] Inline `#[test]`: stdlib auto-import makes `str/upper` (or whatever)
-      available bare.
-- [ ] Inline `#[test]`: `--no-stdlib` makes stdlib words unbound.
-- [ ] `cargo test --workspace` green.
+- [x] Inline `#[test]`: stdlib auto-import makes `str-upper` available
+      bare. *(Landed in M63 as `stdlib_auto_import_makes_bare_word_resolvable`.)*
+- [x] Inline `#[test]`: `--no-stdlib` makes stdlib words unbound. *(Landed
+      in M63 as `no_stdlib_makes_stdlib_words_unbound`.)*
+- [x] `cargo test --workspace` green; `--features force-walk` green.
+
+Implementation notes:
+- **String handling:** POC strings are immutable `Rc<str>` (not
+  series-backed), so `length?`/`pick`/`skip`/`head` don't work on them
+  directly. String utilities needing index/length access convert via
+  `split s ""` (char block) → block ops → `rejoin` back to string.
+- **`forall` limitation:** `forall` doesn't work inside `func` bodies
+  (binding-pass issue); all stdlib functions use `while` + `pick` instead.
+- **Name-collision audit:** `abs`/`square`/`cube`/`sum-of`/`fib`/
+  `factorial` deliberately NOT in the stdlib (collide with natives or
+  existing example/fixture defs).
+- **Closure-factory bug fix (post-M64):** the closure-factory pattern
+  (`func [n][closure [x][x + n]]` defined inside a module) panicked in
+  VM mode because the VM's lexical analyzer set `Binding::Closure(idx)`
+  on closure-body freevars during `ensure_compiled`, and the walker's
+  `closure_native` then skipped those bindings when re-scanning for
+  captures. Fixed in `natives/func.rs::try_capture_word` by treating
+  `Binding::Closure` the same as `Binding::Unbound` (walk
+  `env.call_stack` to find and capture the value).
+- **Mutable state in closures:** SetWord inside a closure body is
+  treated as a local by the binding pass (not a freevar capture) — a
+  known limitation of the snapshot capture model. `counter.red` uses
+  block-as-state (`poke`) for mutable state, which works in both VM
+  and walk modes. Shared-cell closures (SetWord capture) are a v0.6
+  candidate.
 
 ---
 
@@ -718,6 +761,15 @@ language change — pure content + auto-import wiring.
    snapshot in v0.5 (simpler, correct-for-most-cases, fixes the v0.3 escaping
    bug); document shared-cell as a v0.6 candidate. Confirm before
    implementing.
+   **✅ RESOLVED:** shipped snapshot semantics in M60. The closure-factory
+   bug (panic when a `func` inside a module returns a `closure` capturing
+   the func's params) was fixed post-M64 in `natives/func.rs::try_capture_word`
+   — `Binding::Closure(idx)` set by the VM analyzer is now treated the same
+   as `Binding::Unbound` during re-scan. SetWord-on-capture (writing to a
+   captured freevar from inside the closure body) is treated as a local by
+   `bind_function_body` — `counter.red` uses block-as-state (`poke`) as a
+   workaround. Shared-cell closures (proper SetWord capture) are a v0.6
+   candidate.
 2. **`resolve_word` `Unbound` → `user_ctx` fallback (M62).** This is a
    behavior change: today `Unbound` errors immediately; after M62, it does
    one `user_ctx.get` lookup first. This makes `import` work without AST
@@ -759,3 +811,14 @@ language change — pure content + auto-import wiring.
    `contains?`), list utils (`sum`/`product`/`range`/`sort` — `sort` was
    skipped in M30 per plan3:932), math utils (`gcd`/`lcm`/`fib`). Defer a
    full stdlib to v0.6. Confirm the scope before implementing.
+   **✅ RESOLVED:** shipped ~25 utilities in M64. String: `str-upper`/
+   `str-lower`/`starts-with?`/`ends-with?`/`contains?`/`str-join`/
+   `repeat-str`/`pad-left`/`pad-right`. Block: `block-sum`/
+   `block-product`/`block-len`/`block-mean`/`mean`/`reverse-of`/`flatten`/
+   `min-of`/`max-of`/`intersperse`/`chunk`. Math: `gcd`/`lcm`/`sign-of`/
+   `clamp`/`factorial-iter`. Sequence: `range-of`. Sort: `sort` (pure-Red
+   selection sort, fills the M30 gap). `fib`/`factorial` deliberately
+   excluded (collide with user defs in examples); `abs` excluded (native
+   that handles pairs/tuples). String functions convert via `split s ""` →
+   block ops → `rejoin` because POC strings are immutable `Rc<str>` (not
+   series-backed).

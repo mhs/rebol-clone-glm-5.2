@@ -5,18 +5,25 @@ language, implemented in Rust. Red is a homoiconic, block-structured
 descendant of Rebol — code is data, evaluation is prefix-style and eager,
 and "dialects" are blocks interpreted by custom mini-interpreters.
 
-This repo is a **Red subset interpreter** (`v0.4.0`). It implements a usable
-slice of Red — lexer, parser, **bytecode compiler + stack VM** (the default
-since v0.3), tree-walking evaluator (retained as the `--walk` fallback), full
-series model, real word binding, functions, the `parse` dialect (with
-`collect`/`keep`/`match`/lookahead/`/case`/`bitset!` charset), **objects**,
-**real paths**, **refinements**, the full type-conversion/string/control-flow/
-math surfaces (incl. trig + transcendentals), file & shell I/O, **first-class
-`error!` values** with the full Red field set, the v0.4 value types
-(`char!`/`binary!`/`map!`/`pair!`/`tuple!`/`date!`/`bitset!`), `compose`, and a
-REPL. The build history is tracked in [`plan.md`](./plan.md) (v0.1),
-[`plan2.md`](./plan2.md) (v0.2), [`plan3.md`](./plan3.md) (v0.3 — VM +
-performance), and [`plan5.md`](./plan5.md) (v0.4 — language completeness).
+This repo is a **Red subset interpreter** (`v0.4.0`, with the v0.5
+closures & modules milestones landed). It implements a usable slice of
+Red — lexer, parser, **bytecode compiler + stack VM** (the default since
+v0.3), tree-walking evaluator (retained as the `--walk` fallback), full
+series model, real word binding, functions, **first-class closures**
+(`closure!` with snapshot freevar capture), **modules** (`module`/
+`export`/`import`), the `parse` dialect (with `collect`/`keep`/`match`/
+lookahead/`/case`/`bitset!` charset), **objects**, **real paths**,
+**refinements**, the full type-conversion/string/control-flow/math surfaces
+(incl. trig + transcendentals), file & shell I/O, **first-class `error!`
+values** with the full Red field set, the v0.4 value types (`char!`/
+`binary!`/`map!`/`pair!`/`tuple!`/`date!`/`bitset!`), `compose`, an
+auto-imported **stdlib** (~25 utility functions, suppressible via
+`--no-stdlib`), and a REPL. The build history is tracked in
+[`plan.md`](./plan.md) (v0.1), [`plan2.md`](./plan2.md) (v0.2),
+[`plan3.md`](./plan3.md) (v0.3 — VM + performance),
+[`plan5.md`](./plan5.md) (v0.4 — language completeness), and
+[`plan6-closures-modules.md`](./plan6-closures-modules.md) (v0.5 —
+closures & modules).
 
 ## Status
 
@@ -49,9 +56,12 @@ cargo run  -p red-cli -- --walk examples/fib.red          # force tree-walker
 cargo run  -p red-cli -- --disasm examples/fib.red        # disassemble (no run)
 cargo run  -p red-cli -- --disasm-func fib examples/fib.red  # disassemble named func
 cargo run  -p red-cli -- --trace examples/arith.red       # per-instr VM trace to stderr
+cargo run  -p red-cli -- --module-path examples/modules \  # search dir for import %file
+                        examples/modules/main.red
+cargo run  -p red-cli -- --no-stdlib examples/arith.red    # skip stdlib auto-import
 ```
 
-v0.3 was a **performance release**: the bytecode VM delivers 2–4× speedups on compute-heavy programs (deep recursion, tight loops) over the v0.2 tree-walker, while preserving exact observable behavior (golden parity, error parity). v0.4 re-opens the language surface on top of the unchanged VM — new value types (`char!`/`binary!`/`map!`/`pair!`/`tuple!`/`date!`/`bitset!`), `compose`, trig math, the full `error!` model, and the completed `parse` dialect. All additions are additive: they compile through the existing VM const-pool + native-call path with no new hot-path instrs. See `BENCHMARKS.md` for measurements.
+v0.3 was a **performance release**: the bytecode VM delivers 2–4× speedups on compute-heavy programs (deep recursion, tight loops) over the v0.2 tree-walker, while preserving exact observable behavior (golden parity, error parity). v0.4 re-opens the language surface on top of the unchanged VM — new value types (`char!`/`binary!`/`map!`/`pair!`/`tuple!`/`date!`/`bitset!`), `compose`, trig math, the full `error!` model, and the completed `parse` dialect. v0.5 (in progress) adds **first-class closures** (`closure!` with snapshot freevar capture, fixing the v0.3 escaping-closure bug) and **modules** (`module`/`export`/`import`, with named-module caching, file-based import, and `system/options/module-path` search), plus a small auto-imported stdlib. All additions are additive: they compile through the existing VM const-pool + native-call path with no new hot-path instrs. See `BENCHMARKS.md` for measurements.
 
 ## What's implemented
 
@@ -69,12 +79,14 @@ v0.3 was a **performance release**: the bytecode VM delivers 2–4× speedups on
 
 ### Value types
 `None`, `Logic`, `Integer`, `Float`, `String`, `Word`/`SetWord`/`GetWord`/
-`LitWord`, `Block`, `Paren`, `Func`, `Path`/`GetPath`/`LitPath`/`SetPath`,
-`Refinement`, `File`, `Url`, `Object`, `Error`, `Char` (`#"a"`), `String8`
-(real `binary!`, `#{hex}`), `Map` (heterogeneous insertion-ordered keys),
-`Pair` (`100x200`), `Tuple` (`255.0.0` / `128.64.32.128` RGBA), `Date`
-(date-only / date+time / date+time+zone; `29-Jun-2024/12:30:00+5:30`),
-`Bitset` (bit-packed charset for `parse`).
+`LitWord`, `Block`, `Paren`, `Func`, `Closure` (snapshot-capture first-class
+closure), `Module` (self-contained namespace with exported words),
+`Path`/`GetPath`/`LitPath`/`SetPath`, `Refinement`, `File`, `Url`, `Object`,
+`Error`, `Char` (`#"a"`), `String8` (real `binary!`, `#{hex}`), `Map`
+(heterogeneous insertion-ordered keys), `Pair` (`100x200`), `Tuple`
+(`255.0.0` / `128.64.32.128` RGBA), `Date` (date-only / date+time /
+date+time+zone; `29-Jun-2024/12:30:00+5:30`), `Bitset` (bit-packed charset
+for `parse`).
 
 ### Evaluation
 - **Bytecode compiler + stack VM** (v0.3, default): blocks compile to a flat
@@ -89,8 +101,10 @@ v0.3 was a **performance release**: the bytecode VM delivers 2–4× speedups on
   test suite against the walker for byte-for-byte parity with the VM.
 - `Block` is **data** (returned as-is); `Paren` is **eager** (evaluated in place).
 - Word binding is real: `Unbound` / `Local(Context, slot)` / `Func(slot)` /
-  `Lexical(depth, slot)` (VM-only). Unbound words at eval time error Red-style
-  ("has no value"); there is no global fallback chain.
+  `Lexical(depth, slot)` (VM-only) / `Closure(idx)` (freevar capture cell).
+  Unbound words at eval time consult `user_ctx` first (so `import`-aliased
+  words resolve), then the native registry, then error Red-style ("has no
+  value").
 - SetWord at script top level binds into the user context.
 - Function bodies get bound at `func`/`does` creation time, not at load.
 - **Debug ergonomics (M31):** `--disasm` prints the bytecode disassembly with
@@ -120,8 +134,27 @@ v0.3 was a **performance release**: the bytecode VM delivers 2–4× speedups on
   `append`/`insert`); `map!` supports `select`/`find`/`keys-of`/`values-of`/
   `length?`/`empty?`/`clear`/`put`/`extend`/`copy`.
 - **Functions / binding:** `func`, `does`, `make function!`, `function?`,
-  `return`, `bind`, `use`, `in`, `get`, `set`, `value?`. Recursion works;
-  closures are explicitly out of scope.
+  `return`, `bind`, `use`, `in`, `get`, `set`, `value?`. Recursion works.
+- **Closures (v0.5):** `closure [spec] [body]` — like `func` but captures
+  freevar *values* into an owned cell at creation time (snapshot semantics).
+  `closure?` predicate; `function?` returns true on closures too. The
+  closure can escape its defining frame (returned, stored, passed around)
+  and still see the captured values. Inner writes to the capture cell
+  persist across invocations of the same closure (the `RefCell` cell
+  mechanism); outer writes after creation do NOT propagate inward (snapshot,
+  not shared cell — a v0.6 candidate).
+- **Modules (v0.5):** `module [body]` (anonymous) / `module 'name [body]`
+  (named, cached singleton). `export 'word` / `export [words]` marks words
+  for public visibility (only valid inside a module body). `import 'name` /
+  `import %file.red` / `import <module-value>` aliases a module's exports
+  into the current context as bare words. `module?` predicate.
+  `words-of`/`values-of`/`reflect` on a module return only exported words
+  from outside; all words are visible inside the module body. `module/word`
+  path resolution checks exports from outside; private words error.
+  `system/options/module-path` (a `block!` of `file!` directories,
+  default `[%./]`) is searched by `import %file.red` when the file isn't
+  found relative to cwd; the CLI `--module-path <dir>` flag (repeatable)
+  appends entries.
 - **Refinements:** general `/ref` dispatch — `copy/part`, `find/case`,
   `split/with`, `trim/auto`, `replace/all`, `round/to`, user `func [x /with y]`,
   etc. Refinement-arg exhaustion names the offending refinement.
@@ -182,6 +215,16 @@ v0.3 was a **performance release**: the bytecode VM delivers 2–4× speedups on
   `union`/`intersect`/`difference`/`complement`/`extract?` (membership test).
 - **Constants:** `none`, `true`, `false`, `newline`, `pi`, `e` bound in the
   user context.
+- **Stdlib (v0.5):** ~25 utility functions auto-imported into `user_ctx` at
+  script startup (unless `--no-stdlib`): string utils (`str-upper`/
+  `str-lower`/`starts-with?`/`ends-with?`/`contains?`/`str-join`/
+  `repeat-str`/`pad-left`/`pad-right`), block utils (`block-sum`/
+  `block-product`/`block-len`/`block-mean`/`mean`/`reverse-of`/`flatten`/
+  `min-of`/`max-of`/`intersperse`/`chunk`), math utils (`gcd`/`lcm`/
+  `sign-of`/`clamp`/`factorial-iter`), `range-of`, and `sort` (pure-Red
+  selection sort, filling the M30-deferred gap). The stdlib is a module
+  (`crates/red-eval/stdlib/stdlib.red`) embedded via `include_str!` and
+  cached on `Env::stdlib` (so the REPL doesn't recompile per line).
 
 ### Errors
 Unified `Error` (Lex / Parse / Eval). Every error carries a `Span`; the CLI
@@ -286,14 +329,20 @@ rebol-clone/
   and rebind; aliases don't see updates (mirrors Red semantics). `map!` uses
   `Rc<RefCell<MapDef>>` for in-place mutation like `object!`.
 
-## Known gaps (v0.4)
+## Known gaps (v0.5)
 
-See [`project-brief.md`](./project-brief.md) and [`plan5.md`](./plan5.md) for
-the authoritative list. Headlines:
+See [`project-brief.md`](./project-brief.md) and
+[`plan6-closures-modules.md`](./plan6-closures-modules.md) for the
+authoritative list. Headlines:
 
-- **No closures** — `func` shallow-copies args per call. The `closure!` type
-  is the headline v0.5 candidate alongside modules.
-- **No modules / `import` / `export`** — the other headline v0.5 candidate.
+- **Closure capture is snapshot, not shared-cell** — each `closure` copies
+  freevar values at creation time; outer writes after creation don't
+  propagate inward, and SetWord inside a closure body is treated as a local
+  (not a capture write — use block-as-state via `poke` for mutable closure
+  state). Real Red `closure!` shares the cell across closures and across
+  outer/inner; shared-cell is a v0.6 candidate.
+- **`unimport` deferred to v0.6** — `import` aliases exports into `user_ctx`
+  but there's no native to remove the aliases.
 - **Timezones: fixed UTC offsets only** (`±HH:MM`/`Z`) — no named zones, no
   DST. Matches Red parity; named-zone support (`chrono-tz`) deferred to v0.5+.
 - **`DD/MM/YYYY` date form not supported** — `/` is a lexer delimiter so the
