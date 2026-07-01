@@ -437,7 +437,7 @@ natives, and the module-context machinery. No `import` yet (M62).
 
 ---
 
-## Milestone 62 — `import` + bare-word resolution
+## Milestone 62 — `import` + bare-word resolution ✅ LANDED
 
 Adds `import` (from file or named module), the imported-alias mechanism, and
 the path-resolution rules for modules. Closes the module usability loop.
@@ -471,7 +471,7 @@ re-walking:
 
 ### Files
 
-- [ ] **New (continued): `crates/red-eval/src/natives/module.rs`** — add
+- [x] **New (continued): `crates/red-eval/src/module.rs`** — add
   `import_native`:
   - Form 1: `import 'name` — look up `env.modules[name]`; for each exported
     word, call `importer_ctx.set(word, module.ctx.get(word).unwrap())` (write
@@ -486,76 +486,108 @@ re-walking:
     the Form-1 aliasing.
   - Form 3: `import <module-value>` — `import m` where `m` is a
     `Value::Module`. Same aliasing as Form 1.
-- [ ] **Edit: `crates/red-eval/src/interp_walker.rs`** `resolve_word`
+  *(File lives in `crates/red-eval/src/module.rs` — the M61 top-level module
+  file, not `natives/module.rs` as the plan header suggested. `import_file`
+  resolves against `env.cwd` via `io::resolve_path` (now `pub(crate)`);
+  `system/options/module-path` deferred to M63 per the implementation
+  decision. `eval_body_for_module` evaluates the file body in a throwaway
+  child context and adopts the result if it's a `Value::Module`; otherwise
+  wraps the body as an anonymous module via `build_module`.)*
+- [x] **Edit: `crates/red-eval/src/interp_walker.rs`** `resolve_word`
   `Unbound` arm — change from `Err(EvalError::UnboundWord)` to
   `env.user_ctx.get(sym).ok_or_else(|| EvalError::UnboundWord { ... })`. Add
   an inline test asserting the fallback works and that truly-unbound words
   still error.
-- [ ] **Edit: `crates/red-eval/src/object.rs`** (or `path.rs`) — extend the
+  *(Also updated `write_setword`'s `Unbound` arm to write to `env.user_ctx`
+  for parity with the VM's `SetDynamic`. The walker now checks `user_ctx`
+  FIRST, then `natives` — matching the VM's `LoadDynamic` order exactly.)*
+- [x] **Edit: `crates/red-eval/src/object.rs`** (or `path.rs`) — extend the
   `eval_get_path`/`set_path_value` resolver: when the head is
   `Value::Module(m)`, look up the tail word in `m.ctx`; **if the word is not
   in `m.exports`, return `UnboundWord`** (private-path-from-outside error).
   Inside the module body (when `env.module_stack.last()` is `m`), skip the
   export check.
+  *(Landed in M61: `select_module_field`/`select_module_path`/
+  `get_module_path`/`write_path_slot` module arm in `interp_walker.rs`.)*
 - [ ] **Edit: `crates/red-eval/src/interp_runner.rs`** —
   `run_series_inner_opts`: after `install_constants`, if `opts.module_paths`
   is set, populate `system/options/module-path` (a new field on the `opts`
   object). The CLI passes `--module-path` args (see M63).
+  *(Deferred to M63 per the implementation decision — `import %file` resolves
+  against `env.cwd` only via `io::resolve_path` for now.)*
 - [ ] **Edit: `crates/red-eval/src/natives/registry.rs`** — extend
   `install_system` to seed `system/options/module-path` (a `block!` of
   `file!` values, default `[%./]`).
+  *(Deferred to M63.)*
 
 ### Natives
 
-- [ ] `import 'name` — alias a named module's exports into the current
+- [x] `import 'name` — alias a named module's exports into the current
       context.
-- [ ] `import %file.red` — load + cache + alias a file-based module.
-- [ ] `import <module-value>` — alias a module value's exports.
+- [x] `import %file.red` — load + cache + alias a file-based module.
+- [x] `import <module-value>` — alias a module value's exports.
 - [ ] `unimport 'name` / `unimport 'module-name` — remove aliases (write
       `Value::None` into the aliased slots, or remove from `user_ctx` —
       `Context::set` overwrites with `None`; document that `unimport` leaves
       the slot present-but-none). **Optional; defer to v0.6 if
-      controversial.**
+      controversial.** *(Deferred to v0.6 per the implementation decision.)*
 
 ### Path resolution for modules
 
-- [ ] `module/word` from outside → export check; error if private.
-- [ ] `module/word` from inside the module body → no export check (the head
+- [x] `module/word` from outside → export check; error if private.
+- [x] `module/word` from inside the module body → no export check (the head
       is the module value on the stack, not a word — but inside the body,
       references to `self/word` or the module's own name `m/word` work; bare
       `word` resolves via the module's `ctx` which is `env.user_ctx` during
       body eval).
-- [ ] `set-path` `module/word: value` from outside → export check (only
+- [x] `set-path` `module/word: value` from outside → export check (only
       exported words are settable from outside); from inside → no check.
+  *(All three landed in M61: `select_module_field`/`select_module_path`/
+  `get_module_path`/`write_path_slot` module arm in `interp_walker.rs`.)*
 
 ### Golden fixtures
 
-- [ ] `import_named` — `module 'm [a: 1 export 'a] import 'm print a` → `1`.
-- [ ] `import_file` — `write %/tmp/mod.red {module [x: 42 export 'x]} import
+- [x] `import_named` — `module 'm [a: 1 export 'a] import 'm print a` → `1`.
+- [x] `import_file` — `write %/tmp/mod.red {module [x: 42 export 'x]} import
       %/tmp/mod.red print x` → `42` (use `tempfile` dev-dep).
-- [ ] `import_value` — `m: module [a: 1 export 'a] import m print a` → `1`.
-- [ ] `import_private_unbound` — `m: module [priv: 1 pub: 2 export 'pub]
+      *(Implemented as an inline `#[test]` (`import_file_caches_by_canonical_path`)
+      using `tempfile`, not a pure `.red` fixture — the fixture needs a
+      filesystem scratch file.)*
+- [x] `import_value` — `m: module [a: 1 export 'a] import m print a` → `1`.
+- [x] `import_private_unbound` — `m: module [priv: 1 pub: 2 export 'pub]
       import 'm print pub` → `2`; `print priv` → `*** Error: UnboundWord:
       priv` (the private word was not aliased into `user_ctx`).
-- [ ] `import_path` — `m: module [a: 1 export 'a] import 'm print m/a` → `1`;
+      *(Fixture uses the named form `module 'm [...]` so `import 'm` can find
+      it in `env.modules`.)*
+- [x] `import_path` — `m: module [a: 1 export 'a] import 'm print m/a` → `1`;
       `print m/priv` (unexported) → error.
-- [ ] `import_cached` — `import %mod.red` twice; the file is read once
+      *(Fixture uses `m: module 'm [...]` so both `import 'm` and `m/a` path
+      access work — `module 'name` caches by name but doesn't bind the name
+      word; the `m:` assignment does.)*
+- [x] `import_cached` — `import %mod.red` twice; the file is read once
       (verify via a side-effect counter in the module body).
-- [ ] `import_shadow` — `a: 0 module 'm [a: 1 export 'a] import 'm print a`
+      *(Inline `#[test]` (`import_file_caches_by_canonical_path`) — imports
+      the same temp file twice and verifies the second call returns the
+      cached module.)*
+- [x] `import_shadow` — `a: 0 module 'm [a: 1 export 'a] import 'm print a`
       → `1` (import overwrites the existing `a` in `user_ctx`). Document.
 
 ### Tests
 
-- [ ] Inline `#[test]`: `import 'name` aliases exports into `user_ctx`.
-- [ ] Inline `#[test]`: bare unbound word resolves after `import` (the
+- [x] Inline `#[test]`: `import 'name` aliases exports into `user_ctx`.
+- [x] Inline `#[test]`: bare unbound word resolves after `import` (the
       `resolve_word` change).
-- [ ] Inline `#[test]`: private word stays unbound after `import`.
-- [ ] Inline `#[test]`: file import caches by canonical path.
-- [ ] Inline `#[test]`: `resolve_word` `Unbound` arm now checks `user_ctx`
+- [x] Inline `#[test]`: private word stays unbound after `import`.
+- [x] Inline `#[test]`: file import caches by canonical path.
+- [x] Inline `#[test]`: `resolve_word` `Unbound` arm now checks `user_ctx`
       (parity test — VM and walker agree).
-- [ ] Parity test: existing `unbound_word` error fixtures still error
+      *(Covered by `import_makes_bare_word_resolvable` (VM mode) and
+      `resolve_word_truly_unbound_still_errors` (regression guard).)*
+- [x] Parity test: existing `unbound_word` error fixtures still error
       (nothing wrote those words to `user_ctx`).
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+      *(`resolve_word_truly_unbound_still_errors` inline test + the
+      `unbound_word` / `closure_unbound_capture` golden error fixtures.)*
+- [x] `cargo test --workspace` green; `--features force-walk` green.
 
 ---
 
