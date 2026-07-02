@@ -11,6 +11,7 @@
 //! rustyline driver so inline tests can drive it over a plain string without
 //! a tty.
 
+use std::cell::Cell;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -27,16 +28,50 @@ use red_eval::{
 /// installed, all natives registered, output sent to `out`. If `walk` is
 /// true, force the tree-walker (`EvalMode::Walk`) regardless of the build
 /// default (M29: the default is `Vm`; `--walk` overrides for debugging).
-fn build_env(out: Box<dyn Write>, walk: bool) -> Env {
+/// `needs_nl` is a shared flag the interactive driver checks after each eval
+/// to decide whether to emit a `\n` before the next prompt (prevents
+/// rustyline from overwriting `prin` output that lacks a trailing newline).
+fn build_env(out: Box<dyn Write>, walk: bool, needs_nl: Rc<Cell<bool>>) -> Env {
     let ctx = Context::new();
     install_constants(&ctx);
     let ctx_rc = Rc::new(ctx);
-    let mut env = Env::new_with_output(ctx_rc, out);
+    let mut env = Env::new_with_output(ctx_rc, Box::new(ReplWriter::new(out, needs_nl)));
     register_natives(&mut env);
     if walk {
         env.mode = EvalMode::Walk;
     }
     env
+}
+
+/// Wrapper around the REPL's stdout that tracks whether the last byte
+/// written was a newline via a shared `Rc<Cell<bool>>`. The interactive
+/// driver checks the flag after each eval and emits a `\n` before the next
+/// prompt if the previous output didn't end with one (e.g. `prin` without a
+/// trailing newline) — otherwise rustyline's line redraw overwrites the
+/// dangling output.
+struct ReplWriter {
+    inner: Box<dyn Write>,
+    needs_nl: Rc<Cell<bool>>,
+}
+
+impl ReplWriter {
+    fn new(inner: Box<dyn Write>, needs_nl: Rc<Cell<bool>>) -> Self {
+        needs_nl.set(false);
+        Self { inner, needs_nl }
+    }
+}
+
+impl Write for ReplWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        if !buf.is_empty() {
+            self.needs_nl.set(*buf.last().unwrap() != b'\n');
+        }
+        Ok(n)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 /// Outcome of feeding an accumulated line buffer through the REPL evaluator.
@@ -114,10 +149,12 @@ fn handle_line(line: &str, buffer: &mut String, env: &mut Env) -> bool {
     match eval_repl_line(buffer, env) {
         LineAction::NeedMoreInput => true,
         LineAction::Evaluated => {
+            let _ = env.out.flush();
             buffer.clear();
             true
         }
         LineAction::Failed(msg) => {
+            let _ = env.out.flush();
             eprintln!("{msg}");
             buffer.clear();
             true
@@ -129,7 +166,8 @@ fn handle_line(line: &str, buffer: &mut String, env: &mut Env) -> bool {
 /// Entry point for `red` invoked with no file argument. `walk` mirrors the
 /// CLI `--walk` flag (forces the tree-walker instead of the default VM).
 pub fn run_repl(walk: bool) -> ExitCode {
-    let mut env = build_env(Box::new(io::stdout()), walk);
+    let needs_nl = Rc::new(Cell::new(false));
+    let mut env = build_env(Box::new(io::stdout()), walk, Rc::clone(&needs_nl));
     let mut buffer = String::new();
 
     if io::stdin().is_terminal() {
@@ -142,6 +180,13 @@ pub fn run_repl(walk: bool) -> ExitCode {
             }
         };
         loop {
+            // If the previous eval's output didn't end with a newline
+            // (e.g. `prin`), emit one before rustyline redraws the prompt
+            // — otherwise the dangling output gets clobbered.
+            if needs_nl.get() {
+                let _ = io::stdout().write_all(b"\n");
+                needs_nl.set(false);
+            }
             let prompt = if buffer.is_empty() { "red> " } else { "...   " };
             let line = match rl.readline(prompt) {
                 Ok(l) => l,
@@ -219,7 +264,8 @@ fn repl_session(input: &str) -> String {
     let sink = Rc::new(RefCell::new(Vec::<u8>::new()));
     // REPL tests exercise the default evaluator (VM since M29); pass
     // `walk = false` to `build_env`.
-    let mut env = build_env(Box::new(BufferSink(Rc::clone(&sink))), false);
+    let needs_nl = Rc::new(Cell::new(false));
+    let mut env = build_env(Box::new(BufferSink(Rc::clone(&sink))), false, needs_nl);
     let mut buffer = String::new();
 
     for raw in input.split('\n') {
