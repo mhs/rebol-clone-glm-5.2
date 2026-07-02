@@ -353,13 +353,15 @@ for `bind` to report unbound words with a location.
 - Series access: `pick` `poke` `select` `find` (with `/case` refinement).
 - Series mutate: `append` (`/only`) `insert` `change` `remove` `clear` `take`
   `copy` (`/part`).
-- Iteration: `foreach` `forall` `while` `until` (plus `loop`/`repeat`).
+- Iteration: `foreach` `forall` `forskip` `while` `until` (plus `loop`/
+  `repeat`/`forever`/`for`).
 - Binding: `bind` `use` `in` `value?` `get` `set`.
 - Functions: `func` `does` `function` `make` `function?` `return` `exit`
   `quit`.
-- Control flow: `if` `either` `switch` (`/default` `/case`) `case`
-  (`/default` `/all`) `default` `all` `any` `try` `attempt` `catch` `throw`
-  `cause-error` `comment` `break` `continue`.
+- Control flow: `if` `unless` `either` `loop` `repeat` `until` `while`
+  `forever` `for` `do` `reduce` `break` `continue` `switch`
+  (`/default` `/case`) `case` (`/default` `/all`) `default` `all` `any`
+  `try` `attempt` `catch` `throw` `cause-error` `comment` `exit`/`quit`.
 - Arithmetic (infix + prefix): `+` `-` `*` `/` `//` (modulo) `**` (power)
   `add` `subtract` `multiply` `divide` `abs` `negate` `min` `max` `round`
   (`/to` `/even`) `random` (`/seed` `/only` `/secure`) `power`.
@@ -391,6 +393,9 @@ for `bind` to report unbound words with a location.
   `bitset!`, `compose`, trig math, the full `error!` model, the completed
   `parse` dialect. v0.5 (M60–M65): `closure!` (snapshot capture),
   `module!`/`export`/`import`, the stdlib, `--module-path`/`--no-stdlib`.
+  v0.5.1 (M120–M121): **control-flow completeness** — `unless`, `forever`,
+  `for` (counted, direction-aware, int/float/char), `forskip` (record-wise
+  series iteration). See `plan12-control-flow.md`.
 - Optional/deferred: shared-cell closures, `unimport`, reactivity (v0.6);
   concurrency (v0.7); `tag!`/`ref!`/`image!`/`vector!`/`hash!`/`regex!`,
   `routine!` FFI, named timezones, the full port model. (`parse` is in

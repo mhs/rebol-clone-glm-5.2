@@ -5,7 +5,7 @@ language, implemented in Rust. Red is a homoiconic, block-structured
 descendant of Rebol — code is data, evaluation is prefix-style and eager,
 and "dialects" are blocks interpreted by custom mini-interpreters.
 
-This repo is a **Red subset interpreter** (`v0.5.0`). It implements a usable slice of
+This repo is a **Red subset interpreter** (`v0.5.1`). It implements a usable slice of
 Red — lexer, parser, **bytecode compiler + stack VM** (the default since
 v0.3), tree-walking evaluator (retained as the `--walk` fallback), full
 series model, real word binding, functions, **first-class closures**
@@ -26,7 +26,7 @@ closures & modules).
 
 ## Status
 
-- **Tagged:** `v0.5.0`
+- **Tagged:** `v0.5.1`
 - **Workspace:** three crates — `red-core` (value model + lexer + parser + printer + VM IR types),
   `red-eval` (compiler + VM + tree-walker + natives + `parse`), `red-cli` (binary + REPL).
   A `fuzz/` crate (nightly-only, `libfuzzer-sys`) is excluded from the default workspace.
@@ -49,7 +49,7 @@ cargo test  --workspace
 cargo run  -p red-cli -- examples/hello.red     # → Hello, World!
 cargo run  -p red-cli                            # → REPL (no args)
 cargo run  -p red-cli -- --help
-cargo run  -p red-cli -- --version               # → red 0.5.0
+cargo run  -p red-cli -- --version               # → red 0.5.1
 cargo run  -p red-cli -- --allow-shell examples/call.red   # enable call/shell
 cargo run  -p red-cli -- --walk examples/fib.red          # force tree-walker
 cargo run  -p red-cli -- --disasm examples/fib.red        # disassemble (no run)
@@ -60,7 +60,7 @@ cargo run  -p red-cli -- --module-path examples/modules \  # search dir for impo
 cargo run  -p red-cli -- --no-stdlib examples/arith.red    # skip stdlib auto-import
 ```
 
-v0.3 was a **performance release**: the bytecode VM delivers 2–4× speedups on compute-heavy programs (deep recursion, tight loops) over the v0.2 tree-walker, while preserving exact observable behavior (golden parity, error parity). v0.4 re-opens the language surface on top of the unchanged VM — new value types (`char!`/`binary!`/`map!`/`pair!`/`tuple!`/`date!`/`bitset!`), `compose`, trig math, the full `error!` model, and the completed `parse` dialect. v0.5 adds **first-class closures** (`closure!` with snapshot freevar capture, fixing the v0.3 escaping-closure bug) and **modules** (`module`/`export`/`import`, with named-module caching, file-based import, and `system/options/module-path` search), plus a small auto-imported stdlib. All additions are additive: they compile through the existing VM const-pool + native-call path with no new hot-path instrs. See `BENCHMARKS.md` for measurements.
+v0.3 was a **performance release**: the bytecode VM delivers 2–4× speedups on compute-heavy programs (deep recursion, tight loops) over the v0.2 tree-walker, while preserving exact observable behavior (golden parity, error parity). v0.4 re-opens the language surface on top of the unchanged VM — new value types (`char!`/`binary!`/`map!`/`pair!`/`tuple!`/`date!`/`bitset!`), `compose`, trig math, the full `error!` model, and the completed `parse` dialect. v0.5 adds **first-class closures** (`closure!` with snapshot freevar capture, fixing the v0.3 escaping-closure bug) and **modules** (`module`/`export`/`import`, with named-module caching, file-based import, and `system/options/module-path` search), plus a small auto-imported stdlib. v0.5.1 closes the **control-flow vocabulary gap** — `unless`, `forever`, `for` (direction-aware counted loop over int/float/char), `forskip` (record-wise series iteration). All additions are additive: they compile through the existing VM const-pool + native-call path with no new hot-path instrs. See `BENCHMARKS.md` for measurements.
 
 ## What's implemented
 
