@@ -181,7 +181,7 @@ fn as_number(v: &Value) -> Option<Num> {
 
 /// Compare two numeric values, returning their `Ordering`. Errors carry the
 /// offending operand's span.
-fn num_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalError> {
+pub(crate) fn num_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalError> {
     let x = match as_number(a) {
         Some(n) => n,
         None => {

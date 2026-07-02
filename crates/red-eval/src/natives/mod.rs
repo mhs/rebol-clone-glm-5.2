@@ -37,7 +37,7 @@ mod io;
 mod registry;
 mod words;
 
-pub(crate) use compare::values_equal;
+pub(crate) use compare::{num_cmp, values_equal};
 pub(crate) use control::parse_error_block_public;
 pub(crate) use func::{extract_spec, func_native, FuncSpec};
 pub use registry::{install_constants, register_natives};
@@ -79,7 +79,8 @@ pub(crate) fn enrich_error(
         specific @ (EvalError::UnboundWord { .. }
         | EvalError::TypeError { .. }
         | EvalError::Arity { .. }
-        | EvalError::Compile { .. }) => specific,
+        | EvalError::Compile { .. }
+        | EvalError::ParseRecursionLimit { .. }) => specific,
         // Generic `Native` errors — synthesize a structured `ErrorValue` with
         // `type: 'script`, `where: native_name`, `near: span-block`.
         EvalError::Native { message, .. } => {

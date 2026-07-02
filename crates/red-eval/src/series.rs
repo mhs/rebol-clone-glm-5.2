@@ -27,6 +27,8 @@ use red_core::{Env, EvalError, RefineArgs};
 use std::rc::Rc;
 
 use crate::interp::{active_captures, dispatch_block, resolve_compiled_block};
+use crate::interp_walker::call_user_func;
+use crate::natives::num_cmp;
 use crate::natives::{type_name, values_equal};
 
 // ---------------------------------------------------------------------------
@@ -1138,6 +1140,502 @@ fn as_int(v: &Value, _native: &str) -> Result<i64, EvalError> {
     }
 }
 
+// ===========================================================================
+// M112: sort + series set operations
+// ===========================================================================
+
+/// Kind tag for the series a native is operating on, so set-op helpers can
+/// reconstruct the right `Value` variant from a flat `Vec<Value>` of
+/// elements (chars for `string!`, values for `block!`/`paren!`).
+enum SeriesKind {
+    Block,
+    Paren,
+    String,
+}
+
+/// Flatten a series argument into a `Vec<Value>` of its elements from the
+/// cursor to the tail. `string!` is flattened to its `char!`s. Returns the
+/// span + kind so the result can be rebuilt.
+fn series_to_values(v: &Value) -> Result<(Vec<Value>, Span, SeriesKind), EvalError> {
+    match v {
+        Value::Block { series, span } => {
+            let data = series.data.borrow();
+            let vals = data[series.index..].to_vec();
+            Ok((vals, *span, SeriesKind::Block))
+        }
+        Value::Paren { series, span } => {
+            let data = series.data.borrow();
+            let vals = data[series.index..].to_vec();
+            Ok((vals, *span, SeriesKind::Paren))
+        }
+        Value::String { s, span } => {
+            let vals: Vec<Value> = s.chars().map(Value::char).collect();
+            Ok((vals, *span, SeriesKind::String))
+        }
+        other => Err(type_err("block!, paren!, or string!", other)),
+    }
+}
+
+/// Reconstruct a series `Value` from a flat element vec, preserving the
+/// original variant. `String` filters to `char!` elements (drops anything
+/// else, matching the `string!`-holds-chars invariant).
+fn values_to_series(vals: Vec<Value>, _span: Span, kind: SeriesKind) -> Value {
+    match kind {
+        SeriesKind::Block => Value::block(Series::new(vals)),
+        SeriesKind::Paren => Value::paren(Series::new(vals)),
+        SeriesKind::String => {
+            let mut s = String::new();
+            for v in &vals {
+                if let Value::Char { c, .. } = v {
+                    s.push(*c);
+                }
+            }
+            Value::string(Rc::from(s.as_str()))
+        }
+    }
+}
+
+/// True if `v` is one of the numeric types `num_cmp` handles
+/// (`integer!`/`float!`/`char!`).
+fn is_numeric(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Integer { .. } | Value::Float { .. } | Value::Char { .. }
+    )
+}
+
+/// Case-aware comparison of two `&str` slices. Case-insensitive by default
+/// (mirrors `find`'s default for strings); `/case` makes it exact.
+fn compare_strs(a: &str, b: &str, case_sensitive: bool) -> std::cmp::Ordering {
+    if case_sensitive {
+        a.cmp(b)
+    } else {
+        a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase())
+    }
+}
+
+/// Total ordering across `Value` types for `sort`. Pragmatic POC deviation
+/// from Red's exact cross-type ordering: numerics use `num_cmp`; two strings
+/// or two word-family values compare lexically (case-aware); everything else
+/// falls back to `(type_name, mold)` so `sort` never errors on a mixed-type
+/// block (Red errors on some cross-type pairs — documented gap).
+fn total_cmp(a: &Value, b: &Value, case_sensitive: bool) -> Result<std::cmp::Ordering, EvalError> {
+    if is_numeric(a) && is_numeric(b) {
+        return num_cmp(a, b);
+    }
+    if let (Value::String { s: sa, .. }, Value::String { s: sb, .. }) = (a, b) {
+        return Ok(compare_strs(sa, sb, case_sensitive));
+    }
+    if let (Some(wa), Some(wb)) = (word_sym(a), word_sym(b)) {
+        return Ok(compare_strs(wa.as_str(), wb.as_str(), case_sensitive));
+    }
+    let ta = type_name(a);
+    let tb = type_name(b);
+    Ok(match ta.cmp(tb) {
+        std::cmp::Ordering::Equal => {
+            let ma = red_core::printer::mold_to_string(a);
+            let mb = red_core::printer::mold_to_string(b);
+            ma.cmp(&mb)
+        }
+        ord => ord,
+    })
+}
+
+/// Invoke a user-supplied `sort/compare` comparator (a `func`/`closure`
+/// value taking two args). Accepts a `logic!` result (`true` → `a < b`) or
+/// an `integer!` result (sign: `<0` → less, `0` → equal, `>0` → greater).
+/// Other return types raise a `Native` error.
+fn invoke_comparator(
+    fd: &Rc<red_core::value::FuncDef>,
+    a: &Value,
+    b: &Value,
+    env: &mut Env,
+) -> Result<std::cmp::Ordering, EvalError> {
+    let result = call_user_func(fd, vec![a.clone(), b.clone()], &RefineArgs::empty(), env)?;
+    match result {
+        Value::Logic(true) => Ok(std::cmp::Ordering::Less),
+        Value::Logic(false) => Ok(std::cmp::Ordering::Greater),
+        Value::Integer { n, .. } => Ok(n.cmp(&0)),
+        ref other => Err(EvalError::Native {
+            message: format!(
+                "sort/compare: comparator must return logic! or integer!, got {}",
+                type_name(other)
+            ),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
+/// `sort series` — in-place stable sort. Mutates and returns the input
+/// series (Red parity — `sort` is destructive by default; use
+/// `sort copy blk` for a non-mutating sort).
+///
+/// Refinements:
+/// - `/case` — case-sensitive string/word comparison (default: case-
+///   insensitive, mirroring `find`).
+/// - `/reverse` — descending order.
+/// - `/skip size` — sort records of `size` elements as units, keyed by each
+///   record's first element. Trailing partial record stays at the tail
+///   untouched.
+/// - `/compare func` — custom comparator: a `func`/`closure` taking two
+///   elements, returning `logic!` (`true` = `a < b`) or `integer!` (sign).
+fn sort(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(arity(args, "sort", 1, 0));
+    }
+    let case_sensitive = refs.has(&Symbol::new("case"));
+    let reverse = refs.has(&Symbol::new("reverse"));
+    let skip = if refs.has(&Symbol::new("skip")) {
+        let skip_arg = refs
+            .get(&Symbol::new("skip"))
+            .and_then(|a| a.first())
+            .ok_or_else(|| EvalError::Native {
+                message: "sort/skip: missing size argument".into(),
+                span: args[0].span_or_default(),
+            })?;
+        let skip_span = skip_arg.span_or_default();
+        let n = as_int(skip_arg, "sort/skip")?;
+        if n <= 0 {
+            return Err(EvalError::Native {
+                message: format!("sort/skip: size must be a positive integer, got {n}"),
+                span: skip_span,
+            });
+        }
+        n as usize
+    } else {
+        1
+    };
+    let compare_fn: Option<Rc<red_core::value::FuncDef>> = if refs.has(&Symbol::new("compare")) {
+        let f = refs
+            .get(&Symbol::new("compare"))
+            .and_then(|a| a.first())
+            .ok_or_else(|| EvalError::Native {
+                message: "sort/compare: missing comparator argument".into(),
+                span: args[0].span_or_default(),
+            })?;
+        match f {
+            Value::Func(fd) => Some(fd.clone()),
+            Value::Closure(c) => Some(c.func.clone()),
+            other => {
+                return Err(EvalError::TypeError {
+                    expected: "function! or closure!",
+                    found: type_name(other),
+                    span: other.span_or_default(),
+                })
+            }
+        }
+    } else {
+        None
+    };
+
+    // String input: sort chars (only /case and /reverse meaningful; /skip
+    // is treated as char-group size uniformly).
+    if let Value::String { s, .. } = &args[0] {
+        let mut chars: Vec<char> = s.chars().collect();
+        sort_chars_in_place(
+            &mut chars,
+            skip,
+            reverse,
+            case_sensitive,
+            compare_fn.as_ref(),
+            env,
+        )?;
+        let out: String = chars.into_iter().collect();
+        return Ok(Value::string(Rc::from(out.as_str())));
+    }
+    let (series, span, is_paren) = extract_series(&args[0])?;
+    let len = storage_len(&series);
+    let start = series.index.min(len);
+    {
+        let mut data = series.data.borrow_mut();
+        let slice = &mut data[start..];
+        sort_values_in_place(
+            slice,
+            skip,
+            reverse,
+            case_sensitive,
+            compare_fn.as_ref(),
+            env,
+        )?;
+    }
+    Ok(mk_series(series, span, is_paren))
+}
+
+/// Sort a `&mut [Value]` in place (stable). `/skip` chunks records of `size`
+/// elements; records are compared by their first element. Trailing partial
+/// records are left at the tail in place.
+fn sort_values_in_place(
+    slice: &mut [Value],
+    skip: usize,
+    reverse: bool,
+    case_sensitive: bool,
+    compare_fn: Option<&Rc<red_core::value::FuncDef>>,
+    env: &mut Env,
+) -> Result<(), EvalError> {
+    if compare_fn.is_none() && skip == 1 {
+        // Fast path: no comparator, no record chunking.
+        sort_with_err(slice, reverse, |a, b| total_cmp(a, b, case_sensitive))?;
+        return Ok(());
+    }
+    sort_chunked(slice, skip, reverse, |a, b| {
+        if let Some(fd) = compare_fn {
+            invoke_comparator(fd, a, b, env)
+        } else {
+            total_cmp(a, b, case_sensitive)
+        }
+    })?;
+    Ok(())
+}
+
+/// Same as `sort_values_in_place` but for `char` slices (string! sort).
+fn sort_chars_in_place(
+    chars: &mut Vec<char>,
+    skip: usize,
+    reverse: bool,
+    case_sensitive: bool,
+    compare_fn: Option<&Rc<red_core::value::FuncDef>>,
+    env: &mut Env,
+) -> Result<(), EvalError> {
+    if compare_fn.is_some() {
+        // Unusual but supported: a comparator on chars treats them as
+        // `Value::Char` inputs. Convert to a Value slice, sort, convert back.
+        let mut vals: Vec<Value> = chars.iter().map(|c| Value::char(*c)).collect();
+        sort_values_in_place(&mut vals, skip, reverse, case_sensitive, compare_fn, env)?;
+        *chars = vals
+            .into_iter()
+            .filter_map(|v| {
+                if let Value::Char { c, .. } = v {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        return Ok(());
+    }
+    chars.sort_by(|a, b| {
+        let ord = compare_strs(&a.to_string(), &b.to_string(), case_sensitive);
+        if reverse {
+            ord.reverse()
+        } else {
+            ord
+        }
+    });
+    Ok(())
+}
+
+/// Stable sort of a `&mut [Value]` whose comparator returns `Result`. Errors
+/// are captured in a side-channel and surfaced after the sort completes.
+fn sort_with_err<F>(slice: &mut [Value], reverse: bool, mut cmp: F) -> Result<(), EvalError>
+where
+    F: FnMut(&Value, &Value) -> Result<std::cmp::Ordering, EvalError>,
+{
+    let err: std::cell::RefCell<Option<EvalError>> = std::cell::RefCell::new(None);
+    let mut idx: Vec<usize> = (0..slice.len()).collect();
+    idx.sort_by(|&a, &b| {
+        if err.borrow().is_some() {
+            return std::cmp::Ordering::Equal;
+        }
+        match cmp(&slice[a], &slice[b]) {
+            Ok(ord) => {
+                let ord = if reverse { ord.reverse() } else { ord };
+                ord.then(a.cmp(&b))
+            }
+            Err(e) => {
+                *err.borrow_mut() = Some(e);
+                std::cmp::Ordering::Equal
+            }
+        }
+    });
+    if let Some(e) = err.into_inner() {
+        return Err(e);
+    }
+    // Apply the permutation stably (idx[i] is the source index for position i).
+    let mut result: Vec<Value> = Vec::with_capacity(slice.len());
+    for &i in &idx {
+        result.push(slice[i].clone());
+    }
+    slice.clone_from_slice(&result);
+    Ok(())
+}
+
+/// Sort `slice` in `skip`-element records (stable), keyed by each record's
+/// first element. Trailing partial record stays in place.
+fn sort_chunked<F>(
+    slice: &mut [Value],
+    skip: usize,
+    reverse: bool,
+    mut cmp: F,
+) -> Result<(), EvalError>
+where
+    F: FnMut(&Value, &Value) -> Result<std::cmp::Ordering, EvalError>,
+{
+    let n = slice.len();
+    let n_full = (n / skip) * skip;
+    if n_full == 0 {
+        return Ok(());
+    }
+    // Records live at indices [0..n_full), each `skip` wide.
+    let err: std::cell::RefCell<Option<EvalError>> = std::cell::RefCell::new(None);
+    let mut idx: Vec<usize> = (0..n_full).step_by(skip).collect();
+    idx.sort_by(|&a, &b| {
+        if err.borrow().is_some() {
+            return std::cmp::Ordering::Equal;
+        }
+        match cmp(&slice[a], &slice[b]) {
+            Ok(ord) => {
+                let ord = if reverse { ord.reverse() } else { ord };
+                ord.then(a.cmp(&b))
+            }
+            Err(e) => {
+                *err.borrow_mut() = Some(e);
+                std::cmp::Ordering::Equal
+            }
+        }
+    });
+    if let Some(e) = err.into_inner() {
+        return Err(e);
+    }
+    // Gather records in sorted order.
+    let mut ordered: Vec<Value> = Vec::with_capacity(n_full);
+    for &start in &idx {
+        ordered.extend_from_slice(&slice[start..start + skip]);
+    }
+    slice[..n_full].clone_from_slice(&ordered);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// M112: series set operations
+// ---------------------------------------------------------------------------
+
+/// `unique series` — new series with duplicates removed, preserving
+/// first-occurrence order. Works on `block!`/`paren!`/`string!`.
+fn unique(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(arity(args, "unique", 1, 0));
+    }
+    let (vals, span, kind) = series_to_values(&args[0])?;
+    let case_sensitive = refs.has(&Symbol::new("case"));
+    let mut out: Vec<Value> = Vec::with_capacity(vals.len());
+    for v in vals {
+        let found = out.iter().any(|e| values_match(&v, e, case_sensitive));
+        if !found {
+            out.push(v);
+        }
+    }
+    Ok(values_to_series(out, span, kind))
+}
+
+/// `intersect series1 series2` — new series of elements from `series1` (in
+/// order) that appear in `series2`. Order preserved by first operand.
+fn intersect(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity(args, "intersect", 2, args.len()));
+    }
+    // Bitset dispatch: both operands bitset! → bitset intersect.
+    if let (Value::Bitset(a), Value::Bitset(b)) = (&args[0], &args[1]) {
+        return Ok(crate::bitset::bitset_intersect(a, b));
+    }
+    let case_sensitive = refs.has(&Symbol::new("case"));
+    let (a_vals, span, kind) = series_to_values(&args[0])?;
+    let (b_vals, _, _) = series_to_values(&args[1])?;
+    let mut out: Vec<Value> = Vec::with_capacity(a_vals.len());
+    for v in a_vals {
+        let in_b = b_vals.iter().any(|e| values_match(&v, e, case_sensitive));
+        if in_b && !out.iter().any(|e| values_match(&v, e, case_sensitive)) {
+            out.push(v);
+        }
+    }
+    Ok(values_to_series(out, span, kind))
+}
+
+/// `union series1 series2` — `series1` followed by `series2`'s elements
+/// not already present. Order preserved (first operand first).
+fn union(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity(args, "union", 2, args.len()));
+    }
+    if let (Value::Bitset(a), Value::Bitset(b)) = (&args[0], &args[1]) {
+        return Ok(crate::bitset::bitset_union(a, b));
+    }
+    let case_sensitive = refs.has(&Symbol::new("case"));
+    let (a_vals, span, kind) = series_to_values(&args[0])?;
+    let (b_vals, _, _) = series_to_values(&args[1])?;
+    let mut out: Vec<Value> = a_vals.clone();
+    for v in b_vals {
+        let already = out.iter().any(|e| values_match(&v, e, case_sensitive));
+        if !already {
+            out.push(v);
+        }
+    }
+    Ok(values_to_series(out, span, kind))
+}
+
+/// `difference series1 series2` — symmetric difference: elements of
+/// `series1` not in `series2` (in order), followed by elements of
+/// `series2` not in `series1` (in order). Distinct from `exclude`.
+fn difference(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity(args, "difference", 2, args.len()));
+    }
+    if let (Value::Bitset(a), Value::Bitset(b)) = (&args[0], &args[1]) {
+        return Ok(crate::bitset::bitset_difference(a, b));
+    }
+    let case_sensitive = refs.has(&Symbol::new("case"));
+    let (a_vals, span, kind) = series_to_values(&args[0])?;
+    let (b_vals, _, _) = series_to_values(&args[1])?;
+    let mut out: Vec<Value> = Vec::new();
+    for v in &a_vals {
+        let in_b = b_vals.iter().any(|e| values_match(v, e, case_sensitive));
+        if !in_b && !out.iter().any(|e| values_match(v, e, case_sensitive)) {
+            out.push(v.clone());
+        }
+    }
+    for v in &b_vals {
+        let in_a = a_vals.iter().any(|e| values_match(v, e, case_sensitive));
+        if !in_a && !out.iter().any(|e| values_match(v, e, case_sensitive)) {
+            out.push(v.clone());
+        }
+    }
+    Ok(values_to_series(out, span, kind))
+}
+
+/// `exclude series1 series2` — set difference: elements of `series1` not in
+/// `series2`, in `series1`'s order. Distinct from `difference` (which is
+/// symmetric).
+fn exclude(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity(args, "exclude", 2, args.len()));
+    }
+    let case_sensitive = refs.has(&Symbol::new("case"));
+    let (a_vals, span, kind) = series_to_values(&args[0])?;
+    let (b_vals, _, _) = series_to_values(&args[1])?;
+    let mut out: Vec<Value> = Vec::with_capacity(a_vals.len());
+    for v in a_vals {
+        let in_b = b_vals.iter().any(|e| values_match(&v, e, case_sensitive));
+        if !in_b {
+            out.push(v);
+        }
+    }
+    Ok(values_to_series(out, span, kind))
+}
+
+/// Match helper for set ops: case-aware for string pairs, otherwise
+/// `series_match` (so `'b` matches a `word! b` element).
+fn values_match(a: &Value, b: &Value, case_sensitive: bool) -> bool {
+    match (a, b) {
+        (Value::String { s: sa, .. }, Value::String { s: sb, .. }) => {
+            if case_sensitive {
+                sa == sb
+            } else {
+                sa.eq_ignore_ascii_case(sb)
+            }
+        }
+        _ => series_match(a, b),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
@@ -1241,6 +1739,42 @@ pub fn register_series_natives(env: &mut Env) {
     reg(env, "foreach", foreach as NF, 3);
     reg(env, "forall", forall as NF, 3);
     reg(env, "forskip", forskip as NF, 4);
+
+    // M112: sort + series set operations. `sort` declares /case, /reverse,
+    // /skip (1 arg), /compare (1 arg). The set-ops declare /case and /skip
+    // for parity (the series set-op implementations currently honor /case;
+    // /skip on set-ops is accepted but treated as 1 — record-wise set ops
+    // are a stretch goal, documented in plan11).
+    reg_refined(
+        env,
+        "sort",
+        sort as NF,
+        1,
+        &[("case", 0), ("reverse", 0), ("skip", 1), ("compare", 1)],
+    );
+    reg_refined(env, "unique", unique as NF, 1, &[("case", 0)]);
+    reg_refined(
+        env,
+        "intersect",
+        intersect as NF,
+        2,
+        &[("case", 0), ("skip", 1)],
+    );
+    reg_refined(env, "union", union as NF, 2, &[("case", 0), ("skip", 1)]);
+    reg_refined(
+        env,
+        "difference",
+        difference as NF,
+        2,
+        &[("case", 0), ("skip", 1)],
+    );
+    reg_refined(
+        env,
+        "exclude",
+        exclude as NF,
+        2,
+        &[("case", 0), ("skip", 1)],
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1744,5 +2278,83 @@ mod tests {
     #[test]
     fn append_only_scalar_unchanged() {
         assert_eq!(mold_val(&val("append/only [1 2] 3")), "[1 2 3]");
+    }
+
+    // --- M112: sort + set operations ---
+
+    #[test]
+    fn sort_basic_block() {
+        assert_eq!(mold_val(&val("sort [3 1 2]")), "[1 2 3]");
+    }
+
+    #[test]
+    fn sort_reverse() {
+        assert_eq!(mold_val(&val("sort/reverse [3 1 2]")), "[3 2 1]");
+    }
+
+    #[test]
+    fn sort_skip_records() {
+        // Sort pairs by first element: [b 2 a 1] → [a 1 b 2].
+        assert_eq!(mold_val(&val("sort/skip [b 2 a 1] 2")), "[a 1 b 2]");
+    }
+
+    #[test]
+    fn sort_compare_func() {
+        // Custom comparator returning logic!: a < b.
+        assert_eq!(
+            mold_val(&val("sort/compare [3 1 2] func [a b][a < b]")),
+            "[1 2 3]"
+        );
+    }
+
+    #[test]
+    fn sort_string_by_char() {
+        assert_eq!(mold_val(&val("sort \"cba\"")), "\"abc\"");
+    }
+
+    #[test]
+    fn unique_removes_duplicates() {
+        assert_eq!(mold_val(&val("unique [1 2 2 3 1]")), "[1 2 3]");
+    }
+
+    #[test]
+    fn intersect_series() {
+        assert_eq!(mold_val(&val("intersect [1 2 3] [2 3 4]")), "[2 3]");
+    }
+
+    #[test]
+    fn union_series() {
+        assert_eq!(mold_val(&val("union [1 2] [2 3]")), "[1 2 3]");
+    }
+
+    #[test]
+    fn difference_series_symmetric() {
+        // Symmetric: 1,3 from a-not-b, then 4 from b-not-a.
+        assert_eq!(mold_val(&val("difference [1 2 3] [2 4]")), "[1 3 4]");
+    }
+
+    #[test]
+    fn exclude_series_set_difference() {
+        // Set difference: a-not-b only.
+        assert_eq!(mold_val(&val("exclude [1 2 3] [2 4]")), "[1 3]");
+    }
+
+    #[test]
+    fn set_ops_bitset_regression() {
+        // M46 bitset ops still dispatch correctly after the M112 dispatcher
+        // rewrite (union/intersect/difference route to bitset helpers when
+        // both operands are bitset!).
+        assert_eq!(
+            mold_val(&val("union charset \"AB\" charset \"CD\"")),
+            "make bitset! \"ABCD\""
+        );
+        assert_eq!(
+            mold_val(&val("intersect charset \"ABCD\" charset \"BE\"")),
+            "make bitset! \"B\""
+        );
+        assert_eq!(
+            mold_val(&val("difference charset \"ABCD\" charset \"BC\"")),
+            "make bitset! \"AD\""
+        );
     }
 }

@@ -209,29 +209,11 @@ module 'stdlib [
         acc
     ]
 
-    ; --- sort (pure Red; M30 deferred `sort` as a native) ---
-
-    ; Selection sort. Mutates the input block (matches Red's `sort`
-    ; semantics — use `sort copy blk` for a non-mutating sort). Returns
-    ; the sorted block.
-    sort: func [blk] [
-        n: length? blk
-        i: 1
-        while [i < n] [
-            j: i + 1
-            min-idx: i
-            while [j <= n] [
-                if (pick blk j) < (pick blk min-idx) [min-idx: j]
-                j: j + 1
-            ]
-            ; swap i and min-idx
-            tmp: pick blk i
-            poke blk i (pick blk min-idx)
-            poke blk min-idx tmp
-            i: i + 1
-        ]
-        blk
-    ]
+    ; --- sort ---
+    ; M112: `sort` is now a native (crates/red-eval/src/series.rs). The
+    ; pure-Red selection sort that lived here was removed when the native
+    ; landed; the native is faster and supports /case, /reverse, /skip,
+    ; and /compare refinements.
 
     export [
         str-upper str-lower starts-with? ends-with? contains? str-join
@@ -240,6 +222,5 @@ module 'stdlib [
         flatten min-of max-of intersperse chunk
         gcd lcm sign-of clamp factorial-iter
         range-of
-        sort
     ]
 ]

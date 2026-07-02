@@ -240,44 +240,30 @@ fn expect_bitset<'a>(
 }
 
 /// `union a b` — bitset union. Mutates `a` and returns it.
-fn union_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(arity_err(args, "union", 2, args.len()));
-    }
-    let a = expect_bitset(&args[0], "union")?.clone();
-    let b = expect_bitset(&args[1], "union")?;
+pub(crate) fn bitset_union(
+    a: &std::rc::Rc<std::cell::RefCell<BitsetDef>>,
+    b: &std::rc::Rc<std::cell::RefCell<BitsetDef>>,
+) -> Value {
     a.borrow().union(&b.borrow());
-    Ok(Value::Bitset(a))
+    Value::Bitset(a.clone())
 }
 
 /// `intersect a b` — bitset intersection. Mutates `a` and returns it.
-fn intersect_native(
-    args: &[Value],
-    _refs: &RefineArgs,
-    _env: &mut Env,
-) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(arity_err(args, "intersect", 2, args.len()));
-    }
-    let a = expect_bitset(&args[0], "intersect")?.clone();
-    let b = expect_bitset(&args[1], "intersect")?;
+pub(crate) fn bitset_intersect(
+    a: &std::rc::Rc<std::cell::RefCell<BitsetDef>>,
+    b: &std::rc::Rc<std::cell::RefCell<BitsetDef>>,
+) -> Value {
     a.borrow().intersect(&b.borrow());
-    Ok(Value::Bitset(a))
+    Value::Bitset(a.clone())
 }
 
 /// `difference a b` — bitset difference (a \ b). Mutates `a` and returns it.
-fn difference_native(
-    args: &[Value],
-    _refs: &RefineArgs,
-    _env: &mut Env,
-) -> Result<Value, EvalError> {
-    if args.len() != 2 {
-        return Err(arity_err(args, "difference", 2, args.len()));
-    }
-    let a = expect_bitset(&args[0], "difference")?.clone();
-    let b = expect_bitset(&args[1], "difference")?;
+pub(crate) fn bitset_difference(
+    a: &std::rc::Rc<std::cell::RefCell<BitsetDef>>,
+    b: &std::rc::Rc<std::cell::RefCell<BitsetDef>>,
+) -> Value {
     a.borrow().difference(&b.borrow());
-    Ok(Value::Bitset(a))
+    Value::Bitset(a.clone())
 }
 
 /// `extract? char-or-int bitset` — membership test. Returns `logic!`.
@@ -332,10 +318,13 @@ pub fn register_bitset_natives(env: &mut Env) {
 
     reg(env, "charset", charset_native as NF, 1);
     reg(env, "to-bitset", to_bitset as NF, 1);
-    reg(env, "union", union_native as NF, 2);
-    reg(env, "intersect", intersect_native as NF, 2);
-    reg(env, "difference", difference_native as NF, 2);
     reg(env, "extract?", extract_predicate as NF, 2);
+    // Note: `union`/`intersect`/`difference` are registered by
+    // `series::register_series_natives` as operand-type dispatchers that
+    // route `bitset!` operands to `bitset_union`/`bitset_intersect`/
+    // `bitset_difference` and `block!`/`string!` operands to the series
+    // implementations. This keeps a single native name per set-op (matching
+    // Red's uniform dispatch) rather than shadowing.
 }
 
 // ---------------------------------------------------------------------------

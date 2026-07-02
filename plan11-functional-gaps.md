@@ -120,59 +120,59 @@ word resolves to a `Value::Bitset`. This milestone adds the missing case:
 parsed recursively**, with its own cursor/backtrack state layered on the
 parent's `input`.
 
-- [ ] In `parse.rs`'s word-resolution block (`:1057–1086`), add a third arm:
+- [x] In `parse.rs`'s word-resolution block (`:1057–1086`), add a third arm:
       if `v_resolved` is `Some(Value::Block(b))` (or the word's bound value
       is a `Block` directly, mirroring the existing `Bitset` check), treat it
       as a sub-rule: recursively invoke the rule-block interpreter
       (`rule_seq`-equivalent) against the **same** `input`/`i` cursor state,
       not a copy — sub-rule success/failure must affect the parent's
       position exactly like an inline `[...]` group would.
-- [ ] Recursion depth guard: add a `max_depth` (or reuse an existing
+- [x] Recursion depth guard: add a `max_depth` (or reuse an existing
       recursion-guard pattern from `interp_walker.rs` if one exists) to avoid
       a stack overflow on `self-referential-rule: [self-referential-rule]`.
       Error `EvalError::ParseRecursionLimit` on overflow, not a Rust panic.
-- [ ] Self-reference / mutual reference: `a: [some b] b: [some a]`-style
+- [x] Self-reference / mutual reference: `a: [some b] b: [some a]`-style
       mutual recursion must work — the lookup happens at *rule-invocation*
       time (word is re-resolved each time it's encountered), not at
       `parse`-call setup time, so forward references to not-yet-defined
       words at parse-time are fine as long as they're bound by the time the
       rule actually runs.
-- [ ] Disambiguation with the existing `Bitset` arm: if a word resolves to
+- [x] Disambiguation with the existing `Bitset` arm: if a word resolves to
       **both** meanings is impossible (a binding is one `Value`), so order
       is simply: `Bitset` → charset match (existing behavior, unchanged);
       `Block` → sub-rule recursion (new); anything else → literal-value
       match (existing fallback, unchanged).
-- [ ] `collect`/`keep` interaction: a named sub-rule invoked from inside an
+- [x] `collect`/`keep` interaction: a named sub-rule invoked from inside an
       active `collect` block should have its matched span contribute to the
       collect the same way an inline `[...]` group does (i.e., the *parent*
       collect stack is visible to the sub-rule's matches — no separate
       collect scope per sub-rule call). Confirm against Red semantics; if Red
       scopes `collect` per-invocation instead, document the deviation.
-- [ ] `into` interaction: a named sub-rule can be the rule argument to
+- [x] `into` interaction: a named sub-rule can be the rule argument to
       `into word rule` (`parse.rs:950`) — no special-casing needed if the
       sub-rule dispatch happens through the same code path `into` already
       calls into.
-- [ ] Inline `#[test]`: `digit: [#"0" - #"9"] parse "5" [some digit]` → true.
-- [ ] Inline `#[test]`: mutual recursion —
+- [x] Inline `#[test]`: `digit: [#"0" - #"9"] parse "5" [some digit]` → true.
+- [x] Inline `#[test]`: mutual recursion —
       `even-run: [opt [#"a" odd-run]] odd-run: [#"b" opt even-run]
       parse "abab" [even-run]` matches (or an equivalent simpler mutual-rule
       fixture — pick the minimal grammar that actually exercises the mutual
       path).
-- [ ] Inline `#[test]`: self-recursive rule matching nested balanced
+- [x] Inline `#[test]`: self-recursive rule matching nested balanced
       parens — `group: [#"(" any [group | (a run of non-paren chars)]
       #")"] parse "((a)(b))" [group]` → true (the canonical "why you need
       recursion" example).
-- [ ] Inline `#[test]`: recursion-limit fixture — a self-referential rule
+- [x] Inline `#[test]`: recursion-limit fixture — a self-referential rule
       with no base case on non-matching input terminates with
       `ParseRecursionLimit`, not a stack overflow (run under a debug-assert
       build so a real overflow would be caught, not silently pass).
-- [ ] Inline `#[test]`: regression guard — existing `bitset`-as-word rules
+- [x] Inline `#[test]`: regression guard — existing `bitset`-as-word rules
       (`parse.rs` test suite, e.g. `parse_bitset_rule`/`parse_bitset_some`)
       still pass unchanged.
-- [ ] Add golden fixtures: `parse_named_rule_basic`, `parse_named_rule_mutual`,
+- [x] Add golden fixtures: `parse_named_rule_basic`, `parse_named_rule_mutual`,
       `parse_named_rule_nested_recursion`.
-- [ ] Add `programs_errors/parse_recursion_limit.red`.
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+- [x] Add `programs_errors/parse_recursion_limit.red`.
+- [x] `cargo test --workspace` green; `--features force-walk` green.
 
 ### M110 open questions
 
@@ -194,24 +194,24 @@ included here (rather than in `plan13`) because `print mold x` is used
 *constantly* in idiomatic Red for debugging, and its absence is surprising
 enough to count as a functional gap, not a nice-to-have.
 
-- [ ] Register `mold` in `registry.rs` alongside the existing `form`
+- [x] Register `mold` in `registry.rs` alongside the existing `form`
       registration (`registry.rs:334`, inside/adjacent to
       `crate::convert::register_convert_natives`): `mold value` →
       `printer::mold_to_string(&value)` wrapped as a `Value::Str`.
-- [ ] Add a `/part` refinement? **Decision: no** — Red's `mold/part` exists
+- [x] Add a `/part` refinement? **Decision: no** — Red's `mold/part` exists
       for length-limiting output; skip in v0.9, note as a `plan13`
       refinement-expansion candidate instead (keep this milestone minimal).
-- [ ] Add `/only` refinement — Red's `mold/only` omits the outer `[...]` when
+- [x] Add `/only` refinement — Red's `mold/only` omits the outer `[...]` when
       molding a `block!`. **Decision: include** — it's a one-line change atop
       the same `mold_to_string` call (strip outer brackets when the input is
       a `Block` and `/only` is set) and is commonly paired with `mold`.
-- [ ] Inline `#[test]`: `mold 5` → `"5"`; `mold "hi"` → `{"hi"}`; `mold [1 2]`
+- [x] Inline `#[test]`: `mold 5` → `"5"`; `mold "hi"` → `{"hi"}`; `mold [1 2]`
       → `"[1 2]"`.
-- [ ] Inline `#[test]`: `mold/only [1 2]` → `"1 2"` (no brackets).
-- [ ] Inline `#[test]`: `print mold make object! [x: 1]` produces the same
+- [x] Inline `#[test]`: `mold/only [1 2]` → `"1 2"` (no brackets).
+- [x] Inline `#[test]`: `print mold make object! [x: 1]` produces the same
       text `printer.rs`'s own unit tests already assert for `mold_object`.
-- [ ] Add golden fixtures: `mold_native_basic`, `mold_native_only`.
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+- [x] Add golden fixtures: `mold_native_basic`, `mold_native_only`.
+- [x] `cargo test --workspace` green; `--features force-walk` green.
 
 ---
 
@@ -223,13 +223,13 @@ operations that `bitset.rs` only offers for `bitset!` today.
 
 ### `sort`
 
-- [ ] Add `sort` native in `series.rs` (or a new `sort.rs` if the module is
+- [x] Add `sort` native in `series.rs` (or a new `sort.rs` if the module is
       getting large): in-place stable sort of a `block!` (by `Value`
       comparison, reusing whatever total order `compare.rs` already defines
       for `<`/`>` — the same order `min`/`max` use) or a `string!` (by char).
       Mutates and returns the input series (Red parity — `sort` is
       destructive by default).
-- [ ] Refinements: `/case` (case-sensitive string comparison — mirrors the
+- [x] Refinements: `/case` (case-sensitive string comparison — mirrors the
       existing `find/case` pattern in `series.rs:1182`), `/reverse`,
       `/skip size` (sort records of `size` elements as a unit — e.g.
       `sort/skip data 2` sorts `[k1 v1 k2 v2 ...]` pairs by `k`), `/compare
@@ -237,44 +237,44 @@ operations that `bitset.rs` only offers for `bitset!` today.
       elements, returning `logic!` or an ordering integer per Red's
       `compare` refinement contract — confirm exact Red signature before
       implementing).
-- [ ] **Decision: the new native shadows/replaces the stdlib `sort` at
+- [x] **Decision: the new native shadows/replaces the stdlib `sort` at
       `stdlib.red:217`.** Remove the stdlib definition once the native is
       registered (natives are looked up before stdlib bindings — confirm
       resolution order so this is a clean swap, not a silent shadow bug).
-- [ ] Inline `#[test]`: `sort [3 1 2]` → `[1 2 3]`.
-- [ ] Inline `#[test]`: `sort/reverse [3 1 2]` → `[3 2 1]`.
-- [ ] Inline `#[test]`: `sort/skip [b 2 a 1] 2` → `[a 1 b 2]` (sort pairs by
+- [x] Inline `#[test]`: `sort [3 1 2]` → `[1 2 3]`.
+- [x] Inline `#[test]`: `sort/reverse [3 1 2]` → `[3 2 1]`.
+- [x] Inline `#[test]`: `sort/skip [b 2 a 1] 2` → `[a 1 b 2]` (sort pairs by
       first element).
-- [ ] Inline `#[test]`: `sort/compare [3 1 2] func [a b][a < b]` → `[1 2 3]`.
-- [ ] Inline `#[test]`: `sort "cba"` → `"abc"`.
+- [x] Inline `#[test]`: `sort/compare [3 1 2] func [a b][a < b]` → `[1 2 3]`.
+- [x] Inline `#[test]`: `sort "cba"` → `"abc"`.
 
 ### Series set operations
 
-- [ ] Add `unique` native (`series.rs`): returns a new series with duplicate
+- [x] Add `unique` native (`series.rs`): returns a new series with duplicate
       elements removed, preserving first-occurrence order. Works on
       `block!`/`string!`.
-- [ ] Add `intersect`/`union`/`difference`/`exclude` **series** overloads —
+- [x] Add `intersect`/`union`/`difference`/`exclude` **series** overloads —
       today these symbols are bound only to the `bitset!` versions
       (`bitset.rs:333–338`); extend the same native names to dispatch on
       `block!`/`string!` operands too (order-preserving-by-first-operand
       semantics, matching Red — confirm exact tie-break/order rules per Red
       docs before implementing).
-- [ ] Refinements: `/case` on all four (string case-sensitivity), `/skip
+- [x] Refinements: `/case` on all four (string case-sensitivity), `/skip
       size` on all four (record-wise set ops, mirroring `sort/skip`).
-- [ ] Inline `#[test]`: `unique [1 2 2 3 1]` → `[1 2 3]`.
-- [ ] Inline `#[test]`: `intersect [1 2 3] [2 3 4]` → `[2 3]`.
-- [ ] Inline `#[test]`: `union [1 2] [2 3]` → `[1 2 3]`.
-- [ ] Inline `#[test]`: `difference [1 2 3] [2]` → `[1 3]`.
-- [ ] Inline `#[test]`: `exclude [1 2 3] [2]` → `[1 3]` (confirm Red's
+- [x] Inline `#[test]`: `unique [1 2 2 3 1]` → `[1 2 3]`.
+- [x] Inline `#[test]`: `intersect [1 2 3] [2 3 4]` → `[2 3]`.
+- [x] Inline `#[test]`: `union [1 2] [2 3]` → `[1 2 3]`.
+- [x] Inline `#[test]`: `difference [1 2 3] [2]` → `[1 3]`.
+- [x] Inline `#[test]`: `exclude [1 2 3] [2]` → `[1 3]` (confirm Red's
       `exclude` vs `difference` distinction — in Red they differ when more
       than two sets/order matters; verify before asserting equivalence in
       the test).
-- [ ] Inline `#[test]`: regression guard — `intersect`/`union`/`difference`/
+- [x] Inline `#[test]`: regression guard — `intersect`/`union`/`difference`/
       `exclude` on two `bitset!` values still dispatch to the M46
       implementation unchanged.
-- [ ] Add golden fixtures: `sort_basic`, `sort_refinements`, `set_ops_series`,
+- [x] Add golden fixtures: `sort_basic`, `sort_refinements`, `set_ops_series`,
       `set_ops_bitset_regression`.
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+- [x] `cargo test --workspace` green; `--features force-walk` green.
 
 ### M112 open questions
 
@@ -283,8 +283,17 @@ operations that `bitset.rs` only offers for `bitset!` today.
    whether `compare.rs`'s existing `<`/`>` cross-type behavior already
    matches — if `<` errors on mismatched types today, `sort` should
    propagate that error rather than silently coerce.
+   **Resolution (M112):** implemented a pragmatic total order (numerics via
+   `num_cmp`; strings lexicographically; word-family by name; everything
+   else falls back to `(type_name, mold)`). `sort` never errors on
+   mixed-type blocks — a documented POC deviation from Red's exact
+   cross-type ordering.
 2. **`exclude` vs `difference` semantics.** Verify against Red docs/source
    before implementing — do not assume they're aliases.
+   **Resolution (M112):** confirmed distinct. `difference` is symmetric
+   (a⊖b: a-not-b then b-not-a); `exclude` is set difference (a\b: a-not-b
+   only). Tests use multi-element second operands to exercise the
+   distinction.
 
 ---
 
