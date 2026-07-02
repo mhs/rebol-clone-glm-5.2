@@ -214,11 +214,13 @@ fn collect_setwords_inner(series: &Series, ctx: &Context, shadow: Option<&Contex
 }
 
 /// Phase 1b: allocate a slot for every word introduced as a loop variable by
-/// `repeat`, `foreach`, or `forall`. Each is recognized in either of two
-/// forms:
+/// `repeat`, `foreach`, `forall`, `for`, or `forskip`. Each is recognized in
+/// either of two forms:
 /// - `repeat 'i <count> <body>`  (lit-word counter, Red canonical form)
 /// - `repeat i <count> <body>`   (bare-word counter, accepted by the POC)
 /// - `foreach 'word <series> <body>` / `forall 'word <series> <body>`
+/// - `for word <start> <end> <bump> <body>` (word at i+1)
+/// - `forskip 'word <series> <size> <body>` (word at i+1)
 ///
 /// The lit-word/bare-word value itself is *not* a SetWord, so without this
 /// pass the loop name would never get a slot and body references would
@@ -242,7 +244,11 @@ pub(crate) fn collect_loop_vars(series: &Series, ctx: &Context) {
                 sym,
                 binding: Binding::Unbound,
                 ..
-            } if matches!(sym.as_str(), "repeat" | "foreach" | "forall") => {
+            } if matches!(
+                sym.as_str(),
+                "repeat" | "foreach" | "forall" | "for" | "forskip"
+            ) =>
+            {
                 if i + 1 < n {
                     let name = loop_word_name(&data[i + 1]);
                     if let Some(sym) = name {

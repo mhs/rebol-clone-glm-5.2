@@ -396,6 +396,24 @@ mod tests {
         assert_eq!(mold_to_string(&val("if false [42]")), "none");
     }
 
+    // --- M120: unless ---
+
+    #[test]
+    fn unless_false_evaluates_block() {
+        assert_eq!(mold_to_string(&val("unless false [1]")), "1");
+    }
+
+    #[test]
+    fn unless_true_returns_none() {
+        assert_eq!(mold_to_string(&val("unless true [1]")), "none");
+    }
+
+    #[test]
+    fn unless_truthy_condition_prints_nothing() {
+        let out = run_capture("unless (1 = 1) [print \"no\"]").unwrap();
+        assert_eq!(s(&out), "");
+    }
+
     #[test]
     fn either_true_branch() {
         assert_eq!(mold_to_string(&val("either 1 > 0 [\"y\"][\"n\"]")), "\"y\"");
@@ -447,6 +465,64 @@ mod tests {
     #[test]
     fn loop_break_returns_none() {
         assert_eq!(mold_to_string(&val("loop [break]")), "none");
+    }
+
+    // --- M121: forever ---
+
+    #[test]
+    fn forever_breaks_with_value() {
+        let v = val("i: 0 forever [i: i + 1 if i = 5 [break]] i");
+        assert_eq!(mold_to_string(&v), "5");
+    }
+
+    #[test]
+    fn forever_breaks_cleanly_single_iteration() {
+        let v = val("forever [break]");
+        assert_eq!(mold_to_string(&v), "none");
+    }
+
+    // --- M121: for ---
+
+    #[test]
+    fn for_ascending_sum() {
+        let v = val("total: 0 for i 1 5 1 [total: total + i] total");
+        assert_eq!(mold_to_string(&v), "15");
+    }
+
+    #[test]
+    fn for_descending_prints_reverse() {
+        let out = run_capture("for i 5 1 -1 [prin i]").unwrap();
+        assert_eq!(s(&out), "54321");
+    }
+
+    #[test]
+    fn for_single_iteration() {
+        let out = run_capture("for i 1 1 1 [prin \"x\"]").unwrap();
+        assert_eq!(s(&out), "x");
+    }
+
+    #[test]
+    fn for_empty_range_runs_nothing() {
+        let out = run_capture("for i 1 0 1 [prin \"x\"]").unwrap();
+        assert_eq!(s(&out), "");
+    }
+
+    #[test]
+    fn for_break_exits_cleanly() {
+        let v = val("total: 0 for i 1 100 1 [if i > 3 [break] total: total + i] total");
+        assert_eq!(mold_to_string(&v), "6");
+    }
+
+    #[test]
+    fn for_float_step() {
+        let out = run_capture("for i 1.0 2.0 0.5 [prin i prin \" \"]").unwrap();
+        assert_eq!(s(&out), "1.0 1.5 2.0 ");
+    }
+
+    #[test]
+    fn for_char_ascending() {
+        let out = run_capture("for c #\"a\" #\"c\" 1 [prin c]").unwrap();
+        assert_eq!(s(&out), "abc");
     }
 
     #[test]

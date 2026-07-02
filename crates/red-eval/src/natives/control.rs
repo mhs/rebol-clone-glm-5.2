@@ -37,6 +37,24 @@ pub(crate) fn if_native(
     }
 }
 
+/// `unless cond block` — inverse of `if`: evaluates `block` when `cond` is
+/// falsy, else returns `none`. Mirrors `if_native`'s return semantics.
+pub(crate) fn unless_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity_err(args, "unless", 2, args.len()));
+    }
+    if !truthy(&args[0]) {
+        let body = expect_block(args, 1, "unless")?;
+        dispatch_block(&body, env)
+    } else {
+        Ok(Value::None)
+    }
+}
+
 /// `either cond t-block f-block`
 pub(crate) fn either(
     args: &[Value],
@@ -56,7 +74,7 @@ pub(crate) fn either(
 }
 
 // ---------------------------------------------------------------------------
-// Loops: loop, repeat, until, while
+// Loops: loop, repeat, until, while, forever, for
 // ---------------------------------------------------------------------------
 
 /// `loop block` — evaluates `block` repeatedly until `break`. Returns the
@@ -213,6 +231,116 @@ pub(crate) fn while_native(
             Err(e) => return Err(e),
         }
     }
+}
+
+/// `forever block` — unconditional infinite loop: evaluates `body`
+/// repeatedly until a `break` unwinds it. Returns the break-value (or `none`
+/// if `break` had no value). Equivalent to `while [true] body` but skips the
+/// condition re-evaluation each iteration.
+pub(crate) fn forever_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
+    let body = expect_block(args, 0, "forever")?;
+    if let Some(compiled) = resolve_compiled_block(&body, env) {
+        loop {
+            let caps = active_captures(env);
+            match crate::vm::run((*compiled).clone(), env, caps) {
+                Ok(_) => {}
+                Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
+                Err(EvalError::Continue) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    loop {
+        match dispatch_block(&body, env) {
+            Ok(_) => {}
+            Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
+            Err(EvalError::Continue) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// `for word start end bump body` — classic counted loop. Binds `word` to
+/// `start`, evaluates `body`, adds `bump` to `word`, repeats while `word`
+/// hasn't passed `end` (direction-aware: positive bump → `word <= end`;
+/// negative bump → `word >= end`). Inclusive of `end` when it lands exactly.
+/// Supports `integer!`/`float!`/`char!` start/end/bump (char takes codepoint
+/// arithmetic, `char + int → char`).
+pub(crate) fn for_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
+    if args.len() != 5 {
+        return Err(arity_err(args, "for", 5, args.len()));
+    }
+    let slot = crate::series::resolve_loop_slot(&args[0], env)?;
+    let body = expect_block(args, 4, "for")?;
+    let start = args[1].clone();
+    let end = &args[2];
+    let bump = &args[3];
+
+    // Determine direction from the sign of `bump`. A zero bump is an error
+    // (would loop forever; Red rejects it too).
+    let bump_sign = match crate::math::numeric_cmp(bump, &Value::integer(0)) {
+        Some(std::cmp::Ordering::Equal) => {
+            return Err(EvalError::Native {
+                message: "for: bump must be non-zero".into(),
+                span: bump.span_or_default(),
+            });
+        }
+        Some(std::cmp::Ordering::Greater) => 1i8,
+        Some(std::cmp::Ordering::Less) => -1i8,
+        None => {
+            return Err(EvalError::TypeError {
+                expected: "integer!, float!, or char!",
+                found: type_name(bump),
+                span: bump.span_or_default(),
+            });
+        }
+    };
+
+    let compiled = resolve_compiled_block(&body, env);
+    let mut cur = start;
+    let mut last = Value::None;
+    loop {
+        // Direction-aware bound check.
+        let past = match crate::math::numeric_cmp(&cur, end) {
+            Some(ord) => matches!(
+                (bump_sign, ord),
+                (1, std::cmp::Ordering::Greater) | (-1, std::cmp::Ordering::Less)
+            ),
+            None => {
+                return Err(EvalError::TypeError {
+                    expected: "integer!, float!, or char!",
+                    found: type_name(&cur),
+                    span: cur.span_or_default(),
+                });
+            }
+        };
+        if past {
+            break;
+        }
+        crate::series::write_loop_slot(&slot, cur.clone(), env);
+        let result = if let Some(ref c) = compiled {
+            let caps = active_captures(env);
+            crate::vm::run((**c).clone(), env, caps)
+        } else {
+            dispatch_block(&body, env)
+        };
+        match result {
+            Ok(v) => last = v,
+            Err(EvalError::Break(bv)) => return Ok(bv.unwrap_or(Value::None)),
+            Err(EvalError::Continue) => {}
+            Err(e) => return Err(e),
+        }
+        cur = crate::math::numeric_add(&cur, bump)?;
+    }
+    Ok(last)
 }
 
 // ---------------------------------------------------------------------------

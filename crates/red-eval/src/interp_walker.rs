@@ -1616,7 +1616,7 @@ fn collect_call_args(
     let mut args: Vec<Value> = Vec::with_capacity(arity);
     let uneval_first = matches!(
         sym.as_str(),
-        "repeat" | "foreach" | "forall" | "make" | "to" | "default" | "module"
+        "repeat" | "foreach" | "forall" | "for" | "forskip" | "make" | "to" | "default" | "module"
     );
 
     // M61: `module` has variable arity (1 for `module [body]`, 2 for

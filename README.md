@@ -120,16 +120,16 @@ for `parse`).
   `tan`/`asin`/`acos`/`atan`/`atan2`, `sqrt`, `exp`, `log-e`/`ln`, `log-10`,
   `log-2`, `degrees`/`radians`; `pi`/`e` constants. Pair/tuple arithmetic
   (componentwise: `pair + pair`, `tuple + tuple`, `pair * int`, etc.).
-- **Control flow:** `if`, `either`, `loop`, `repeat`, `until`, `while`,
-  `do`, `reduce`, `break`, `continue`, `switch` (`/default`/`/case`), `case`
-  (`/default`/`/all`), `default`, `all`, `any`, `try`, `attempt`, `catch`/
-  `throw`, `cause-error`, `function` (auto-locals), `comment`, `exit`/`quit`,
-  `compose` (`/deep`/`/only` — v0.4).
+- **Control flow:** `if`, `unless`, `either`, `loop`, `repeat`, `until`, `while`,
+  `forever`, `for`, `forskip`, `do`, `reduce`, `break`, `continue`, `switch`
+  (`/default`/`/case`), `case` (`/default`/`/all`), `default`, `all`, `any`,
+  `try`, `attempt`, `catch`/`throw`, `cause-error`, `function` (auto-locals),
+  `comment`, `exit`/`quit`, `compose` (`/deep`/`/only` — v0.4).
 - **Series (full model):** `first` `second` `third` `last` `next` `back` `at`
   `skip` `head` `tail` `index?` `length?` `pick` `poke` `select` `find`
   (`/case`/`/part`) `append` (`/only`) `insert` `change` `remove` `clear`
   `take` `copy` (`/part`) `empty?` `block?` `paren?` `series?` `any-block?`
-  `foreach` `forall`. `binary!` is byte-indexed (`pick`/`poke`/`copy`/`find`/
+  `foreach` `forall` `forskip`. `binary!` is byte-indexed (`pick`/`poke`/`copy`/`find`/
   `append`/`insert`); `map!` supports `select`/`find`/`keys-of`/`values-of`/
   `length?`/`empty?`/`clear`/`put`/`extend`/`copy`.
 - **Functions / binding:** `func`, `does`, `make function!`, `function?`,

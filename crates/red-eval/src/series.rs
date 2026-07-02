@@ -1080,6 +1080,53 @@ fn forall(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
     Ok(last)
 }
 
+/// `forskip word series size body` — binds `word` to successive positions of
+/// `series`, advancing `size` elements each iteration (not 1, unlike
+/// `forall`), evaluating `body` each time. Stops when fewer than `size`
+/// elements remain at the cursor (trailing partial record is skipped — Red
+/// parity). Returns the last body value (or `none` if the body never ran).
+fn forskip(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 4 {
+        return Err(arity(args, "forskip", 4, args.len()));
+    }
+    let slot = resolve_loop_slot(&args[0], env)?;
+    let (mut series, span, is_paren) = extract_series(&args[1])?;
+    let size = as_int(&args[2], "forskip")?;
+    if size <= 0 {
+        return Err(EvalError::Native {
+            message: format!("forskip: size must be a positive integer, got {size}"),
+            span: args[2].span_or_default(),
+        });
+    }
+    let size = size as usize;
+    let body = body_block(args, 3, "forskip")?;
+
+    let compiled = resolve_compiled_block(&body, env);
+    let mut last = Value::None;
+    loop {
+        let len = storage_len(&series);
+        // Stop when fewer than `size` elements remain at the cursor.
+        if series.index.checked_add(size).is_none_or(|end| end > len) {
+            break;
+        }
+        write_loop_slot(&slot, mk_series(series.clone(), span, is_paren), env);
+        let result = if let Some(ref c) = compiled {
+            let caps = active_captures(env);
+            crate::vm::run((**c).clone(), env, caps)
+        } else {
+            dispatch_block(&body, env)
+        };
+        match result {
+            Ok(v) => last = v,
+            Err(EvalError::Break(bv)) => return Ok(bv.unwrap_or(Value::None)),
+            Err(EvalError::Continue) => {}
+            Err(e) => return Err(e),
+        }
+        series.index = series.index.saturating_add(size);
+    }
+    Ok(last)
+}
+
 // ---------------------------------------------------------------------------
 // Small numeric helper
 // ---------------------------------------------------------------------------
@@ -1193,6 +1240,7 @@ pub fn register_series_natives(env: &mut Env) {
     // Iteration
     reg(env, "foreach", foreach as NF, 3);
     reg(env, "forall", forall as NF, 3);
+    reg(env, "forskip", forskip as NF, 4);
 }
 
 // ---------------------------------------------------------------------------
@@ -1572,6 +1620,30 @@ mod tests {
             )),
             "1\n2\n"
         );
+    }
+
+    // --- M121: forskip ---
+
+    #[test]
+    fn forskip_visits_every_other() {
+        let v = val("out: copy [] forskip 's [1 2 3 4] 2 [append out first s] out");
+        assert_eq!(mold_val(&v), "[1 3]");
+    }
+
+    #[test]
+    fn forskip_partial_trailing_skipped() {
+        // 5 elements, skip 2: visits positions 0, 2; position 4 has only 1
+        // element remaining (< 2), so it is skipped.
+        let v = val("out: copy [] forskip 's [1 2 3 4 5] 2 [append out first s] out");
+        assert_eq!(mold_val(&v), "[1 3]");
+    }
+
+    #[test]
+    fn forskip_break_exits_cleanly() {
+        let v = val(
+            "out: copy [] forskip 's [1 2 3 4 5 6] 2 [if (first s) = 3 [break] append out first s] out",
+        );
+        assert_eq!(mold_val(&v), "[1]");
     }
 
     #[test]

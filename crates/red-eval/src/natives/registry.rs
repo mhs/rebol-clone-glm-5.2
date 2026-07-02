@@ -19,8 +19,9 @@ use super::compare::{
 };
 use super::control::{
     all_native, any_native, attempt_native, break_native, case_native, catch_native, cause_error,
-    comment_native, continue_native, default_native, either, exit_native, if_native, loop_native,
-    repeat, switch_native, throw_native, try_native, until, while_native,
+    comment_native, continue_native, default_native, either, exit_native, for_native,
+    forever_native, if_native, loop_native, repeat, switch_native, throw_native, try_native,
+    unless_native, until, while_native,
 };
 use super::eval::{do_native, load_native, reduce};
 use super::func::{
@@ -173,6 +174,10 @@ pub fn register_natives(env: &mut Env) {
         .insert(Symbol::new("if"), fixed_native(if_native as NativeFn, 2));
     env.natives
         .insert(Symbol::new("either"), fixed_native(either as NativeFn, 3));
+    env.natives.insert(
+        Symbol::new("unless"),
+        fixed_native(unless_native as NativeFn, 2),
+    );
 
     // Loops (M7)
     env.natives.insert(
@@ -187,6 +192,12 @@ pub fn register_natives(env: &mut Env) {
         Symbol::new("while"),
         fixed_native(while_native as NativeFn, 2),
     );
+    env.natives.insert(
+        Symbol::new("forever"),
+        fixed_native(forever_native as NativeFn, 1),
+    );
+    env.natives
+        .insert(Symbol::new("for"), fixed_native(for_native as NativeFn, 5));
 
     // Control flow (M7)
     env.natives.insert(

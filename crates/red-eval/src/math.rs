@@ -46,6 +46,85 @@ fn as_number(v: &Value) -> Option<Num> {
     }
 }
 
+/// A numeric view over `integer!`/`float!`/`char!` (char takes its codepoint).
+/// Used by `for`'s direction-aware step/comparison so the loop native supports
+/// all three numeric kinds Red does.
+pub(crate) enum CoercedNum {
+    Int(i64),
+    Float(f64),
+    Char(i64),
+}
+
+impl CoercedNum {
+    pub(crate) fn from(v: &Value) -> Option<Self> {
+        match v {
+            Value::Integer { n, .. } => Some(Self::Int(*n)),
+            Value::Float { f, .. } => Some(Self::Float(*f)),
+            Value::Char { c, .. } => Some(Self::Char(*c as i64)),
+            _ => None,
+        }
+    }
+
+    /// Promote to `f64` for mixed int/float comparisons/additions.
+    fn as_f64(&self) -> f64 {
+        match self {
+            Self::Int(n) => *n as f64,
+            Self::Float(f) => *f,
+            Self::Char(c) => *c as f64,
+        }
+    }
+
+    fn is_float(&self) -> bool {
+        matches!(self, Self::Float(_))
+    }
+}
+
+/// `for`-step helper: add `bump` to `cur`, preserving the operand kind
+/// (int+int→int, char+int→char, float-involved→float). Mirrors the
+/// `char + int → char` and numeric promotion rules of `math::add` without
+/// pulling in string/pair/tuple/date dispatch.
+pub(crate) fn numeric_add(cur: &Value, bump: &Value) -> Result<Value, EvalError> {
+    let a = CoercedNum::from(cur).ok_or_else(|| num_type_err(cur))?;
+    let b = CoercedNum::from(bump).ok_or_else(|| num_type_err(bump))?;
+    let result = match (a, b) {
+        (CoercedNum::Char(c), CoercedNum::Int(k)) => {
+            // char + int → char (codepoint arithmetic, like char_binop)
+            return Ok(Value::char(char::from_u32((c + k) as u32).ok_or_else(
+                || EvalError::Native {
+                    message: format!("for: char step out of range: {}", c + k),
+                    span: cur.span_or_default(),
+                },
+            )?));
+        }
+        (CoercedNum::Int(x), CoercedNum::Int(y)) => {
+            x.checked_add(y).ok_or_else(|| EvalError::Native {
+                message: "for: integer overflow".into(),
+                span: cur.span_or_default(),
+            })? as f64
+        }
+        (a, b) => a.as_f64() + b.as_f64(),
+    };
+    if CoercedNum::from(cur).map(|c| c.is_float()).unwrap_or(false)
+        || CoercedNum::from(bump)
+            .map(|c| c.is_float())
+            .unwrap_or(false)
+    {
+        Ok(Value::float(result))
+    } else {
+        Ok(Value::integer(result as i64))
+    }
+}
+
+/// `for`-comparison helper: numeric ordering of `cur` vs `end`. Char compares
+/// by codepoint; mixed int/float promotes to float. Returns `None` if either
+/// side isn't numeric (caller should have validated earlier).
+pub(crate) fn numeric_cmp(cur: &Value, end: &Value) -> Option<std::cmp::Ordering> {
+    let a = CoercedNum::from(cur)?;
+    let b = CoercedNum::from(end)?;
+    let (af, bf) = (a.as_f64(), b.as_f64());
+    af.partial_cmp(&bf)
+}
+
 fn num_type_err(v: &Value) -> EvalError {
     EvalError::TypeError {
         expected: "integer! or float!",

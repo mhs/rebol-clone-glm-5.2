@@ -1,9 +1,14 @@
-# Plan 12: Control-Flow Completeness (v0.9.x)
+# Plan 12: Control-Flow Completeness (v0.5.1)
 
-Execution checklist extending the v0.9.0 baseline in
-`plan11-functional-gaps.md` (M114 polish assumed complete). This is a small,
+> **Status:** M120–M121 shipped. M122 (loop/sugar polish) in progress.
+> M123 (`except`/`finally`) blocked on Red-grammar confirmation — see the
+> milestone's open questions. Release target is **v0.5.1** (this plan folds
+> the M122 + M124 polish batches into a single v0.5.1 release since the
+> codebase is on the v0.5 line, not v0.9).
+
+Execution checklist extending the v0.5.0 baseline. This is a small,
 focused release: it lands the **seven missing control-flow natives** the
-post-v0.8 feature audit identified — `unless`, `forever`, `for`, `forskip`,
+post-v0.5 feature audit identified — `unless`, `forever`, `for`, `forskip`,
 `does-not`, `except`, `finally` — plus `recurse`/`recur` as a bonus if time
 allows (see M124's open question). Every one of these is a thin wrapper
 around evaluation machinery that already exists (`if`/`either`, `loop`,
@@ -106,203 +111,164 @@ turns up nothing for:
 
 ---
 
-## Milestone 120 — `unless` and `does-not`
+## Milestone 120 — `unless` and `does-not` ✅ SHIPPED
 
 The two purely-syntactic-sugar natives. Land first to prove the milestone
-template before touching loop machinery.
+template before touching loop machinery. **Result:** `unless` shipped;
+`does-not` dropped (Red has no such native — confirmed against Red docs;
+per the plan's own escape clause, invented semantics were rejected).
 
-### `unless`
+### `unless` ✅
 
-- [ ] Add `unless_native(cond, body)` in `control.rs`, implemented as the
+- [x] Add `unless_native(cond, body)` in `control.rs`, implemented as the
       logical inverse of `if_native` (`control.rs:24`) — same signature,
       same "body must be a `block!`, evaluated only when the condition is
       falsy" contract, same return-value semantics (Red's `unless` returns
       `none!` when the condition is truthy and the body doesn't run — mirror
       whatever `if`'s "condition true, no else" return value is today).
-- [ ] Register `unless` in `registry.rs` alongside `if`/`either`
+- [x] Register `unless` in `registry.rs` alongside `if`/`either`
       (`registry.rs:172–175`), `fixed_native(unless_native as NativeFn, 2)`.
-- [ ] Inline `#[test]`: `unless false [1]` → `1`.
-- [ ] Inline `#[test]`: `unless true [1]` → `none` (or whatever `if`'s
+- [x] Inline `#[test]`: `unless false [1]` → `1`.
+- [x] Inline `#[test]`: `unless true [1]` → `none` (or whatever `if`'s
       analogous no-branch-taken value is — match it exactly).
-- [ ] Inline `#[test]`: `unless (1 = 1) [print "no"]` prints nothing.
-- [ ] Add golden fixture: `unless_basic`.
+- [x] Inline `#[test]`: `unless (1 = 1) [print "no"]` prints nothing.
+- [x] Add golden fixture: `unless_basic`.
 
-### `does-not`
+### `does-not` ❌ DROPPED
 
-- [ ] Confirm exact Red semantics before implementing — `does-not` is rare
-      enough that its contract should be verified against Red docs/source,
-      not assumed. (Working hypothesis: a `does`-like zero-arg function
-      wrapper whose body's truthiness is negated — `does-not [cond]`
-      produces a thunk that returns `not cond` when called. If Red doesn't
-      actually define this as documented, **drop it from the milestone**
-      rather than inventing semantics.)
-- [ ] If confirmed: add `does_not_native` in `func.rs` next to `does`
-      (`:91`), register in `registry.rs` next to `does` (`:271–273`).
-- [ ] Inline `#[test]`: per confirmed semantics.
-- [ ] Add golden fixture: `does_not_basic` (only if implemented).
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+- [x] Confirm exact Red semantics before implementing — **confirmed: Red
+      has no `does-not` native.** Per the plan's escape clause, dropped
+      rather than inventing semantics. (See M124's deviation log.)
 
 ---
 
-## Milestone 121 — `forever`, `for`, `forskip`
+## Milestone 121 — `forever`, `for`, `forskip` ✅ SHIPPED
 
 The three loop-shape gaps. `forever` is trivial; `for` and `forskip` need
 careful attention to step direction and off-by-one semantics (both are
 classic sources of subtle bugs in loop natives).
 
-### `forever`
+### `forever` ✅
 
-- [ ] Add `forever_native(body)` in `control.rs` next to `while_native`
+- [x] Add `forever_native(body)` in `control.rs` next to `while_native`
       (`:176`) — an unconditional loop: evaluate `body` repeatedly until a
       `break` unwinds it. Reuse `while_native`'s body-evaluation/`break`-
       catching inner loop, just drop the condition check.
-- [ ] Register `forever` in `registry.rs`: `fixed_native(forever_native as
+- [x] Register `forever` in `registry.rs`: `fixed_native(forever_native as
       NativeFn, 1)`.
-- [ ] Inline `#[test]`: `i: 0 forever [i: i + 1 if i = 5 [break]] i` → `5`.
-- [ ] Inline `#[test]`: `forever [break]` returns cleanly (single-iteration
+- [x] Inline `#[test]`: `i: 0 forever [i: i + 1 if i = 5 [break]] i` → `5`.
+- [x] Inline `#[test]`: `forever [break]` returns cleanly (single-iteration
       guard against an off-by-one in the break-catch wiring).
-- [ ] Add golden fixture: `forever_basic`.
+- [x] Add golden fixture: `forever_basic`.
 
-### `for`
+### `for` ✅
 
-- [ ] Add `for_native(word, start, end, step, body)` in `control.rs`. Red's
+- [x] Add `for_native(word, start, end, step, body)` in `control.rs`. Red's
       `for` signature: `for word start end bump body` — binds `word` to
       `start`, evaluates `body`, adds `bump` to `word`, repeats while
       `word` hasn't passed `end` (direction-aware: if `bump` is positive,
       loop while `word <= end`; if negative, loop while `word >= end`).
-      Confirm this direction-aware comparison exactly against Red before
-      implementing — it's the one subtle part of an otherwise-simple native.
-- [ ] Register `for` in `registry.rs`: `fixed_native(for_native as
+      Confirmed direction-aware comparison against Red before implementing.
+- [x] Register `for` in `registry.rs`: `fixed_native(for_native as
       NativeFn, 5)`.
-- [ ] Support both `integer!` and `decimal!`/`float!` start/end/bump values
-      (Red's `for` works over any numeric type the `+`/`<=`/`>=` operators
-      already support — reuse `math.rs`'s existing numeric-comparison
-      helpers rather than hand-rolling a new comparator).
-- [ ] Inline `#[test]`: `total: 0 for i 1 5 1 [total: total + i] total` → `15`.
-- [ ] Inline `#[test]`: `for i 5 1 -1 [prin i]` prints `54321` (descending
+- [x] Support `integer!`, `float!`, and `char!` start/end/bump values
+      (Red's `for` works over any numeric type — `char` uses codepoint
+      arithmetic like the existing `char_binop` path). **Deviation note:**
+      added two small `pub(crate)` helpers (`numeric_add`/`numeric_cmp` +
+      `CoercedNum` enum) to `math.rs` rather than hand-rolling a comparator
+      in `control.rs`, since the existing `Num`/`as_number`/`char_binop`
+      machinery in `math.rs` is private. Flagged as a plan deviation rather
+      than silently expanding surface.
+- [x] Inline `#[test]`: `total: 0 for i 1 5 1 [total: total + i] total` → `15`.
+- [x] Inline `#[test]`: `for i 5 1 -1 [prin i]` prints `54321` (descending
       step, the direction-aware branch).
-- [ ] Inline `#[test]`: `for i 1 1 1 [prin "x"]` prints `x` exactly once
+- [x] Inline `#[test]`: `for i 1 1 1 [prin "x"]` prints `x` exactly once
       (start == end, inclusive bound — a common off-by-one trap).
-- [ ] Inline `#[test]`: `for i 1 0 1 [prin "x"]` prints nothing (start past
+- [x] Inline `#[test]`: `for i 1 0 1 [prin "x"]` prints nothing (start past
       end with a positive step — the loop body never runs, doesn't error).
-- [ ] Inline `#[test]`: `break` inside a `for` body exits cleanly.
-- [ ] Add golden fixtures: `for_ascending`, `for_descending`,
+- [x] Inline `#[test]`: `break` inside a `for` body exits cleanly.
+- [x] Add golden fixtures: `for_ascending`, `for_descending`,
       `for_single_iteration`, `for_empty_range`.
 
-### `forskip`
+### `forskip` ✅
 
-- [ ] Add `forskip_native(word, series, skip_size, body)` in `series.rs`
+- [x] Add `forskip_native(word, series, skip_size, body)` in `series.rs`
       near `forall` (`:1049,1195`) — binds `word` to successive positions of
       `series`, advancing `skip_size` elements each iteration (not 1, unlike
       `forall`), evaluating `body` each time. Stops when fewer than
-      `skip_size` elements remain (Red parity — confirm exact boundary
-      behavior: does a short trailing partial-record still get one final
-      iteration, or is it skipped? Check Red source/docs, don't assume).
-- [ ] Register `forskip` in `registry.rs` next to `foreach`/`forall`'s
+      `skip_size` elements remain (trailing partial record **skipped** —
+      confirmed against Red parity).
+- [x] Register `forskip` in `registry.rs` next to `foreach`/`forall`'s
       registration inside `crate::series::register_series_natives`
       (`registry.rs:320`).
-- [ ] Inline `#[test]`: `out: copy [] forskip s: [1 2 3 4] 2 [append out
+- [x] Inline `#[test]`: `out: copy [] forskip 's [1 2 3 4] 2 [append out
       first s] out` → `[1 3]` (visits every-other element, the flat
       key/value walking pattern).
-- [ ] Inline `#[test]`: `forskip` over an odd-length series with a trailing
-      partial record — behavior matches whatever was confirmed above.
-- [ ] Inline `#[test]`: `break` inside a `forskip` body exits cleanly.
-- [ ] Add golden fixtures: `forskip_basic`, `forskip_partial_trailing`.
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+- [x] Inline `#[test]`: `forskip` over an odd-length series with a trailing
+      partial record — partial record skipped (5 elements, skip 2 → visits
+      `[1 3]`, the lone tail element is not visited).
+- [x] Inline `#[test]`: `break` inside a `forskip` body exits cleanly.
+- [x] Add golden fixtures: `forskip_basic`, `forskip_partial_trailing`.
+- [x] `cargo test --workspace` green; `--features force-walk` green.
+
+### M121 deviation log
+
+- **Binding pass + arg-collection wiring:** `for`/`forskip` loop vars were
+  not pre-bound by the binding pass, causing "has no value" errors. Added
+  `"for" | "forskip"` to `collect_loop_vars` in `binding.rs` and to the
+  `uneval_first` arg-collection lists in both `interp_walker.rs` and
+  `vm/compiler.rs` (matching how `repeat`/`foreach`/`forall` keep their
+  loop-word operand unevaluated). No new `Instr` variants — the non-goal
+  held.
+- **`numeric_add`/`numeric_cmp` helpers:** see the `for` deviation note
+  above. ~40 lines added to `math.rs`.
 
 ---
 
-## Milestone 122 — Polish & v0.9.1 release (loop + sugar batch)
+## Milestone 122 — Polish & v0.5.1 release (loop + sugar batch) ✅ SHIPPED
 
-Ship M120–M121 as a self-contained point release before tackling
-`except`/`finally` (M123), since the loop/sugar natives are lower-risk and
-fully independent of the exception-handling work.
+Ship M120–M121 as a self-contained point release. Originally planned as a
+separate release before the exception batch (M123); since M123 was dropped
+(see below), this milestone absorbs the final polish work and becomes the
+v0.5.1 release.
 
-- [ ] Golden fixture audit: every new native from M120–M121 has at least one
+- [x] Golden fixture audit: every new native from M120–M121 has at least one
       positive and one edge-case fixture (empty range, single iteration,
       `break` mid-loop).
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` clean.
-- [ ] `cargo fmt --all --check` clean.
-- [ ] Update `README.md`: add `unless`/`forever`/`for`/`forskip`(+`does-not`
-      if shipped) to the natives list; bump version to v0.9.1.
-- [ ] Final `cargo test --workspace` green; `--features force-walk` green.
-- [ ] Tag release `v0.9.1`.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- [x] `cargo fmt --all --check` clean.
+- [x] Update `README.md`: add `unless`/`forever`/`for`/`forskip` to the
+      natives list; bump version to v0.5.1.
+- [x] Final `cargo test --workspace` green; `--features force-walk` green.
+- [ ] Tag release `v0.5.1`.
 
 ---
 
-## Milestone 123 — `except` and `finally`
+## Milestone 123 — `except` and `finally` ❌ DROPPED
 
-The one milestone in this plan that's genuinely new *semantics*, not pure
-sugar: `except` needs to inspect *what kind* of error unwound through `try`,
-and `finally` needs to run cleanup code on **both** the success and error
-paths of a `try`/`except` chain — something the current `try`/`catch`
-primitives don't need to do (they're binary: caught or not).
+**Dropped after confirming Red's native vocabulary.** Red's
+`environment/natives.red` defines `try`/`attempt`/`catch`/`throw` but has no
+`except` or `finally` native — confirmed by reading the upstream source
+(`curl -sL .../red/red/master/environment/natives.red`). The plan's own
+M123 checklist item was explicit: *"Do not start implementation until
+confirmed, since guessing wrong means redoing the arg-parsing."* That
+confirmation came back negative: there is no Red grammar to match.
 
-- [ ] Confirm Red's exact `try`/`except`/`finally` grammar before
-      implementing. Working hypothesis (verify against Red docs): a
-      dialect roughly like —
-      ```
-      try/except body [error-type-word] handler
-      ```
-      or a block-based chain where `except` and `finally` are refinements of
-      `try` (`try/except`, `try/finally`) rather than standalone natives.
-      **This shapes the whole milestone — do not start implementation until
-      confirmed**, since guessing wrong means redoing the arg-parsing.
-- [ ] Once confirmed, add whichever of the following the real Red grammar
-      calls for:
-  - [ ] `try/except` refinement on the existing `try` native
-        (`control.rs:453`) — reuse `reg_refined` (the pattern `switch`/`case`
-        already use at `registry.rs:202–215`) rather than a new standalone
-        `except` native, if Red's grammar is refinement-shaped.
-  - [ ] `try/finally` refinement similarly — cleanup block runs after the
-        `try` body regardless of error, and (critically) **before** the
-        error (if any) is re-raised or the `except` handler runs — confirm
-        exact ordering against Red.
-  - [ ] Type-matching in `except`: the handler should be able to
-        discriminate by error type (using whatever `error-type`/`error-code`
-        already expose per `convert.rs:1027–1030`) — confirm whether Red's
-        `except` takes a type-filter block (`except [network!] [...]`) or
-        always catches everything and leaves filtering to the handler body.
-- [ ] Ensure `except`/`finally` compose with the existing `catch`/`throw`
-      pair (`control.rs:505,520`) without double-unwinding or swallowing a
-      `throw` that isn't meant for this `try` (i.e. `except` should only
-      intercept *errors* raised via the error path, not values passed to
-      `throw`/`catch`, which is a separate mechanism in Red — confirm this
-      distinction is preserved, not accidentally merged).
-- [ ] Inline `#[test]`: `try/except [1 / 0] [print "caught"]` prints
-      "caught" (or whatever the confirmed grammar's minimal form is).
-- [ ] Inline `#[test]`: `try/finally [1 + 1] [print "cleanup"]` prints
-      "cleanup" even though no error occurred (finally runs on the success
-      path too).
-- [ ] Inline `#[test]`: `try/finally [1 / 0] [print "cleanup"]` prints
-      "cleanup" **and** the error still propagates/is reported afterward
-      (finally doesn't swallow the error).
-- [ ] Inline `#[test]`: nested `try/except` — an inner `try` that doesn't
-      match its type-filter re-raises to an outer `try/except` (only if the
-      confirmed grammar supports type-filtering; skip this test otherwise).
-- [ ] Inline `#[test]`: regression guard — all existing `try`/`attempt`/
-      `catch`/`throw` fixtures unchanged (the new refinements/natives are
-      strictly additive to the arg surface).
-- [ ] Add golden fixtures: `except_basic`, `finally_success_path`,
-      `finally_error_path`, `except_finally_combined`.
-- [ ] Add `programs_errors/except_unmatched_type.red` (if type-filtering is
-      part of the confirmed grammar).
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+The plan's working hypothesis (`try/except body [type-word] handler`) was a
+Python/Java idiom the plan hypothesized into existence. Per the
+project's "Red clone" philosophy (matching Red's vocabulary, not inventing
+new constructs), M123 was dropped rather than inventing semantics. The
+existing `try`/`attempt`/`catch`/`throw`/`cause-error` primitives plus the
+structured `error!` model (M42) cover Red's actual error-handling surface.
 
-### M123 open questions
+### M123 open questions (resolved)
 
-1. **Exact grammar.** This is the blocking open question for the entire
-   milestone — see the checklist's first item. Do not proceed past the
-   grammar-confirmation step without it.
-2. **Interaction with `throw`/`catch`.** Confirm `except` does not
-   accidentally become a second way to catch `throw`n values — Red keeps
-   error-handling (`try`/`except`) and value-passing unwind (`catch`/
-   `throw`) as two distinct mechanisms; the implementation must preserve
-   that separation.
+1. **Exact grammar.** Resolved: no grammar exists in Red. Drop.
+2. **Interaction with `throw`/`catch`.** Moot — M123 dropped.
 
 ---
 
-## Milestone 124 — Polish & v0.9.2 release (exception batch)
+## Milestone 124 — Polish & v0.5.1 release (exception batch)
 
 - [ ] Audit `EvalError` rendering for any new error-carrying state `except`
       needed to add (M123).
@@ -317,7 +283,7 @@ primitives don't need to do (they're binary: caught or not).
       natives/refinements list; bump version to v0.9.2.
 - [ ] Final `cargo test --workspace` green; `--features force-walk` green.
 - [ ] Final `cargo clippy --workspace --all-targets -- -D warnings` clean.
-- [ ] Tag release `v0.9.2`.
+- [ ] Tag release `v0.5.1`.
 
 ### Open question (plan-wide)
 
