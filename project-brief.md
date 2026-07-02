@@ -1,19 +1,22 @@
 # Plan: Proof-of-Concept Red Clone in Rust
 
-> **Status (v0.3):** The v0.2 language surface (lexer/parser/evaluator/series/
-> binding/functions/`parse`/refinements/paths/objects/I/O) shipped as
-> `v0.2.0-poc`. `plan3.md` extends the *implementation* to `v0.3.0` with a
-> **bytecode compiler + stack VM** (the default evaluator), lexical addressing,
-> tail-call optimization, a disassembler (`--disasm`), per-instr tracing
-> (`--trace`), and property tests + fuzzing. **The language surface is frozen
-> at v0.2 for v0.3** — no new natives or value types; v0.3 is a performance
-> release. The tree-walker (`interp_walker.rs`) is retained as the `--walk`
+> **Status (v0.5):** The v0.2 language surface (lexer/parser/evaluator/
+> series/binding/functions/`parse`/refinements/paths/objects/I/O) shipped as
+> `v0.2.0-poc`. v0.3 added a **bytecode compiler + stack VM** (the default
+> evaluator), lexical addressing, tail-call optimization, a disassembler
+> (`--disasm`), per-instr tracing (`--trace`), and property tests + fuzzing.
+> v0.4 re-opened the language surface (`char!`/`binary!`/`map!`/`pair!`/
+> `tuple!`/`date!`/`bitset!`, `compose`, trig, the full `error!` model, the
+> completed `parse` dialect). v0.5 adds **first-class closures** (`closure!`
+> with snapshot freevar capture) and **modules** (`module`/`export`/`import`,
+> with named-module caching, file-based import, and a small auto-imported
+> stdlib). The tree-walker (`interp_walker.rs`) is retained as the `--walk`
 > fallback for `needs_rebind`-flagged blocks (`use`/`make object!`/foreign-
 > bound) and for parity comparison (`--features force-walk`). This document
-> has been updated to reflect the v0.3 execution model; `architecture.md`
-> covers the compiler/VM/dispatch/path/object internals.
+> reflects the v0.5 execution model; `architecture.md` covers the
+> compiler/VM/dispatch/path/object/closure/module internals.
 >
-> **Execution model (v0.3):**
+> **Execution model (v0.3+, unchanged in v0.5):**
 > - **Bytecode compiler + stack VM** (`EvalMode::Vm`, the default): blocks
 >   compile to a flat `Vec<Instr>` with a constant pool; the VM dispatches
 >   instrs with lexical addressing (`LoadLocal(depth, slot)` /
@@ -21,14 +24,17 @@
 >   dynamic `Context` slot mechanism (`LoadDynamic(sym)`) for `bind`/`use`/
 >   `do`-on-data. Tail-call optimization (`TailCall`/`TailReenter`) bounds
 >   call-stack depth for tail-recursive programs. Compiled blocks are cached
->   per-`FuncDef` and per-`Series` identity.
+>   per-`FuncDef` and per-`Series` identity. v0.5 adds `MakeClosure`/
+>   `LoadCapture`/`SetCapture` instrs for closure capture cells.
 > - **Tree-walking evaluator** (`interp_walker.rs`, the v0.2 default): retained
 >   as the `--walk` fallback and the path for `needs_rebind`-flagged blocks.
 >   `--features force-walk` runs the entire test suite against the walker for
 >   byte-for-byte parity with the VM.
 > - **CLI flags:** `--walk` (force tree-walker), `--disasm <file.red>` (print
 >   bytecode disassembly, no run), `--disasm-func <name> <file.red>`
->   (disassemble a named func body), `--trace` (per-instr VM trace to stderr).
+>   (disassemble a named func body), `--trace` (per-instr VM trace to stderr),
+>   `--module-path <dir>` (search dir for `import %file`, repeatable),
+>   `--no-stdlib` (skip stdlib auto-import).
 > - **Performance:** 2–4× speedup over the walker on compute-heavy programs
 >   (deep recursion, tight loops). See `BENCHMARKS.md`.
 
@@ -114,6 +120,8 @@ enum Binding {
     Unbound,
     Local(Rc<Context>, usize),   // shared context + slot index
     Func(usize),                 // function-local slot index (resolved via call frame)
+    Lexical(usize, usize),       // VM-only: (frame-depth, slot) — resolved via the VM frame stack
+    Closure(usize),              // M60: index into the closure's capture cell (`ClosureDef.captures`)
 }
 
 struct FuncDef {
@@ -158,6 +166,23 @@ enum Value {
     Tuple { bytes: Rc<[u8]>, span: Span },   // 255.0.0 / 128.64.32.128 — M44
     Date { dt: Rc<DateValue>, span: Span },  // 29-Jun-2024/12:30:00+5:30 — M45
     Bitset(Rc<RefCell<BitsetDef>>),          // charset "ABC" — M46 (synthetic, no span)
+    Closure(Rc<ClosureDef>),                 // closure! — M60 (synthetic, no span)
+    Module(Rc<RefCell<ModuleDef>>),          // module! — M61 (synthetic, no span)
+}
+
+// v0.5 (M60): closure! — snapshot-capture first-class function.
+struct ClosureDef {
+    func: Rc<FuncDef>,                        // the underlying FuncDef (spec/body/ctx)
+    captures: Rc<Vec<RefCell<Value>>>,        // freevar values, indexed by `freevars` order
+}
+
+// v0.5 (M61): module! — self-contained namespace with exported words.
+struct ModuleDef {
+    ctx: Rc<Context>,                        // the module's namespace
+    exports: RefCell<HashSet<Symbol>>,       // words marked `export`
+    name: Option<Symbol>,                    // for named modules (`module 'foo [...]`)
+    source: Option<Rc<str>>,                 // canonical path for caching (M62)
+    parent: Option<Rc<Context>>,             // script user_ctx or another module (reserved v0.6+)
 }
 
 struct ObjectDef {
@@ -247,36 +272,72 @@ binding, not just dynamic lookup.
 - `Context` = an ordered map of `Symbol -> slot index` plus a
   `Vec<RefCell<Value>>` of slots. Self-referential (a context can hold a
   value that references itself) via `Rc<RefCell<...>>`.
-- `Word` carries a `Binding`: `Unbound`, `Local(Rc<Context>, slot)`, or
-  `Func(param_index)` (resolved via the active call frame). Binding is
-  attached by the **binding pass** in `red-eval/src/binding.rs` (run before
-  eval, not inside the parser) for script-level words, and at
-  `make`/`func`/`function`/`make object!`-creation time for function bodies.
+- `Word` carries a `Binding`: `Unbound`, `Local(Rc<Context>, slot)`,
+  `Func(param_index)` (resolved via the active call frame), `Lexical(depth,
+  slot)` (VM-only, resolved via the VM frame stack), or `Closure(idx)`
+  (index into the closure's capture cell). Binding is attached by the
+  **binding pass** in `red-eval/src/binding.rs` (run before eval, not inside
+  the parser) for script-level words, and at `make`/`func`/`function`/
+  `make object!`-creation time for function bodies.
 - `set-word` in a script binds into the **user context** (a single top-level
   context for the POC, held as `Rc<Context>` on `Env`).
 - `func` / `does` / `function` / `make function!` create function values
-  with their own context (parent = definition context for closures-less
-  `func`).
-- Lookup walks: word's binding → if bound, read slot; if unbound, error
-  (Red-style "has no value") rather than falling back to a global chain.
+  with their own context (parent = definition context). `func` uses shallow
+  copy of args on each call.
+- Lookup walks: word's binding → if `Local`/`Func`/`Lexical`/`Closure`,
+  read the corresponding slot/capture; if `Unbound`, consult `user_ctx`
+  first (so a later `import`/`set` that populated `user_ctx` resolves),
+  then the native registry, then error (Red-style "has no value"). The
+  `Unbound → user_ctx` fallback is the one v0.5 behavior change (M62),
+  required so `import`-aliased words resolve without AST re-walking.
 - `bind`, `use`, `in`, `value?`, `get`, `set` natives to manipulate bindings
   explicitly. (`in` is registered in `object.rs`.)
 - **Objects** implemented in v0.2 (M18): `Value::Object`, `make object!`/
   `object`/`context`, prototype inheritance (copy-based), `in`, `self`
   reference, `words-of`/`values-of`/`reflect`, predicates `object?`/
   `same?`/`not-same?`.
-- **Closures** (`closure!`) deferred; `func` uses shallow copy of args on
-  each call.
-- Known gap (v0.4): modules / `import` / `export` and closures (`closure!`)
-  remain the two conspicuous v0.5 candidates. Named timezones (`chrono-tz`)
-  are deferred to v0.5+ if ever needed. `DD/MM/YYYY` is not supported (`/`
+- **Closures & Modules (v0.5):**
+  - `closure!` (`Value::Closure`): first-class closures with **snapshot
+    freevar capture** — `closure [spec][body]` copies each freevar's value
+    into an owned `Vec<RefCell<Value>>` cell at creation time. Outer writes
+    after closure creation don't propagate inward; inner writes don't
+    propagate outward (the `RefCell` permits mutation across invocations of
+    the *same* closure, but two closures closing over the same outer `x` get
+    independent cells). This fixes the v0.3 escaping-closure bug
+    (frame-chain-walking returned stale values once a `func` escaped its
+    defining frame). `func`/`does`/`function` keep their shallow-copy
+    semantics (back-compat with v0.2–v0.4 golden fixtures). **Deviation from
+    Red:** real Red `closure!` shares the cell across closures and across
+    outer/inner (inner writes propagate outward); shared-cell is a v0.6
+    candidate. SetWord inside a closure body is treated as a local (not a
+    capture write) — use block-as-state (`poke`) for mutable closure state.
+  - `module!` (`Value::Module`): a self-contained namespace (`ModuleDef.ctx`)
+    with a set of exported words. `module [body]` evaluates the body with
+    `env.user_ctx` swapped to the module's ctx (mirrors `make object!`);
+    `export 'word` / `export [words]` marks words for public visibility.
+    `module 'name [body]` is cached on `Env::modules` (singleton by name).
+    `import 'name` / `import %file.red` / `import <module-value>` aliases a
+    module's exported words into the current `user_ctx` (overwriting
+    existing slots). File imports are cached by canonical path on
+    `Env::modules_by_path`; circular imports are detected and raise an
+    error. Visibility: inside the module body all words are visible;
+    `module/word` from outside resolves only into `exports` (private →
+    `UnboundWord`). Path resolution mirrors `object/field`.
+  - CLI: `--module-path <dir>` (repeatable, populates
+    `system/options/module-path`) and `--no-stdlib` (skip stdlib auto-import).
+    The stdlib (~25 utility functions: string/block/math utils + a pure-Red
+    `sort`) is auto-imported into `user_ctx` at script start unless
+    `--no-stdlib` is set.
+- Known gap (v0.5): shared-cell closures (proper SetWord capture) and
+  `unimport` are v0.6 candidates. Named timezones (`chrono-tz`) are
+  deferred to v0.6+. `DD/MM/YYYY` is not supported (`/`
   is a lexer delimiter — use `DD-Mon-YYYY` or `YYYY-MM-DD`). `pair!`/`tuple!`
-  `same?` returns `false` (immutable value types; use `=` for structural
+  `same?` returns `false` (immutable value types; use `=`` for structural
   equality). `tag!`/`ref!`/`image!`/`vector!`/`hash!`/`regex!`, advanced
   `bitset!`/`logic!` ops, `object!` `on-change` reactive slots, `routine!` FFI,
   and the full port model remain deferred. The structured error model
   (`code`/`type`/`args`/`near`/`where`/`by`) IS in v0.4 (M42). Block-integer
-  SetPath (`b/2: 99`) works (M38 follow-up). See `plan5.md`.
+  SetPath (`b/2: 99`) works (M38 follow-up). See `plan6-closures-modules.md`.
 
 ### Spans
 Each `Block`/`Paren` retains the span of its `[...]`/`(...)` delimiters;
@@ -319,13 +380,21 @@ for `bind` to report unbound words with a location.
   `make-dir` `delete` `rename` `change-dir` `what-dir` `get-env` `set-env`
   `env` `wait` `call` `shell` (the last two gated on `--allow-shell`).
 - Constants: `none` `true` `false` `newline` `system` (object exposing
-  `system/options/{args, allow-shell, path}`).
+  `system/options/{args, allow-shell, path, module-path}`).
+- Closures & modules (v0.5): `closure` `closure?` `module` `module?` `export`
+  `import`.
 - Implemented in v0.2 (M13–M20): refinements (`/part`, `/case`, … as a
   general dispatch mechanism), real paths (`obj/field`, `block/2`,
   `set-path`), `Object`/`make object!`, `File`/`Url` literals + the I/O
   surface above, the type-conversion and string/math surfaces above.
-- Optional/deferred: `compose`, closures, `char!`/`map!`/`date!`/`pair!`/
-  `tuple!`/`bitset!` (v0.3). (`parse` is in scope — see "Dialects".)
+  v0.4 (M38–M46): `char!`/`binary!`/`map!`/`pair!`/`tuple!`/`date!`/
+  `bitset!`, `compose`, trig math, the full `error!` model, the completed
+  `parse` dialect. v0.5 (M60–M65): `closure!` (snapshot capture),
+  `module!`/`export`/`import`, the stdlib, `--module-path`/`--no-stdlib`.
+- Optional/deferred: shared-cell closures, `unimport`, reactivity (v0.6);
+  concurrency (v0.7); `tag!`/`ref!`/`image!`/`vector!`/`hash!`/`regex!`,
+  `routine!` FFI, named timezones, the full port model. (`parse` is in
+  scope — see "Dialects".)
 
 ## Dialects
 
@@ -524,6 +593,14 @@ args }`.
   Ctrl-C discards partial input, Ctrl-D exits. Non-tty stdin reads plain
   lines without rustyline.
 - `--help` / `-h`, `--version` / `-V`, `--allow-shell` (gates `call`/`shell`).
+- `--walk` (force tree-walker), `--disasm <file>` (disassemble, no run),
+  `--disasm-func <name> <file>` (disassemble a named func), `--trace`
+  (per-instr VM trace to stderr).
+- `--module-path <dir>` (repeatable; appends to
+  `system/options/module-path`, a `block!` of `file!` dirs searched by
+  `import %file.red` when the cwd-relative resolution misses).
+- `--no-stdlib` (skip stdlib auto-import; stdlib words like `str-upper`
+  stay unbound).
 
 ## Testing strategy
 

@@ -5,8 +5,7 @@ language, implemented in Rust. Red is a homoiconic, block-structured
 descendant of Rebol — code is data, evaluation is prefix-style and eager,
 and "dialects" are blocks interpreted by custom mini-interpreters.
 
-This repo is a **Red subset interpreter** (`v0.4.0`, with the v0.5
-closures & modules milestones landed). It implements a usable slice of
+This repo is a **Red subset interpreter** (`v0.5.0`). It implements a usable slice of
 Red — lexer, parser, **bytecode compiler + stack VM** (the default since
 v0.3), tree-walking evaluator (retained as the `--walk` fallback), full
 series model, real word binding, functions, **first-class closures**
@@ -27,7 +26,7 @@ closures & modules).
 
 ## Status
 
-- **Tagged:** `v0.4.0`
+- **Tagged:** `v0.5.0`
 - **Workspace:** three crates — `red-core` (value model + lexer + parser + printer + VM IR types),
   `red-eval` (compiler + VM + tree-walker + natives + `parse`), `red-cli` (binary + REPL).
   A `fuzz/` crate (nightly-only, `libfuzzer-sys`) is excluded from the default workspace.
@@ -50,7 +49,7 @@ cargo test  --workspace
 cargo run  -p red-cli -- examples/hello.red     # → Hello, World!
 cargo run  -p red-cli                            # → REPL (no args)
 cargo run  -p red-cli -- --help
-cargo run  -p red-cli -- --version               # → red 0.4.0
+cargo run  -p red-cli -- --version               # → red 0.5.0
 cargo run  -p red-cli -- --allow-shell examples/call.red   # enable call/shell
 cargo run  -p red-cli -- --walk examples/fib.red          # force tree-walker
 cargo run  -p red-cli -- --disasm examples/fib.red        # disassemble (no run)
@@ -61,7 +60,7 @@ cargo run  -p red-cli -- --module-path examples/modules \  # search dir for impo
 cargo run  -p red-cli -- --no-stdlib examples/arith.red    # skip stdlib auto-import
 ```
 
-v0.3 was a **performance release**: the bytecode VM delivers 2–4× speedups on compute-heavy programs (deep recursion, tight loops) over the v0.2 tree-walker, while preserving exact observable behavior (golden parity, error parity). v0.4 re-opens the language surface on top of the unchanged VM — new value types (`char!`/`binary!`/`map!`/`pair!`/`tuple!`/`date!`/`bitset!`), `compose`, trig math, the full `error!` model, and the completed `parse` dialect. v0.5 (in progress) adds **first-class closures** (`closure!` with snapshot freevar capture, fixing the v0.3 escaping-closure bug) and **modules** (`module`/`export`/`import`, with named-module caching, file-based import, and `system/options/module-path` search), plus a small auto-imported stdlib. All additions are additive: they compile through the existing VM const-pool + native-call path with no new hot-path instrs. See `BENCHMARKS.md` for measurements.
+v0.3 was a **performance release**: the bytecode VM delivers 2–4× speedups on compute-heavy programs (deep recursion, tight loops) over the v0.2 tree-walker, while preserving exact observable behavior (golden parity, error parity). v0.4 re-opens the language surface on top of the unchanged VM — new value types (`char!`/`binary!`/`map!`/`pair!`/`tuple!`/`date!`/`bitset!`), `compose`, trig math, the full `error!` model, and the completed `parse` dialect. v0.5 adds **first-class closures** (`closure!` with snapshot freevar capture, fixing the v0.3 escaping-closure bug) and **modules** (`module`/`export`/`import`, with named-module caching, file-based import, and `system/options/module-path` search), plus a small auto-imported stdlib. All additions are additive: they compile through the existing VM const-pool + native-call path with no new hot-path instrs. See `BENCHMARKS.md` for measurements.
 
 ## What's implemented
 
@@ -304,11 +303,11 @@ rebol-clone/
 │       └── tests/cli.rs
 ├── fuzz/                      # cargo-fuzz targets (nightly-only, excluded from workspace)
 ├── examples/                  # sample .red programs
-├── BENCHMARKS.md              # VM + walker bench numbers (v0.3 → v0.4)
+├── BENCHMARKS.md              # VM + walker bench numbers (v0.3 → v0.5)
 ├── KNOWN_ISSUES.md            # pre-existing bugs + VM/walker divergences
 ├── project-brief.md           # feature scope and design decisions
 ├── architecture.md            # implementation sketch (lexer/parser/compiler/VM/eval internals)
-└── plan*.md                   # per-version build checklists (v0.1 → v0.4)
+└── plan*.md                   # per-version build checklists (v0.1 → v0.5)
 ```
 
 ## Design notes
@@ -344,7 +343,7 @@ authoritative list. Headlines:
 - **`unimport` deferred to v0.6** — `import` aliases exports into `user_ctx`
   but there's no native to remove the aliases.
 - **Timezones: fixed UTC offsets only** (`±HH:MM`/`Z`) — no named zones, no
-  DST. Matches Red parity; named-zone support (`chrono-tz`) deferred to v0.5+.
+  DST. Matches Red parity; named-zone support (`chrono-tz`) deferred to v0.6+.
 - **`DD/MM/YYYY` date form not supported** — `/` is a lexer delimiter so the
   run splits before the date scanner. Use `DD-Mon-YYYY` or `YYYY-MM-DD`.
 - **`pair!`/`tuple!` `same?`** returns `false` (immutable value types; use `=`
@@ -353,7 +352,9 @@ authoritative list. Headlines:
   `bitset!`/`logic!` ops; `object!` `on-change` reactive slots; `routine!` FFI.
 - **Object path method calls** work for `o/method` followed by trailing
   block args; `func/refinement` bound refinement references are deferred.
-- **GUI / `draw` / `vid` / reactive dialects are permanently out of scope.**
+- **Reactivity (`react`/`is-thunk`) is a v0.6 candidate** (see
+  `future-plan-reactivity.md`); concurrency (actors/channels) is a v0.7
+  candidate. GUI / `draw` / `vid` dialects are permanently out of scope.
 
 ## License
 

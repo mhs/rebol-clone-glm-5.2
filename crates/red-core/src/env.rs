@@ -239,6 +239,12 @@ pub struct Env {
     /// the cached module without re-reading/re-evaluating. Mirrors `modules`
     /// (keyed by name) for the file case.
     pub modules_by_path: HashMap<PathBuf, Rc<RefCell<ModuleDef>>>,
+    /// M65: canonical paths of modules currently mid-`import %file` (between
+    /// the file-read and the `modules_by_path` cache insertion). Used to
+    /// detect circular imports (`a.red` imports `b.red` imports `a.red`)
+    /// which would otherwise stack-overflow. A cycle raises
+    /// `EvalError::Native { "import: circular import detected: <path>" }`.
+    pub loading_modules: Vec<PathBuf>,
     /// Bug 3 fix: the active VM frame's closure captures, made visible to
     /// `dispatch_block` calls from within natives (`if`/`either`/`do`/loops).
     /// `Vm::call_native` saves/restores this around each native call, setting
@@ -305,6 +311,7 @@ impl Env {
             module_stack: Vec::new(),
             modules: HashMap::new(),
             modules_by_path: HashMap::new(),
+            loading_modules: Vec::new(),
             current_vm_captures: None,
             stdlib: None,
             #[cfg(feature = "stats")]

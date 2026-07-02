@@ -68,6 +68,8 @@ pub enum Binding {
     Unbound,
     Local(Rc<Context>, usize),   // shared context + slot index
     Func(usize),   // function-local slot; resolved via the active call frame
+    Lexical(usize, usize),   // M23 VM-only: (frame-depth, slot) — resolved via the VM frame stack
+    Closure(usize),   // M60: index into the closure's capture cell (`ClosureDef.captures`)
 }
 
 pub struct FuncDef {
@@ -130,9 +132,22 @@ pub struct DateValue {                          // M45 — single variant covers
 // API: from_local(dt, zone), date_only(d), has_time(), to_offset_utc(),
 //      fixed_offset(), to_zoned(), now_local(), today_local(), to_utc(),
 //      from_epoch(secs), from_system_time_local(st)
+
+pub struct ClosureDef {                            // M60 — snapshot-capture closure
+    pub func: Rc<FuncDef>,                         // underlying FuncDef (spec/body/ctx)
+    pub captures: Rc<Vec<RefCell<Value>>>,         // freevar values, indexed by `freevars` order
+}
+
+pub struct ModuleDef {                             // M61 — self-contained namespace
+    pub ctx: Rc<Context>,                          // the module's namespace
+    pub exports: RefCell<HashSet<Symbol>>,         // words marked `export` (private not in set)
+    pub name: Option<Symbol>,                      // for named modules (`module 'foo [...]`)
+    pub source: Option<Rc<str>>,                   // canonical path for caching (M62)
+    pub parent: Option<Rc<Context>>,               // script user_ctx or another module (reserved v0.6+)
+}
 ```
 
-### Value variants (v0.2)
+### Value variants (v0.5)
 
 ```rust
 pub enum Value {
@@ -159,6 +174,8 @@ pub enum Value {
     Tuple { bytes: Rc<[u8]>, span: Span },               // 255.0.0     — M44 (3 or 4 bytes)
     Date { dt: Rc<DateValue>, span: Span },              // 29-Jun-2024/12:30:00+5:30 — M45
     Bitset(Rc<RefCell<BitsetDef>>),                      // charset "ABC" — M46 (synthetic, no span)
+    Closure(Rc<ClosureDef>),                             // closure! — M60 (synthetic, no span)
+    Module(Rc<RefCell<ModuleDef>>),                      // module! — M61 (synthetic, no span)
 }
 ```
 
@@ -166,7 +183,9 @@ Every source-origin variant (`Integer`/`Float`/`String`/word-family/`Block`/`Par
 `Path`/`GetPath`/`LitPath`/`SetPath`/`Refinement`/`File`/`Url`/`Char`/`String8`/
 `Pair`/`Tuple`/`Date`) carries the byte-offset `Span` of its originating token so
 eval-time errors can render `file:line:col:`. Synthetic variants (`None`/`Logic`/
-`Func`/`Error`/`Object`/`Map`/`Bitset`) are produced at runtime and carry no span.
+`Func`/`Error`/`Object`/`Map`/`Bitset`/`Closure`/`Module`) are produced at runtime
+and carry no span; error rendering falls back to the call-site span (the
+originating `closure`/`module` native call's span, attached to the `EvalError`).
 
 `Value`, `Context`, `Env`, `EvalError` defined as in the brief. Span flow is
 covered above — synthetic variants omit the span and fall back to `Span::new(0,0)`
@@ -464,11 +483,22 @@ pub struct Env {
     pub out: Box<dyn Write>,                   // stdout sink; tests inject a buffer
     pub allow_shell: bool,                     // M20: gates `call`/`shell`
     pub cwd: PathBuf,                          // M20: base dir for file I/O
+    pub mode: EvalMode,                        // M29: `Vm` (default) or `Walk`
+    // VM compiled-block caches (M27) + scratch Vec pools (M30.1.C/M30.3.2) —
+    // func_cache, block_cache, natives_by_idx, vm_frames_pool, vm_stack_pool,
+    // vm_locals_pool, trace_out (M31). See env.rs for full field list.
+    pub module_stack: Vec<Rc<RefCell<ModuleDef>>>, // M61: currently-evaluating module bodies
+    pub modules: HashMap<Symbol, Rc<RefCell<ModuleDef>>>,       // M61: named-module cache
+    pub modules_by_path: HashMap<PathBuf, Rc<RefCell<ModuleDef>>>, // M62: file-import cache
+    pub loading_modules: Vec<PathBuf>,         // M65: in-flight import paths (circular-import guard)
+    pub current_vm_captures: Option<Rc<Vec<RefCell<Value>>>>, // M60: active closure captures (for dispatch_block)
+    pub stdlib: Option<Rc<RefCell<ModuleDef>>>, // M63: auto-imported stdlib cache
 }
 
 pub struct CallFrame {
     pub ctx: Context,        // function-local context (owned, cloned per call)
     pub func: Option<Rc<FuncDef>>,
+    pub captures: Option<Rc<Vec<RefCell<Value>>>>,  // M60: closure capture cell (None for plain funcs)
 }
 
 pub enum EvalError {
@@ -482,8 +512,18 @@ pub enum EvalError {
     Quit(i32),                     // M16: `exit` / `quit` unwind (process exit code)
     Native { message: String, span: Span },
     Raised(Rc<ErrorValue>),         // M42: structured error (cause-error / synthesized)
+    Compile { kind: CompileErrorKind, span: Span },  // M31: compiler/VM invariant violation
 }
 ```
+
+**v0.5 closure/module error sources:** no new `EvalError` variants were
+added for closure capture OOB, module private access, `export` outside
+module, `import` file-not-found, or circular import. They all reuse
+`Native { message, span }` (with a `closure:`/`import:`/`export:` message
+prefix) or `UnboundWord` (for module-private-from-outside access, which
+matches `in_native`'s absent-word behavior). The M65 audit normalized
+the message prefixes and added walker bounds-checks for capture OOB parity
+with the VM. Circular-import detection uses `Env::loading_modules`.
 
 `Env`, `CallFrame`, `EvalError`, `NativeFn`, and `RefineArgs` are all defined
 in **`red-core/src/env.rs`** (so red-core's printer/parser can mention
@@ -540,15 +580,22 @@ fn eval(block: &Value, env: &mut Env) -> Result<Value, EvalError>:
 fn resolve_word(sym, binding, env, span) -> Result<Value, EvalError>:
   match binding:
     Local(ctx, slot) => Ok(ctx.slot(slot).clone()),
-    Func(fd, idx)    => Ok(env.call_stack.last().unwrap().ctx.slot(idx).clone()),
+    Func(idx)        => Ok(env.call_stack.last().unwrap().ctx.slot(idx).clone()),
+    Lexical(d, slot) => Ok(vm.frames[frames.len()-1-d].locals[slot].clone()),  // VM-only
+    Closure(idx)     => Ok(env.call_stack.last().unwrap().captures.as_ref().unwrap()[idx].borrow().clone()),
     Unbound          =>
-      if let Some(native) = env.natives.get(&sym): Ok(Value::Func(native_to_fd(native)))
+      // M62 behavior change: consult user_ctx *first* (so `import`/`set`
+      // aliases resolve), then the native registry, then error.
+      if let Some(v) = env.user_ctx.get(sym): Ok(v)
+      else if let Some(fd) = env.natives.get(sym): Ok(Value::Func(fd.clone()))
       else: Err(UnboundWord { sym, span })
 ```
 
-(POC simplification: natives are looked up by name when the word is
-unbound. Real Red pre-binds native references; we defer that to keep the
-binding pass simple.)
+(The `Unbound → user_ctx` fallback is the one v0.5 behavior change, M62:
+required so `import`-aliased words resolve without AST re-walking. The
+VM's `LoadDynamic` already consulted `user_ctx`; the walker now matches.
+The walker bounds-checks `captures[idx]` (M65 parity with the VM's
+`LoadCapture`/`SetCapture` guards).)
 
 ### Native dispatch
 The `Env.natives` map stores `Rc<FuncDef>` (not bare `NativeFn`) so the
@@ -942,14 +989,20 @@ main levers:
 - **No precedence parsing**: Red is prefix/eager, so the parser has no
   expression grammar — every value is one token (or one bracketed group).
 - **Printer round-trip gaps (POC)**: `Func` molds as `#[function]`,
-  `String8` as `#{hex}`, `Error` as `make error! "..."` (message-only) or
+  `Closure` (M60) molds as `#[closure]`, `String8` as `#{hex}`, `Error` as
+  `make error! "..."` (message-only) or
   `make error! [code: ... type: ... message: "..."]` (structured), and
   `NaN`/`inf` floats have no lexer literal — none reparse as `Value`s
-  directly (the `make` native runs at eval time, not parse time). The
-  property test in `red-core/tests/property.rs` excludes these variants
-  (and `Object`, which is not source-origin). Positioned series
-  (`index != 0`) also don't round-trip to their head form (mold renders
-  from the cursor).
+  directly (the `make` native runs at eval time, not parse time). `Module`
+  (M61) molds as `make module! [name: ... exports: [...] ...]` — this IS
+  reparseable (`do load mold m` reconstructs a faithful public-surface
+  module; the `module_mold_roundtrips` property test covers it). The
+  property test in `red-core/tests/property.rs` excludes the non-reparseable
+  variants (`Func`, `Closure`, `Error`, `Object`, `Module`, `Map`,
+  `Bitset`, `NaN`/`inf` floats, positioned series) from the generic
+  round-trip; `Module` and `Map` have dedicated stability tests instead.
+  Positioned series (`index != 0`) also don't round-trip to their head form
+  (mold renders from the cursor).
 - **v0.4 additions** (M38, landed): `char!` type (`Value::Char`,
   `#"..."` literals, `char?`/`to-char`/`make char!`, char arithmetic,
   string char pick/poke). Block-integer SetPath (`b/2: 99`) and string
@@ -1023,13 +1076,39 @@ main levers:
   `into 'word rule`, `fail`, `break`, `if (expr)`, `not rule`, `??` debug,
   `accept value`, `reject`, `ahead rule`, `behind rule`. `rule_extent` and
   `rule_one` extended for each new keyword.
-- **Deferred to v0.5+** (acknowledged, not built): modules/`import`/
-  `export`, closures (`closure!`), full port model, `any*?` family beyond
-  what ships here, `tag!`, `ref!`, `image!`, `vector!`, `hash!`, `regex!`,
-  `logic!`/`bitset!` advanced ops, `object!` `on-change` reactive slots,
-  `routine!` FFI, named timezones (`chrono-tz`), `compose/deep` with
-  nested paren eval beyond current impl (compose is in v0.4 — that note is
-  stale; compose is fully landed).
+- **v0.5 additions (M60–M65, landed)**: first-class `closure!` and
+  `module!`. `Value::Closure(Rc<ClosureDef>)` captures freevar *values* into
+  an owned `Vec<RefCell<Value>>` cell at `closure`-creation time (snapshot
+  semantics — outer writes after creation don't propagate inward; inner
+  writes don't propagate outward; the `RefCell` permits mutation across
+  invocations of the same closure). New `Instr::MakeClosure`/
+  `LoadCapture`/`SetCapture` build/read/write the cell; `Frame::captures`
+  (an `Option<Rc<Vec<RefCell<Value>>>>`) carries it per call. `Value::Module
+  (Rc<RefCell<ModuleDef>>)` owns a `Context` namespace + an `exports` set;
+  `module [body]` swaps `env.user_ctx` to the module's ctx during body eval
+  (mirrors `make object!`); `export` marks words public; `import 'name`/
+  `import %file`/`import <module-value>` aliases exports into the current
+  `user_ctx`. Named modules cache on `Env::modules`; file imports cache on
+  `Env::modules_by_path` (canonical path); circular imports detected via
+  `Env::loading_modules`. Path resolution: `module/word` from outside checks
+  `exports` (private → `UnboundWord`); from inside, all words visible.
+  The one behavior change: `resolve_word`'s `Unbound` arm now consults
+  `env.user_ctx` first (then natives, then errors) so `import`-aliased
+  words resolve without AST re-walking (M62). A small stdlib (~25 utility
+  functions) is auto-imported unless `--no-stdlib`; `--module-path <dir>`
+  populates `system/options/module-path` for file import search.
+  **Deviation from Red:** real Red `closure!` shares the capture cell across
+  closures and across outer/inner (inner writes propagate outward); shared-
+  cell (proper SetWord capture) is a v0.6 candidate. SetWord inside a
+  closure body is treated as a local — use block-as-state (`poke`) for
+  mutable closure state.
+- **Deferred to v0.6+** (acknowledged, not built): shared-cell closures
+  (proper SetWord capture), `unimport`, reactivity (`react`/`is-thunk` —
+  see `future-plan-reactivity.md`), concurrency (actors/channels, v0.7),
+  full port model, `any*?` family beyond what ships here, `tag!`, `ref!`,
+  `image!`, `vector!`, `hash!`, `regex!`, `logic!`/`bitset!` advanced ops,
+  `object!` `on-change` reactive slots, `routine!` FFI, named timezones
+  (`chrono-tz`). GUI / `draw` / `vid` dialects are permanently out of scope.
 - **Instrumentation (`stats` feature)**: `red-eval/stats` re-exports
   `red-core/stats`, which adds two counters to `Env` gated by
   `#[cfg(feature = "stats")]` — zero-cost in release builds when off (the

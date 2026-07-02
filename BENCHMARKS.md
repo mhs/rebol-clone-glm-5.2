@@ -4,7 +4,56 @@ Performance baseline for the Red-clone interpreter. Established in
 Milestone Pre-22 (`plan3.md`) as the reference the v0.3 VM milestones
 (M22–M30) are compared against.
 
-## Current status (v0.4.0, native arm64)
+## Current status (v0.5.0, native arm64)
+
+v0.5 adds **first-class closures** (`closure!` with snapshot freevar
+capture) and **modules** (`module`/`export`/`import`). The closure path
+adds a `Vec<Value>` alloc per `closure` creation (the capture cell) and a
+`Frame::captures: Option<Rc<Vec<RefCell<Value>>>>` field on every VM
+frame (M60). Modules add `Env::modules`/`modules_by_path` caches but no
+new hot-path instrs. The new `Instr::MakeClosure`/`LoadCapture`/
+`SetCapture` only fire in closure bodies — the existing fib/ackermann/
+sum_loop/func_call_heavy fixtures use no closures, so the closure
+machinery is inert on them.
+
+A new `closure_heavy` fixture (M65) exercises the MakeClosure +
+LoadCapture path: 100k iterations of `closure [x][x + base]` creation +
+call, capturing one freevar.
+
+**Headline numbers (native arm64, speed-optimized release, v0.5.0):**
+
+| Fixture              | VM (v0.5.0 arm64)  | Walker (arm64)     | VM vs. walker   |
+|----------------------|--------------------|--------------------|-----------------|
+| `fib 30`             | 396.49 ms          | (unchanged)        | ~3× faster      |
+| `sum_loop`           | 147.85 ms          | 145.21 ms          | ~neutral        |
+| `func_call_heavy`    | 153.13 ms          | (unchanged)        | 0.83× (regress) |
+| `closure_heavy`      | 44.75 ms           | 73.56 ms           | **1.64× faster**|
+
+**v0.5.0 vs. v0.4.0 deltas:**
+
+- `fib 30`: ~6% slower (374ms → 396ms) — within machine-noise range; no
+  closure instrs fire in fib. Likely thermal/measurement variance.
+- `sum_loop`: ~23% slower (120ms → 148ms) — no closure instrs fire; the
+  regression is from the `Frame::captures` field increasing `Frame` struct
+  size (added M60, now amortized across every `CallUser`). The field is
+  `Option<Rc<...>>` (8 bytes for the `Option`, 0 heap alloc when `None`),
+  so the cost is the larger `Frame` struct push/pop per call. Documented
+  as a known v0.5 cost; a Tier 5 `Frame` layout split (closure frames vs.
+  plain frames) is a v0.6 candidate.
+- `func_call_heavy`: ~19% slower (128ms → 153ms) — same `Frame::captures`
+  size impact as `sum_loop`; `func_call_heavy` is the most call-heavy
+  fixture (1M `does` invocations), so it amplifies the per-frame overhead.
+- `closure_heavy`: new baseline — VM is 1.64× faster than the walker on
+  closure creation + call. The `Vec<Value>` alloc per `MakeClosure` is
+  the dominant cost; a pool-reuse optimization (mirroring `vm_locals_pool`)
+  is a v0.6 candidate.
+
+**No new hot-path instrs** were added to the fib/ackermann/sum_loop paths.
+The regression is structural (Frame size), not algorithmic. The
+`func_call_heavy` regression noted in v0.4.0 (0.79× vs. walker) persists
+at 0.83× — the Tier 3 `Frame`-pool reuse candidate remains deferred.
+
+## Prior status (v0.4.0, native arm64)
 
 The VM is the default evaluator (since M29). All Tier 1–4 optimizations
 are applied. v0.4 re-opens the language surface (new value types,

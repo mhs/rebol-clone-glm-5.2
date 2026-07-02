@@ -491,3 +491,26 @@ fn help_documents_module_path_and_no_stdlib() {
     );
     assert!(stdout.contains("--no-stdlib"), "help missing --no-stdlib");
 }
+
+// --- M65: stdlib + module interplay ---------------------------------------
+
+#[test]
+fn no_stdlib_makes_stdlib_unbound_everywhere() {
+    // Under `--no-stdlib`, stdlib words like `str-upper` are unbound even
+    // at the top level (not just inside module bodies). M65 documents a
+    // known limitation: stdlib words are also unbound inside module bodies
+    // by default (the module body swaps `user_ctx` to a fresh ctx, so the
+    // stdlib aliases in the script's `user_ctx` are not visible — only
+    // natives resolve via the `Unbound → natives` fallback). This test
+    // confirms the `--no-stdlib` flag's effect at the top level.
+    let dir = tempfile_dir();
+    let path = dir.join("no_stdlib_top.red");
+    fs::write(&path, "Red [] print str-upper \"hi\"").unwrap();
+    let mut cmd = Command::cargo_bin("red-cli").unwrap();
+    cmd.arg("--no-stdlib")
+        .arg(&path)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("*** Error:"))
+        .stderr(predicates::str::contains("str-upper"));
+}

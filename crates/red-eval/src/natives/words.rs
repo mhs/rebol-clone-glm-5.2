@@ -68,10 +68,15 @@ fn get_one(v: &Value, env: &mut Env, span: Span) -> Result<Value, EvalError> {
                         span,
                     })?;
                 let captures = frame.captures.as_ref().ok_or_else(|| EvalError::Native {
-                    message: format!("closure binding for {:?} has no capture cell", sym.as_str()),
+                    message: format!("closure: no capture cell for {:?}", sym.as_str()),
                     span,
                 })?;
-                Ok(captures[*idx].borrow().clone())
+                // M65: bounds check (parity with the VM's LoadCapture guard).
+                let cell = captures.get(*idx).ok_or_else(|| EvalError::Native {
+                    message: format!("closure: capture index {idx} out of bounds"),
+                    span,
+                })?;
+                Ok(cell.borrow().clone())
             }
             Binding::Unbound => env.user_ctx.get(sym).ok_or_else(|| EvalError::UnboundWord {
                 sym: sym.clone(),
@@ -167,10 +172,15 @@ fn set_one(v: &Value, val: Value, env: &mut Env) -> Result<(), EvalError> {
                         span: v.span_or_default(),
                     })?;
                 let captures = frame.captures.as_ref().ok_or_else(|| EvalError::Native {
-                    message: format!("closure binding for {:?} has no capture cell", sym.as_str()),
+                    message: format!("closure: no capture cell for {:?}", sym.as_str()),
                     span: v.span_or_default(),
                 })?;
-                *captures[*idx].borrow_mut() = val;
+                // M65: bounds check (parity with the VM's SetCapture guard).
+                let cell = captures.get(*idx).ok_or_else(|| EvalError::Native {
+                    message: format!("closure: capture index {idx} out of bounds"),
+                    span: v.span_or_default(),
+                })?;
+                *cell.borrow_mut() = val;
                 Ok(())
             }
             Binding::Unbound => {

@@ -1,0 +1,2 @@
+make module! [name: m exports: [a b] a: 1 b: 2]
+make module! [name: m exports: [a b] a: 1 b: 2]

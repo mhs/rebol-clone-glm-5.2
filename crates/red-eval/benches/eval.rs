@@ -52,6 +52,7 @@ const FIXTURE_NAMES: &[&str] = &[
     "parse_heavy",
     "string_concat",
     "func_call_heavy",
+    "closure_heavy",
 ];
 
 fn programs_dir() -> PathBuf {

@@ -1878,10 +1878,15 @@ fn resolve_word(
                     span,
                 })?;
             let captures = frame.captures.as_ref().ok_or_else(|| EvalError::Native {
-                message: format!("closure binding for {:?} has no capture cell", sym.as_str()),
+                message: format!("closure: no capture cell for {:?}", sym.as_str()),
                 span,
             })?;
-            Ok(captures[*idx].borrow().clone())
+            // M65: bounds check (parity with the VM's LoadCapture guard).
+            let cell = captures.get(*idx).ok_or_else(|| EvalError::Native {
+                message: format!("closure: capture index {idx} out of bounds"),
+                span,
+            })?;
+            Ok(cell.borrow().clone())
         }
         Binding::Unbound => {
             // M62: parity with the VM's `LoadDynamic` (vm.rs `LoadDynamic`
@@ -1957,10 +1962,15 @@ fn write_setword(
                     span,
                 })?;
             let captures = frame.captures.as_ref().ok_or_else(|| EvalError::Native {
-                message: format!("closure binding for {:?} has no capture cell", sym.as_str()),
+                message: format!("closure: no capture cell for {:?}", sym.as_str()),
                 span,
             })?;
-            *captures[*idx].borrow_mut() = val;
+            // M65: bounds check (parity with the VM's SetCapture guard).
+            let cell = captures.get(*idx).ok_or_else(|| EvalError::Native {
+                message: format!("closure: capture index {idx} out of bounds"),
+                span,
+            })?;
+            *cell.borrow_mut() = val;
             Ok(())
         }
         Binding::Unbound => {

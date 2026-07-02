@@ -23,8 +23,8 @@
 
 use proptest::prelude::*;
 use red_core::{
-    load_source, mold_to_string, printer::mold, DateValue, MapDef, MapKey, Series, Span, Symbol,
-    Value,
+    load_source, mold_to_string, printer::mold, Context, DateValue, MapDef, MapKey, ModuleDef,
+    Series, Span, Symbol, Value,
 };
 use std::rc::Rc;
 
@@ -307,4 +307,91 @@ proptest! {
         );
         prop_assert!(molded1.ends_with(']'), "expected closing ]: {molded1}");
     }
+}
+
+// M65: `module!` mold round-trips through `make module!`. Modules are
+// synthetic (mold as `make module! [...]` which parses to a block, not a
+// Module value), so they're excluded from `gen_value`. This focused test
+// builds a `ModuleDef` directly, molds it, re-parses the molded form, and
+// asserts the re-molded string is identical (stability) and that the parsed
+// tree's head word is `make` (the `make module!` constructor form). Private
+// words are omitted by the mold (only exports appear), so the round-trip
+// loses private state by design — the assertion is on the public surface.
+proptest! {
+    #[test]
+    fn module_mold_roundtrips(
+        exported_words in prop::collection::vec("[a-z][a-z0-9]{0,6}", 1..4),
+    ) {
+        let ctx = Context::new();
+        // Allocate slots for an exported + a private word so the test
+        // exercises the exports filter (private words must NOT appear in
+        // the molded form).
+        let priv_sym = Symbol::new("priv");
+        ctx.set(priv_sym.clone(), Value::integer(999));
+        let mut exports = std::collections::HashSet::new();
+        for (i, w) in exported_words.iter().enumerate() {
+            let s = Symbol::new(w);
+            ctx.set(s.clone(), Value::integer(i as i64));
+            exports.insert(s);
+        }
+        let mut md = ModuleDef::new();
+        md.ctx = Rc::new(ctx);
+        md.name = Some(Symbol::new("m"));
+        *md.exports.borrow_mut() = exports;
+        let v = Value::module(md);
+
+        let molded1 = mold_to_string(&v);
+        // Re-parse the molded form (must be valid source).
+        let toks = red_core::lexer::lex(&molded1).expect("lex molded module");
+        let body = red_core::parser::load(&toks).expect("load molded module");
+        // The head value must be `Word("make")` — the `make module!` form.
+        let data = body.data.borrow();
+        prop_assert!(
+            matches!(
+                data.first(),
+                Some(Value::Word { sym, .. }) if sym.as_str() == "make"
+            ),
+            "expected `make` head, got: {:?} (molded: {molded1})",
+            data.first()
+        );
+        drop(data);
+        // Re-mold the parsed body as a block; molding a block wraps it in
+        // `[...]`, so strip the outer brackets to compare against the
+        // original (unwrapped) module mold.
+        let block = Value::block(body);
+        let block_molded = mold_to_string(&block);
+        let re_molded = block_molded
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(&block_molded);
+        prop_assert_eq!(
+            re_molded, molded1.clone(),
+            "module mold not stable across round-trip"
+        );
+        // Private word must NOT appear in the molded form.
+        prop_assert!(
+            !molded1.contains("priv:"),
+            "private word leaked into mold: {molded1}"
+        );
+    }
+}
+
+// M65: `closure!` molds as the opaque placeholder `#[closure]` (M60). Not
+// reparseable as a literal — documented in the exclusion list above. This
+// focused test asserts the placeholder is the stable string, so future
+// printer changes don't silently break the contract.
+#[test]
+fn closure_mold_is_stable_placeholder() {
+    // Build a minimal closure: empty spec + empty body + empty captures.
+    let fd = red_core::value::FuncDef {
+        body: Series::new(vec![]),
+        ..Default::default()
+    };
+    let captures = Rc::new(Vec::new());
+    let v = Value::closure(Rc::new(fd), captures);
+    assert_eq!(mold_to_string(&v), "#[closure]");
+    // `form` agrees with `mold` for the placeholder (no separate form).
+    let mut form_buf = String::new();
+    mold(&v, &mut form_buf);
+    assert_eq!(form_buf, "#[closure]");
 }

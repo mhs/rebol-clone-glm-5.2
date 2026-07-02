@@ -584,14 +584,14 @@ impl<'env> Vm<'env> {
                     // M60: read from the current frame's closure capture cell.
                     let frame = &self.frames[frame_idx];
                     let captures = frame.captures.as_ref().ok_or_else(|| EvalError::Native {
-                        message: "LoadCapture: frame has no closure captures".into(),
+                        message: "closure: no capture cell on this frame".into(),
                         span: self.err_span(frame_idx),
                     })?;
                     let idx = idx as usize;
                     let v = captures
                         .get(idx)
                         .ok_or_else(|| EvalError::Native {
-                            message: format!("LoadCapture: index {idx} out of bounds"),
+                            message: format!("closure: capture index {idx} out of bounds"),
                             span: self.err_span(frame_idx),
                         })?
                         .borrow()
@@ -604,12 +604,12 @@ impl<'env> Vm<'env> {
                     let span = self.err_span(frame_idx);
                     let frame = &mut self.frames[frame_idx];
                     let captures = frame.captures.as_ref().ok_or_else(|| EvalError::Native {
-                        message: "SetCapture: frame has no closure captures".into(),
+                        message: "closure: no capture cell on this frame".into(),
                         span,
                     })?;
                     let idx = idx as usize;
                     let cell = captures.get(idx).ok_or_else(|| EvalError::Native {
-                        message: format!("SetCapture: index {idx} out of bounds"),
+                        message: format!("closure: capture index {idx} out of bounds"),
                         span,
                     })?;
                     *cell.borrow_mut() = val.clone();
@@ -934,14 +934,14 @@ impl<'env> Vm<'env> {
                 // M60: read from the current frame's closure capture cell.
                 let frame = &self.frames[frame_idx];
                 let captures = frame.captures.as_ref().ok_or_else(|| EvalError::Native {
-                    message: "LoadCapture: frame has no closure captures".into(),
+                    message: "closure: no capture cell on this frame".into(),
                     span: self.err_span(frame_idx),
                 })?;
                 let idx = idx as usize;
                 let v = captures
                     .get(idx)
                     .ok_or_else(|| EvalError::Native {
-                        message: format!("LoadCapture: index {idx} out of bounds"),
+                        message: format!("closure: capture index {idx} out of bounds"),
                         span: self.err_span(frame_idx),
                     })?
                     .borrow()
@@ -954,12 +954,12 @@ impl<'env> Vm<'env> {
                 let span = self.err_span(frame_idx);
                 let frame = &mut self.frames[frame_idx];
                 let captures = frame.captures.as_ref().ok_or_else(|| EvalError::Native {
-                    message: "SetCapture: frame has no closure captures".into(),
+                    message: "closure: no capture cell on this frame".into(),
                     span,
                 })?;
                 let idx = idx as usize;
                 let cell = captures.get(idx).ok_or_else(|| EvalError::Native {
-                    message: format!("SetCapture: index {idx} out of bounds"),
+                    message: format!("closure: capture index {idx} out of bounds"),
                     span,
                 })?;
                 *cell.borrow_mut() = val.clone();

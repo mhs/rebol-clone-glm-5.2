@@ -25,6 +25,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use red_core::value::{ModuleDef, Series, Symbol, Value};
@@ -178,7 +179,7 @@ pub fn export_native(
         Some(m) => Rc::clone(m),
         None => {
             return Err(EvalError::Native {
-                message: "export used outside module".into(),
+                message: "export: used outside module".into(),
                 span: args
                     .first()
                     .map(|v| v.span_or_default())
@@ -340,12 +341,54 @@ fn import_file(path: &str, env: &mut Env, span: Span) -> Result<Rc<RefCell<Modul
     if let Some(cached) = env.modules_by_path.get(&canonical) {
         return Ok(Rc::clone(cached));
     }
-    let contents = std::fs::read_to_string(&canonical).map_err(|e| EvalError::Native {
-        message: format!("import: cannot read {:?}: {}", path, e),
+    // M65: circular-import detection. If `canonical` is already on the
+    // loading stack, the file is mid-eval (its body is still being executed
+    // and re-imported itself) — raise instead of stack-overflowing. Push
+    // `canonical` for the duration of the read/eval below; pop manually on
+    // both the success and error paths (the `?`s below return `Err` without
+    // running the pop, so we wrap the fallible work in an inner closure and
+    // pop unconditionally after it returns).
+    if env.loading_modules.iter().any(|p| p == &canonical) {
+        return Err(EvalError::Native {
+            message: format!(
+                "import: circular import detected: {:?}",
+                canonical.to_string_lossy().as_ref()
+            ),
+            span,
+        });
+    }
+    env.loading_modules.push(canonical.clone());
+    let result = import_file_body(&canonical, path, env, span);
+    // Always pop the in-flight path, whether the inner work succeeded or
+    // errored — this is the manual equivalent of a Drop guard.
+    if let Some(pos) = env.loading_modules.iter().rposition(|p| p == &canonical) {
+        env.loading_modules.swap_remove(pos);
+    }
+    let module_rc = result?;
+    env.modules_by_path.insert(canonical, Rc::clone(&module_rc));
+    Ok(module_rc)
+}
+
+/// M65: inner body of `import_file`, extracted so the caller can guarantee
+/// the `loading_modules` push/pop bracket regardless of `?`-returns. Reads
+/// the file, parses it, evaluates it as a module body, and adopts the
+/// resulting `ModuleDef`. Does NOT touch `modules_by_path` (the caller
+/// caches the result after popping the loading guard).
+fn import_file_body(
+    canonical: &PathBuf,
+    path: &str,
+    env: &mut Env,
+    span: Span,
+) -> Result<Rc<RefCell<ModuleDef>>, EvalError> {
+    let contents = std::fs::read_to_string(canonical).map_err(|e| EvalError::Native {
+        message: format!(
+            "import: cannot read {:?}: {} (searched cwd and system/options/module-path)",
+            path, e
+        ),
         span,
     })?;
     let body = red_core::parser::load_source(&contents).map_err(|e| EvalError::Native {
-        message: e.to_string(),
+        message: format!("import: parse error in {:?}: {}", path, e),
         span,
     })?;
 
@@ -353,20 +396,11 @@ fn import_file(path: &str, env: &mut Env, span: Span) -> Result<Rc<RefCell<Modul
     // value is a `Value::Module` (the file is a bare `module [...]` form or
     // `module 'name [...]`), adopt it directly. Otherwise wrap the body
     // itself as an anonymous module.
-    //
-    // The throwaway context mirrors the script-startup path: install
-    // constants + bind_pass into a fresh context, eval, and inspect the
-    // result. We don't touch `env.user_ctx` here — the module gets its own
-    // ctx from `build_module`.
     let module_rc = match eval_body_for_module(&body, env)? {
         Some(m) => m,
         None => build_module(None, HashSet::new(), body, env)?,
     };
-    // Record the canonical source path on the module (M62: `ModuleDef::source`
-    // is reserved for this; populated here, never read back by M62 beyond
-    // debugging/introspection).
     module_rc.borrow_mut().source = Some(Rc::from(canonical.to_string_lossy().as_ref()));
-    env.modules_by_path.insert(canonical, Rc::clone(&module_rc));
     Ok(module_rc)
 }
 
@@ -678,11 +712,11 @@ mod tests {
         let err = run_err("export 'foo");
         match err {
             Error::Eval(EvalError::Native { message, .. }) => {
-                assert!(message.contains("export used outside module"), "{message}");
+                assert!(message.contains("export: used outside module"), "{message}");
             }
             Error::Eval(EvalError::Raised(ev)) => {
                 assert!(
-                    ev.message.contains("export used outside module"),
+                    ev.message.contains("export: used outside module"),
                     "{:?}",
                     ev.message
                 );
@@ -895,5 +929,45 @@ mod tests {
             err,
             Error::Eval(EvalError::UnboundWord { sym, .. }) if sym.as_str() == "zzz"
         ));
+    }
+
+    // --- M65: circular-import detection ---
+
+    #[test]
+    fn import_circular_detected() {
+        // Two files that import each other: a.red imports b.red, b.red
+        // imports a.red. Without cycle detection this stack-overflows; with
+        // M65's `loading_modules` guard, the second entry for a.red's
+        // canonical path raises `EvalError::Native` with "circular import".
+        // Uses absolute paths so `import %b.red` resolves regardless of the
+        // test process's cwd (relative file imports resolve against `env.cwd`,
+        // not the importing file's directory — a pre-existing limitation).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a_path = dir.path().join("a.red");
+        let b_path = dir.path().join("b.red");
+        let b_str = b_path.to_string_lossy().into_owned();
+        let a_str = a_path.to_string_lossy().into_owned();
+        std::fs::write(&a_path, format!("import %{}", b_str)).expect("write a");
+        std::fs::write(&b_path, format!("import %{}", a_str)).expect("write b");
+        let src = format!("import %{}", a_str);
+        let err = run_err(&src);
+        let msg = match err {
+            Error::Eval(EvalError::Native { message, .. }) => message,
+            Error::Eval(EvalError::Raised(ev)) => ev.message.clone(),
+            other => panic!("expected Native/Raised circular-import error, got {other:?}"),
+        };
+        assert!(msg.contains("circular import"), "{msg}");
+    }
+
+    #[test]
+    fn import_nonexistent_file_errors() {
+        // M65: file-not-found message includes the cwd/module-path hint.
+        let err = run_err("import %/nonexistent/path/to/module.red");
+        let msg = match err {
+            Error::Eval(EvalError::Native { message, .. }) => message,
+            Error::Eval(EvalError::Raised(ev)) => ev.message.clone(),
+            other => panic!("expected Native/Raised import error, got {other:?}"),
+        };
+        assert!(msg.contains("import: cannot read"), "{msg}");
     }
 }
