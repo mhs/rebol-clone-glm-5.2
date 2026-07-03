@@ -20,6 +20,10 @@ pub fn mold(value: &Value, out: &mut String) {
         Value::Float { f, .. } => mold_float(*f, out),
         Value::Percent { value, .. } => mold_percent(*value, out),
         Value::Money { amount, .. } => mold_money(amount, out),
+        Value::Issue { s, .. } => {
+            out.push('#');
+            out.push_str(s);
+        }
         Value::String { s, .. } => mold_string(s, out),
         Value::Char { c, .. } => mold_char(*c, out),
         Value::Pair { x, y, .. } => {
@@ -195,6 +199,7 @@ pub fn form(value: &Value, out: &mut String) {
         Value::Float { f, .. } => mold_float(*f, out),
         Value::Percent { value, .. } => mold_percent(*value, out),
         Value::Money { amount, .. } => mold_money(amount, out),
+        Value::Issue { s, .. } => out.push_str(s),
         Value::String { s, .. } => out.push_str(s),
         Value::Char { c, .. } => out.push(*c),
         Value::Pair { x, y, .. } => {
@@ -866,6 +871,30 @@ mod tests {
                     assert_eq!(mv.currency.as_ref(), cur, "currency mismatch: {molded}");
                 }
                 other => panic!("expected Money token for {molded}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn mold_issue() {
+        // M80: issue molds as `#<body>` (the `#` prefix + raw body).
+        assert_eq!(mold_to_string(&Value::issue("ABC")), "#ABC");
+        assert_eq!(mold_to_string(&Value::issue("1234")), "#1234");
+        assert_eq!(mold_to_string(&Value::issue("foo-bar")), "#foo-bar");
+    }
+
+    #[test]
+    fn mold_issue_round_trips_via_lexer() {
+        for body in ["ABC", "1234", "foo-bar", "FF00", "a_b_c"] {
+            let v = Value::issue(body);
+            let molded = mold_to_string(&v);
+            let toks = crate::lexer::lex(&molded).expect("lex issue");
+            assert_eq!(toks.len(), 1, "{body} molded to {molded:?}");
+            match &toks[0].kind {
+                crate::lexer::TokenKind::Issue(s) => {
+                    assert_eq!(s.as_ref(), body, "round-trip mismatch: {body} → {molded}");
+                }
+                other => panic!("expected Issue token for {molded}, got {other:?}"),
             }
         }
     }

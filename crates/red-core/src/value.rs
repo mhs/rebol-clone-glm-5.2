@@ -262,6 +262,12 @@ pub enum Value {
     /// currency code (default `"USD"`). No floating point — exact arithmetic.
     /// Same-currency add/subtract preserves money!; cross-currency errors.
     Money { amount: Rc<MoneyValue>, span: Span },
+    /// `#1234` / `#ABC` — an issue! literal (M80). Source-origin (the lexer
+    /// scans a `#`-led run of non-delimiter chars that isn't `#"` (char) or
+    /// `#{` (binary)); carries the byte-offset span of the whole token. Stored
+    /// as the raw `Rc<str>` body (without the leading `#`). Hashable (a member
+    /// of `any-string!` in Red). Pathable (`issue/x`).
+    Issue { s: Rc<str>, span: Span },
     /// `"..."` / `{...}` string literal.
     String { s: Rc<str>, span: Span },
     /// `#"a"` — a char! literal. Source-origin (the lexer scans the `#"-led
@@ -610,6 +616,8 @@ impl MapKey {
             Value::Integer { n, .. } => MapKey::Int(*n),
             Value::Char { c, .. } => MapKey::Char(*c),
             Value::String { s, .. } => MapKey::Str(s.clone()),
+            // M80: issue! is hashable (a member of any-string! in Red).
+            Value::Issue { s, .. } => MapKey::Str(s.clone()),
             Value::Word { sym, .. }
             | Value::SetWord { sym, .. }
             | Value::GetWord { sym, .. }
@@ -1236,6 +1244,7 @@ impl Value {
             | Value::Float { span, .. }
             | Value::Percent { span, .. }
             | Value::Money { span, .. }
+            | Value::Issue { span, .. }
             | Value::String { span, .. }
             | Value::Char { span, .. }
             | Value::Pair { span, .. }
@@ -1341,6 +1350,15 @@ impl Value {
     pub fn money(cents: i64, currency: impl Into<Rc<str>>) -> Self {
         Value::Money {
             amount: Rc::new(MoneyValue::new(cents, currency)),
+            span: Span::default(),
+        }
+    }
+
+    /// Constructor shorthand for an issue! literal with a zero span
+    /// (test/REPL use).
+    pub fn issue(s: impl Into<Rc<str>>) -> Self {
+        Value::Issue {
+            s: s.into(),
             span: Span::default(),
         }
     }
@@ -1911,6 +1929,10 @@ mod tests {
             amount: Rc::new(MoneyValue::usd(1000)),
             span: s
         });
+        check!(Value::Issue {
+            s: Rc::from("ABC"),
+            span: s
+        });
         check!(Value::String {
             s: Rc::from("x"),
             span: s
@@ -2031,6 +2053,10 @@ mod tests {
             Value::Float { f, .. } => Value::Float { f, span: s },
             Value::Percent { value, .. } => Value::Percent { value, span: s },
             Value::Money { amount, .. } => Value::Money { amount, span: s },
+            Value::Issue { s: issue_s, .. } => Value::Issue {
+                s: issue_s,
+                span: s,
+            },
             Value::String { s: ss, .. } => Value::String { s: ss, span: s },
             Value::Char { c, .. } => Value::Char { c, span: s },
             Value::Pair { x, y, .. } => Value::Pair { x, y, span: s },

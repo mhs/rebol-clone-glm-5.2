@@ -301,6 +301,16 @@ pub(crate) fn money_predicate(
     pred1(args, "money?", |v| matches!(v, Value::Money { .. }))
 }
 
+/// `issue?` — true for `issue!` (`Value::Issue`). M80. Red parity: issue! is
+/// a member of `any-string!`.
+pub(crate) fn issue_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "issue?", |v| matches!(v, Value::Issue { .. }))
+}
+
 /// `number?` — true for `integer!` or `float!`.
 pub(crate) fn number_predicate(
     args: &[Value],
@@ -569,7 +579,10 @@ pub(crate) fn types_of(args: &[Value], _r: &RefineArgs, _e: &mut Env) -> Result<
             | Value::File { .. }
             | Value::Url { .. }
     );
-    let is_any_string = matches!(v, Value::String { .. } | Value::String8 { .. });
+    let is_any_string = matches!(
+        v,
+        Value::String { .. } | Value::String8 { .. } | Value::Issue { .. }
+    );
 
     if is_number {
         out.push(Value::word("number!"));
@@ -625,6 +638,7 @@ pub(crate) fn register_word_predicate_natives(env: &mut Env) {
     reg(env, "float?", float_predicate);
     reg(env, "percent?", percent_predicate);
     reg(env, "money?", money_predicate);
+    reg(env, "issue?", issue_predicate);
     reg(env, "number?", number_predicate);
     reg(env, "string?", string_predicate);
     reg(env, "logic?", logic_predicate);

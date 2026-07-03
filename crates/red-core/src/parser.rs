@@ -157,6 +157,12 @@ impl<'a> Parser<'a> {
                     span: tok.span,
                 })
             }
+            TokenKind::Issue(s) => {
+                self.advance()?;
+                let head = Value::Issue { s, span: tok.span };
+                // M80: fold adjacent refinements (`#ABC/x`) into a path.
+                self.assemble_path(head, tok.span)
+            }
             TokenKind::String(s) => {
                 self.advance()?;
                 Ok(Value::String { s, span: tok.span })

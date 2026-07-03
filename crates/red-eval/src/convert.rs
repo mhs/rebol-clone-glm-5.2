@@ -415,6 +415,7 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
         "float!" | "float" => make_float(spec)?,
         "percent!" | "percent" => make_percent(spec)?,
         "money!" | "money" => make_money(spec)?,
+        "issue!" | "issue" => make_issue(spec)?,
         "string!" | "string" => make_string(spec)?,
         "block!" | "block" => make_block(spec)?,
         "file!" | "file" => make_file(spec)?,
@@ -959,6 +960,61 @@ fn to_money(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value,
     make_money(&args[0])
 }
 
+/// `to-issue value` — M80. Coerce to `issue!`. Same as `make issue!`.
+/// - `string!` → `#<string>` (the string body becomes the issue body).
+/// - `integer!` → `#<decimal>` (e.g. `1234` ⇒ `#1234`).
+/// - `issue!` → identity.
+/// - `block!` of integers → `#<concat of int chars>`.
+/// - word-family → `#<word name>`.
+fn to_issue(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "to-issue", 1, args.len()));
+    }
+    make_issue(&args[0])
+}
+
+/// `make issue! spec` (M80) / `to-issue`:
+/// - `string!` → `#<string>`.
+/// - `integer!` → `#<decimal>`.
+/// - `issue!` → identity.
+/// - `block!` of integers → `#<concat>`.
+/// - word-family → `#<word name>`.
+fn make_issue(spec: &Value) -> Result<Value, EvalError> {
+    match spec {
+        Value::Issue { s, .. } => Ok(Value::issue(s.clone())),
+        Value::String { s, .. } => Ok(Value::issue(s.clone())),
+        Value::Integer { n, .. } => Ok(Value::issue(std::rc::Rc::from(n.to_string().as_str()))),
+        Value::Block { series, .. } => {
+            let data = series.data.borrow();
+            let mut out = String::new();
+            for v in data.iter() {
+                match v {
+                    Value::Integer { n, .. } => out.push_str(&n.to_string()),
+                    Value::Char { c, .. } => out.push(*c),
+                    Value::String { s, .. } => out.push_str(s),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "integer!, char!, or string! (issue element)",
+                            found: type_name(v),
+                            span: v.span_or_default(),
+                        });
+                    }
+                }
+            }
+            Ok(Value::issue(std::rc::Rc::from(out.as_str())))
+        }
+        w if word_sym(w).is_some() => {
+            let sym = word_sym(w).unwrap();
+            Ok(Value::issue(std::rc::Rc::from(sym.as_str())))
+        }
+        other => Err(EvalError::TypeError {
+            expected: "string!, integer!, issue!, block!, or word!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
 /// `make date! spec` — M45. Construct a `date!` from:
 /// - `string!` → parse via the lexer's date scanner (e.g. `"29-Jun-2024"`).
 /// - `date!` → identity (clone).
@@ -1059,6 +1115,7 @@ fn to_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
         "float!" | "float" => to_float(one, &RefineArgs::empty(), env),
         "percent!" | "percent" => to_percent(one, &RefineArgs::empty(), env),
         "money!" | "money" => to_money(one, &RefineArgs::empty(), env),
+        "issue!" | "issue" => to_issue(one, &RefineArgs::empty(), env),
         "string!" | "string" => to_string(one, &RefineArgs::empty(), env),
         "block!" | "block" => to_block(one, &RefineArgs::empty(), env),
         "word!" | "word" => to_word_kind(one, "to", WordKind::Word),
@@ -1151,6 +1208,7 @@ pub fn register_convert_natives(env: &mut Env) {
     reg(env, "to-float", to_float as NF, 1);
     reg(env, "to-percent", to_percent as NF, 1);
     reg(env, "to-money", to_money as NF, 1);
+    reg(env, "to-issue", to_issue as NF, 1);
     reg(env, "to-string", to_string as NF, 1);
     reg(env, "to-block", to_block as NF, 1);
     reg(env, "to-word", to_word as NF, 1);

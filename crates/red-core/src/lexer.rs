@@ -25,6 +25,10 @@ pub enum TokenKind {
     /// validates the structure (digits, optional fractional, optional `:CCC`
     /// suffix, optional inter-digit commas which are stripped on lex).
     Money(MoneyValue),
+    /// `#1234` / `#ABC` — an issue! literal (M80). Stored as the raw body
+    /// `Rc<str>` (without the leading `#`). Produced by `scan_issue` when a
+    /// `#` is followed by anything other than `"` (char!) or `{` (binary!).
+    Issue(Rc<str>),
     String(Rc<str>),
     Word(Symbol),
     SetWord(Symbol),
@@ -93,6 +97,11 @@ pub enum LexError {
     /// was expected, an unterminated currency suffix, fractional cents with
     /// more than 2 decimal places, etc.).
     InvalidMoney { span: Span, chars: String },
+    /// A `#...` issue! literal with an empty body (e.g. `#` followed by
+    /// whitespace or a delimiter). The `#`-then-word-char form is the only
+    /// valid issue! shape; `#"` and `#{` are handled by the char!/binary!
+    /// scanners before issue! is considered.
+    InvalidIssue { span: Span, chars: String },
     /// A word-shaped token had an empty body (e.g. `::`, `''`).
     InvalidWord { span: Span },
     /// `{...` hit EOF with braces still open. `depth` is the number of
@@ -126,6 +135,7 @@ impl LexError {
             | LexError::InvalidNumber { span, .. }
             | LexError::InvalidPercent { span, .. }
             | LexError::InvalidMoney { span, .. }
+            | LexError::InvalidIssue { span, .. }
             | LexError::InvalidWord { span }
             | LexError::UnbalancedBrace { span, .. }
             | LexError::InvalidChar { span, .. }
@@ -152,6 +162,9 @@ impl std::fmt::Display for LexError {
             }
             LexError::InvalidMoney { chars, .. } => {
                 write!(f, "invalid money literal: {chars:?}")
+            }
+            LexError::InvalidIssue { chars, .. } => {
+                write!(f, "invalid issue literal: {chars:?}")
             }
             LexError::InvalidWord { .. } => write!(f, "invalid word (empty body)"),
             LexError::UnbalancedBrace { depth, .. } => {
@@ -282,6 +295,25 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
         // falls through to `scan_word`.
         if c == b'#' && bytes.get(i + 1) == Some(&b'{') {
             let (end, kind) = scan_binary(src, &mut i)?;
+            out.push(Token {
+                kind,
+                span: Span::new(start, end),
+            });
+            continue;
+        }
+
+        // M80: Issue literal: `#` followed by a run of non-delimiter word chars
+        // (letters, digits, `-`, `_`, `.`, `?`, `!`). This is the fall-through
+        // after `#"` (char!) and `#{` (binary!). A bare `#` followed by a
+        // delimiter (whitespace, `[`, etc.) is an error (InvalidIssue). A `#`
+        // followed by other word chars produces `Issue("body")`.
+        //
+        // **Behavior change:** previously a bare `#foo` fell through to
+        // `scan_word` and produced `Word("#foo")`. Now it produces
+        // `Issue("foo")`. No existing fixture relied on `#word`-as-`Word`
+        // (audited before this change).
+        if c == b'#' {
+            let (end, kind) = scan_issue(src, &mut i)?;
             out.push(Token {
                 kind,
                 span: Span::new(start, end),
@@ -916,6 +948,43 @@ fn scan_money(src: &str, i: &mut usize, negative: bool) -> Result<(usize, TokenK
     let cents = if negative { -cents } else { cents };
 
     Ok((*i, TokenKind::Money(MoneyValue { cents, currency })))
+}
+
+/// M80: scan an issue! literal (`#body`). The caller has already confirmed
+/// the `#` is not followed by `"` (char!) or `{` (binary!). This scanner
+/// consumes the `#` and a run of issue-word chars (letters, digits, `-`,
+/// `_`, `.`, `?`, `!`). An empty body (e.g. `#` followed by whitespace or
+/// a delimiter) is an error.
+fn scan_issue(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError> {
+    let start = *i;
+    let bytes = src.as_bytes();
+    *i += 1; // consume the `#`
+
+    // Read a run of issue-word chars. The issue body accepts the same chars
+    // as a word run (minus `:` which is a SetWord lead and `/` which is a
+    // refinement delimiter — both delimiters).
+    let body_start = *i;
+    while *i < bytes.len() && is_issue_char(bytes[*i]) {
+        *i += 1;
+    }
+    let body_end = *i;
+    if body_end == body_start {
+        let end = (*i).min(bytes.len()).max(start + 1);
+        return Err(LexError::InvalidIssue {
+            span: Span::new(start, end),
+            chars: src[start..end].to_string(),
+        });
+    }
+    let body: Rc<str> = Rc::from(&src[body_start..body_end]);
+    Ok((body_end, TokenKind::Issue(body)))
+}
+
+/// Issue body character predicate: letters, digits, and `-`, `_`, `.`, `?`,
+/// `!`. Matches the word-char set minus delimiters (`:`/`/` are excluded so
+/// `#foo:` lexes as `Issue("foo")` + `SetWord("foo")`, and `#foo/bar` lexes
+/// as `Issue("foo")` + `Refinement("bar")` for path folding).
+fn is_issue_char(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'?' | b'!')
 }
 
 fn consume_digits(bytes: &[u8], mut i: usize) -> usize {
@@ -2010,6 +2079,38 @@ mod tests {
     }
 
     #[test]
+    fn issue_literal() {
+        // M80: `#` followed by word chars scans as Issue (body without `#`).
+        assert_eq!(one("#1234"), TokenKind::Issue(std::rc::Rc::from("1234")));
+        assert_eq!(one("#ABC"), TokenKind::Issue(std::rc::Rc::from("ABC")));
+        assert_eq!(one("#FF00"), TokenKind::Issue(std::rc::Rc::from("FF00")));
+        // Issue with hyphen/underscore/dot.
+        assert_eq!(
+            one("#foo-bar"),
+            TokenKind::Issue(std::rc::Rc::from("foo-bar"))
+        );
+        assert_eq!(
+            one("#foo_bar"),
+            TokenKind::Issue(std::rc::Rc::from("foo_bar"))
+        );
+    }
+
+    #[test]
+    fn issue_regression_char_and_binary_still_work() {
+        // M80: the issue fall-through must not break `#"x"` (char) or
+        // `#{hex}` (binary).
+        assert!(matches!(one("#\"a\""), TokenKind::Char('a')));
+        assert!(matches!(one("#{00FF}"), TokenKind::Binary(_)));
+    }
+
+    #[test]
+    fn issue_bad_form() {
+        // `#` followed by a delimiter (space, bracket) is an InvalidIssue.
+        assert!(matches!(lex("# "), Err(LexError::InvalidIssue { .. })));
+        assert!(matches!(lex("#["), Err(LexError::InvalidIssue { .. })));
+    }
+
+    #[test]
     fn number_then_word_no_dot() {
         // `5.foo` — the `.` not followed by a digit ends the number.
         let toks = lex("5.foo").expect("lex");
@@ -2351,9 +2452,14 @@ mod tests {
     }
 
     #[test]
-    fn char_literal_does_not_affect_bare_hash_word() {
-        // A bare `#` not followed by `"` or `{` should fall through to word scan.
-        assert!(matches!(one("#foo"), TokenKind::Word(_)));
+    fn char_and_binary_do_not_affect_bare_hash_issue() {
+        // M80 behavior change: a bare `#` not followed by `"` or `{` now
+        // scans as an issue! literal (was: `Word("#foo")`). Confirm the two
+        // `#`-led forms that DO scan as char!/binary! still work.
+        assert!(matches!(one("#\"a\""), TokenKind::Char('a')));
+        assert!(matches!(one("#{48656C6C6F}"), TokenKind::Binary(_)));
+        // And the bare `#` form is now an Issue.
+        assert_eq!(one("#foo"), TokenKind::Issue(std::rc::Rc::from("foo")));
     }
 
     #[test]

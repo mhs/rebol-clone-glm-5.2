@@ -371,6 +371,7 @@ fn eval_prefix(
         | Value::Float { .. }
         | Value::Percent { .. }
         | Value::Money { .. }
+        | Value::Issue { .. }
         | Value::String { .. }
         | Value::String8 { .. }
         | Value::LitWord { .. }

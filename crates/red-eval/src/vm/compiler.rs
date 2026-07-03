@@ -669,6 +669,7 @@ fn compile_prefix(
         Value::Float { .. }
         | Value::Percent { .. }
         | Value::Money { .. }
+        | Value::Issue { .. }
         | Value::String { .. }
         | Value::Char { .. }
         | Value::Pair { .. }

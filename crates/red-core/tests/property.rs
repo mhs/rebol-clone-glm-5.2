@@ -51,7 +51,13 @@ fn gen_value(_depth: u32) -> BoxedStrategy<Value> {
             value: n as f64 / 100.0,
             span: Span::new(0, 0),
         }),
-        // M80: money! literals — small cents + a fixed currency set so the
+        // M80: issue! literals — short alphanumeric bodies (mold form `#body`
+        // reparses through the lexer). Avoid `"`/`{` as the first char (those
+        // route to char!/binary! scanners).
+        "[a-zA-Z0-9_.!?-]{1,8}".prop_map(|s: String| Value::Issue {
+            s: s.into(),
+            span: Span::new(0, 0),
+        }),
         // mold form `$<dollars>.<DD>[:CCC]` round-trips. Keep cents small to
         // avoid i64 edge cases; use 3 currencies (USD default, EUR/JPY
         // non-default to exercise the suffix).
