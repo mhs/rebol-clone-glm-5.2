@@ -51,6 +51,21 @@ fn gen_value(_depth: u32) -> BoxedStrategy<Value> {
             value: n as f64 / 100.0,
             span: Span::new(0, 0),
         }),
+        // M80: money! literals — small cents + a fixed currency set so the
+        // mold form `$<dollars>.<DD>[:CCC]` round-trips. Keep cents small to
+        // avoid i64 edge cases; use 3 currencies (USD default, EUR/JPY
+        // non-default to exercise the suffix).
+        (-1_000_000i64..=1_000_000, 0u8..3).prop_map(|(cents, cur_idx)| {
+            let currency = match cur_idx {
+                0 => "USD",
+                1 => "EUR",
+                _ => "JPY",
+            };
+            Value::Money {
+                amount: std::rc::Rc::new(red_core::MoneyValue::new(cents, currency)),
+                span: Span::new(0, 0),
+            }
+        }),
         // Printable ASCII strings (mold escapes as needed).
         "[a-z0-9 \\\"\\n\\t]{0,20}".prop_map(|s: String| Value::String {
             s: s.into(),

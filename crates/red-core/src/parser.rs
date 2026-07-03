@@ -150,6 +150,13 @@ impl<'a> Parser<'a> {
                     span: tok.span,
                 })
             }
+            TokenKind::Money(mv) => {
+                self.advance()?;
+                Ok(Value::Money {
+                    amount: std::rc::Rc::new(mv),
+                    span: tok.span,
+                })
+            }
             TokenKind::String(s) => {
                 self.advance()?;
                 Ok(Value::String { s, span: tok.span })

@@ -290,6 +290,12 @@ pub(crate) fn eval_expression(
             None => break,
         };
         let infix_span = data[*i].span_or_default();
+        // M80: capture the infix symbol before consuming the word so
+        // `enrich_error` can report it as the `where` field.
+        let infix_sym = match &data[*i] {
+            Value::Word { sym, .. } => sym.clone(),
+            _ => Symbol::new("<infix>"),
+        };
         *i += 1; // consume the infix word itself; now *i points at the right operand
         let arity = infix.params.len();
         debug_assert!(
@@ -312,7 +318,17 @@ pub(crate) fn eval_expression(
             args.push(eval_prefix(data, i, env)?);
         }
         let f = infix.native.unwrap();
-        value = f(&args, &RefineArgs::empty(), env)?;
+        // M80: enrich `Native`/`TypeError`/etc. errors into `Raised` with the
+        // native name (`where`) and call-site span (`near`), matching the VM's
+        // `Call` handler and the walker's prefix native-call path. Previously
+        // the infix path called natives directly without enrichment, causing
+        // a VM/walker parity gap on error messages.
+        value = match f(&args, &RefineArgs::empty(), env) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(crate::natives::enrich_error(e, Some(infix_sym), infix_span));
+            }
+        };
     }
     Ok(value)
 }
@@ -354,6 +370,7 @@ fn eval_prefix(
         | Value::Integer { .. }
         | Value::Float { .. }
         | Value::Percent { .. }
+        | Value::Money { .. }
         | Value::String { .. }
         | Value::String8 { .. }
         | Value::LitWord { .. }

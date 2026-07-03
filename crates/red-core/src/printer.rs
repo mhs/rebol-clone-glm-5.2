@@ -3,7 +3,9 @@
 
 use chrono::{Datelike, Timelike};
 
-use crate::value::{BitsetDef, DateValue, MapDef, MapKey, ModuleDef, ObjectDef, PortDef, Value};
+use crate::value::{
+    BitsetDef, DateValue, MapDef, MapKey, ModuleDef, MoneyValue, ObjectDef, PortDef, Value,
+};
 
 /// Append the Red source form of `value` to `out`.
 pub fn mold(value: &Value, out: &mut String) {
@@ -17,6 +19,7 @@ pub fn mold(value: &Value, out: &mut String) {
         }
         Value::Float { f, .. } => mold_float(*f, out),
         Value::Percent { value, .. } => mold_percent(*value, out),
+        Value::Money { amount, .. } => mold_money(amount, out),
         Value::String { s, .. } => mold_string(s, out),
         Value::Char { c, .. } => mold_char(*c, out),
         Value::Pair { x, y, .. } => {
@@ -191,6 +194,7 @@ pub fn form(value: &Value, out: &mut String) {
         }
         Value::Float { f, .. } => mold_float(*f, out),
         Value::Percent { value, .. } => mold_percent(*value, out),
+        Value::Money { amount, .. } => mold_money(amount, out),
         Value::String { s, .. } => out.push_str(s),
         Value::Char { c, .. } => out.push(*c),
         Value::Pair { x, y, .. } => {
@@ -283,6 +287,27 @@ fn mold_percent(value: f64, out: &mut String) {
     let s = format!("{:.6}", pct);
     let trimmed = s.trim_end_matches('0').trim_end_matches('.');
     let _ = write!(out, "{}%", trimmed);
+}
+
+/// M80: mold a money! value. `$<dollars>.<DD>` with exactly 2 decimal places,
+/// and an optional `:CCC` currency suffix when the currency is not USD (the
+/// default). `$10.00` molds as `$10.00`; `$10.00:EUR` molds as `$10.00:EUR`.
+/// Negative cents mold as `-$10.00`. Round-trips through the lexer.
+fn mold_money(m: &MoneyValue, out: &mut String) {
+    use std::fmt::Write;
+    let negative = m.cents < 0;
+    let abs = m.cents.unsigned_abs();
+    let dollars = abs / 100;
+    let cents = abs % 100;
+    if negative {
+        out.push('-');
+    }
+    out.push('$');
+    let _ = write!(out, "{}.{:02}", dollars, cents);
+    if m.currency.as_ref() != "USD" {
+        out.push(':');
+        out.push_str(&m.currency);
+    }
 }
 
 fn mold_object(obj: &ObjectDef, out: &mut String) {
@@ -769,6 +794,78 @@ mod tests {
                     assert_eq!(*parsed, value, "round-trip mismatch: {value} → {molded}");
                 }
                 other => panic!("expected Percent token for {molded}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn mold_money() {
+        // M80: money molds as `$<dollars>.<DD>` (2 decimals), with optional
+        // `:CCC` suffix when non-USD.
+        use crate::value::MoneyValue;
+        assert_eq!(
+            mold_to_string(&Value::Money {
+                amount: std::rc::Rc::new(MoneyValue::usd(0)),
+                span: Span::default(),
+            }),
+            "$0.00"
+        );
+        assert_eq!(
+            mold_to_string(&Value::Money {
+                amount: std::rc::Rc::new(MoneyValue::usd(1000)),
+                span: Span::default(),
+            }),
+            "$10.00"
+        );
+        assert_eq!(
+            mold_to_string(&Value::Money {
+                amount: std::rc::Rc::new(MoneyValue::usd(123456)),
+                span: Span::default(),
+            }),
+            "$1234.56"
+        );
+        assert_eq!(
+            mold_to_string(&Value::Money {
+                amount: std::rc::Rc::new(MoneyValue::usd(-1000)),
+                span: Span::default(),
+            }),
+            "-$10.00"
+        );
+        assert_eq!(
+            mold_to_string(&Value::Money {
+                amount: std::rc::Rc::new(MoneyValue::new(1000, "EUR")),
+                span: Span::default(),
+            }),
+            "$10.00:EUR"
+        );
+    }
+
+    #[test]
+    fn mold_money_round_trips_via_lexer() {
+        // Every money value we mold must re-parse to the same cents+currency.
+        use crate::value::MoneyValue;
+        for (cents, cur) in [
+            (0i64, "USD"),
+            (1000, "USD"),
+            (123456, "USD"),
+            (-1000, "USD"),
+            (5, "USD"),
+            (1000, "EUR"),
+            (99, "JPY"),
+        ] {
+            let v = Value::Money {
+                amount: std::rc::Rc::new(MoneyValue::new(cents, cur)),
+                span: Span::default(),
+            };
+            let molded = mold_to_string(&v);
+            let toks = crate::lexer::lex(&molded).expect("lex money");
+            assert_eq!(toks.len(), 1, "{cents} {cur} molded to {molded:?}");
+            match &toks[0].kind {
+                crate::lexer::TokenKind::Money(mv) => {
+                    assert_eq!(mv.cents, cents, "cents mismatch: {molded}");
+                    assert_eq!(mv.currency.as_ref(), cur, "currency mismatch: {molded}");
+                }
+                other => panic!("expected Money token for {molded}, got {other:?}"),
             }
         }
     }

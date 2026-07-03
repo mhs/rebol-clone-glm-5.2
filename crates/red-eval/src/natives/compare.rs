@@ -22,6 +22,10 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         // false). `50% = 0.5` ⇒ false (different types). Ordering (`<`/`>`)
         // promotes via `as_number` below.
         (Value::Percent { value: x, .. }, Value::Percent { value: y, .. }) => x == y,
+        // M80: money! strict equality — compares both cents and currency.
+        // Cross-currency `$10.00:USD = $10.00:EUR` is false. `money = int`
+        // is false (distinct types).
+        (Value::Money { amount: a, .. }, Value::Money { amount: b, .. }) => a == b,
         (Value::Integer { n: x, .. }, Value::Float { f: y, .. }) => (*x as f64) == *y,
         (Value::Float { f: x, .. }, Value::Integer { n: y, .. }) => *x == (*y as f64),
         (Value::String { s: x, .. }, Value::String { s: y, .. }) => x == y,
@@ -140,6 +144,9 @@ pub(crate) fn less_than(
     _refs: &RefineArgs,
     _env: &mut Env,
 ) -> Result<Value, EvalError> {
+    if let Some(ord) = money_cmp(args)? {
+        return Ok(Value::Logic(compare("<", ord)));
+    }
     Ok(Value::Logic(compare("<", num_cmp(&args[0], &args[1])?)))
 }
 
@@ -148,6 +155,9 @@ pub(crate) fn greater_than(
     _refs: &RefineArgs,
     _env: &mut Env,
 ) -> Result<Value, EvalError> {
+    if let Some(ord) = money_cmp(args)? {
+        return Ok(Value::Logic(compare(">", ord)));
+    }
     Ok(Value::Logic(compare(">", num_cmp(&args[0], &args[1])?)))
 }
 
@@ -156,6 +166,9 @@ pub(crate) fn less_equal(
     _refs: &RefineArgs,
     _env: &mut Env,
 ) -> Result<Value, EvalError> {
+    if let Some(ord) = money_cmp(args)? {
+        return Ok(Value::Logic(compare("<=", ord)));
+    }
     Ok(Value::Logic(compare("<=", num_cmp(&args[0], &args[1])?)))
 }
 
@@ -164,7 +177,54 @@ pub(crate) fn greater_equal(
     _refs: &RefineArgs,
     _env: &mut Env,
 ) -> Result<Value, EvalError> {
+    if let Some(ord) = money_cmp(args)? {
+        return Ok(Value::Logic(compare(">=", ord)));
+    }
     Ok(Value::Logic(compare(">=", num_cmp(&args[0], &args[1])?)))
+}
+
+/// M80: money! ordering dispatcher. Returns `Some(Ordering)` when both
+/// operands are money! (compares by cents; cross-currency is a TypeError).
+/// Returns `None` when neither operand is money! (so the caller falls
+/// through to `num_cmp`). Errors when exactly one operand is money! (asymmetric
+/// — money vs non-money is a type error for ordering).
+fn money_cmp(args: &[Value]) -> Result<Option<std::cmp::Ordering>, EvalError> {
+    let a = &args[0];
+    let b = &args[1];
+    let a_m = matches!(a, Value::Money { .. });
+    let b_m = matches!(b, Value::Money { .. });
+    if !a_m && !b_m {
+        return Ok(None);
+    }
+    if a_m && b_m {
+        let (ca, cca) = money_parts(a);
+        let (cb, ccb) = money_parts(b);
+        if cca != ccb {
+            return Err(EvalError::Native {
+                message: format!("money error: currency mismatch ({cca} vs {ccb})"),
+                span: a.span_or_default(),
+            });
+        }
+        return Ok(Some(ca.cmp(&cb)));
+    }
+    // Asymmetric: money vs non-money.
+    Err(EvalError::TypeError {
+        expected: "money!",
+        found: if a_m { type_name(b) } else { type_name(a) },
+        span: if a_m {
+            b.span_or_default()
+        } else {
+            a.span_or_default()
+        },
+    })
+}
+
+/// Extract `(cents, currency)` from a `Value::Money`.
+fn money_parts(v: &Value) -> (i64, &str) {
+    match v {
+        Value::Money { amount, .. } => (amount.cents, amount.currency.as_ref()),
+        _ => unreachable!(),
+    }
 }
 
 /// A numeric value extracted from `Value::Integer` or `Value::Float`.

@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use chrono::{NaiveDate, NaiveTime};
 
-use crate::value::{DateValue, Span, Symbol};
+use crate::value::{DateValue, MoneyValue, Span, Symbol};
 
 /// One lexical token.
 #[derive(Clone, Debug, PartialEq)]
@@ -20,6 +20,11 @@ pub enum TokenKind {
     /// immediately followed by `%` (the `%` does not collide with file!
     /// literals because `%`-files don't follow digits).
     Percent(f64),
+    /// `$10.00` / `$1,234.56:EUR` — a money! literal (M80). Stored as a
+    /// fully-parsed `MoneyValue` (integer cents + currency code). The lexer
+    /// validates the structure (digits, optional fractional, optional `:CCC`
+    /// suffix, optional inter-digit commas which are stripped on lex).
+    Money(MoneyValue),
     String(Rc<str>),
     Word(Symbol),
     SetWord(Symbol),
@@ -84,6 +89,10 @@ pub enum LexError {
     /// huge exponent run producing infinity). The digits parsed but the
     /// resulting `f64 / 100.0` is not finite.
     InvalidPercent { span: Span, chars: String },
+    /// A `$...` money! literal with a malformed body (non-digit where a digit
+    /// was expected, an unterminated currency suffix, fractional cents with
+    /// more than 2 decimal places, etc.).
+    InvalidMoney { span: Span, chars: String },
     /// A word-shaped token had an empty body (e.g. `::`, `''`).
     InvalidWord { span: Span },
     /// `{...` hit EOF with braces still open. `depth` is the number of
@@ -116,6 +125,7 @@ impl LexError {
             LexError::UnterminatedString { span }
             | LexError::InvalidNumber { span, .. }
             | LexError::InvalidPercent { span, .. }
+            | LexError::InvalidMoney { span, .. }
             | LexError::InvalidWord { span }
             | LexError::UnbalancedBrace { span, .. }
             | LexError::InvalidChar { span, .. }
@@ -139,6 +149,9 @@ impl std::fmt::Display for LexError {
             }
             LexError::InvalidPercent { chars, .. } => {
                 write!(f, "invalid percent literal: {chars:?}")
+            }
+            LexError::InvalidMoney { chars, .. } => {
+                write!(f, "invalid money literal: {chars:?}")
             }
             LexError::InvalidWord { .. } => write!(f, "invalid word (empty body)"),
             LexError::UnbalancedBrace { depth, .. } => {
@@ -343,6 +356,33 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                     continue;
                 }
             }
+            out.push(Token {
+                kind,
+                span: Span::new(start, end),
+            });
+            continue;
+        }
+
+        // Money literal: `$`-prefixed run (`$10.00`, `$1,234.56:EUR`). `$`
+        // is not a delimiter today (it's a word character), so a bare `$foo`
+        // would otherwise scan as a Word; this arm intercepts `$` followed by
+        // a digit and routes to `scan_money`. `$` not followed by a digit
+        // falls through to `scan_word` (preserving `$foo`-as-word). A leading
+        // `-` (`-$10.00`) is also handled here.
+        if c == b'$' && bytes.get(i + 1).is_some_and(|b| b.is_ascii_digit()) {
+            let (end, kind) = scan_money(src, &mut i, false)?;
+            out.push(Token {
+                kind,
+                span: Span::new(start, end),
+            });
+            continue;
+        }
+        if c == b'-'
+            && bytes.get(i + 1) == Some(&b'$')
+            && bytes.get(i + 2).is_some_and(|b| b.is_ascii_digit())
+        {
+            i += 1; // consume the `-`
+            let (end, kind) = scan_money(src, &mut i, true)?;
             out.push(Token {
                 kind,
                 span: Span::new(start, end),
@@ -740,6 +780,142 @@ fn scan_number(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError>
     };
 
     Ok((end, kind))
+}
+
+/// M80: scan a `$`-led money! literal. Forms accepted:
+/// - `$<digits>` → integer cents (`$10` ⇒ 1000 cents).
+/// - `$<digits>.<digits>` → dollars.cents (`$10.00` ⇒ 1000 cents). The
+///   fractional part must be exactly 2 digits (Red parity: no `$10.5`).
+/// - `$<digits>,<digits>[,...].<digits>` → comma-grouped whole part
+///   (`$1,234.56` ⇒ 123456 cents). Commas are stripped on lex; they may
+///   appear only between digit groups (not leading/trailing/double).
+/// - Optional `:CCC` currency suffix (3 ASCII letters; default `USD`).
+///
+/// Negative amounts use a leading `-` (e.g. `-$10.00`) — the `-` is
+/// consumed by the main loop's number branch, so `-$10.00` reaches here
+/// without the `-`. This scanner handles only the `$`-onward portion; the
+/// sign must be applied by the caller (here we just parse the magnitude and
+/// let the constructor take a signed cents). For the common `$10.00` form the
+/// sign is always positive.
+///
+/// Errors: `InvalidMoney` on malformed shape, fractional cents with ≠ 2
+/// decimal digits, a bad currency suffix, or i64 overflow.
+fn scan_money(src: &str, i: &mut usize, negative: bool) -> Result<(usize, TokenKind), LexError> {
+    let start = if negative { *i - 1 } else { *i };
+    let bytes = src.as_bytes();
+    *i += 1; // consume the `$`
+
+    // Whole part: digits with optional inter-digit commas. Commas must be
+    // followed by a digit (no leading/trailing/double commas).
+    let mut whole_digits = String::new();
+    while *i < bytes.len() {
+        let b = bytes[*i];
+        if b.is_ascii_digit() {
+            whole_digits.push(b as char);
+            *i += 1;
+        } else if b == b',' {
+            // Comma must be followed by a digit.
+            if *i + 1 >= bytes.len() || !bytes[*i + 1].is_ascii_digit() {
+                let end = *i + 1;
+                return Err(LexError::InvalidMoney {
+                    span: Span::new(start, end),
+                    chars: src[start..end].to_string(),
+                });
+            }
+            *i += 1; // consume the comma (digit consumed next iteration)
+        } else {
+            break;
+        }
+    }
+    if whole_digits.is_empty() {
+        let end = *i;
+        return Err(LexError::InvalidMoney {
+            span: Span::new(start, end),
+            chars: src[start..end].to_string(),
+        });
+    }
+
+    // Fractional part: optional `.DD` (exactly 2 digits).
+    let mut frac_digits = String::new();
+    if *i < bytes.len() && bytes[*i] == b'.' {
+        *i += 1; // consume `.`
+                 // Read exactly 2 fractional digits.
+        for _ in 0..2 {
+            if *i < bytes.len() && bytes[*i].is_ascii_digit() {
+                frac_digits.push(bytes[*i] as char);
+                *i += 1;
+            } else {
+                let end = *i;
+                return Err(LexError::InvalidMoney {
+                    span: Span::new(start, end),
+                    chars: src[start..end].to_string(),
+                });
+            }
+        }
+        // A third digit after the decimal is an error (Red requires exactly 2).
+        if *i < bytes.len() && bytes[*i].is_ascii_digit() {
+            let end = *i + 1;
+            return Err(LexError::InvalidMoney {
+                span: Span::new(start, end),
+                chars: src[start..end].to_string(),
+            });
+        }
+    }
+
+    // Optional currency suffix: `:CCC` (3 ASCII letters).
+    let mut currency: Rc<str> = Rc::from("USD");
+    if *i < bytes.len() && bytes[*i] == b':' {
+        let suffix_start = *i;
+        *i += 1; // consume `:`
+        let mut code = String::new();
+        for _ in 0..3 {
+            if *i < bytes.len() && bytes[*i].is_ascii_alphabetic() {
+                code.push(bytes[*i] as char);
+                *i += 1;
+            } else {
+                let end = *i;
+                return Err(LexError::InvalidMoney {
+                    span: Span::new(start, end.max(suffix_start + 1)),
+                    chars: src[start..end].to_string(),
+                });
+            }
+        }
+        // The suffix must be exactly 3 letters (no 4th letter).
+        if *i < bytes.len() && bytes[*i].is_ascii_alphabetic() {
+            let end = *i + 1;
+            return Err(LexError::InvalidMoney {
+                span: Span::new(start, end),
+                chars: src[start..end].to_string(),
+            });
+        }
+        currency = Rc::from(code.to_uppercase().as_str());
+    }
+
+    // Parse the whole-part digits as i64 (cents = whole * 100 + frac).
+    let whole: i64 = whole_digits.parse().map_err(|_| LexError::InvalidMoney {
+        span: Span::new(start, *i),
+        chars: src[start..*i].to_string(),
+    })?;
+    let whole_cents = whole
+        .checked_mul(100)
+        .ok_or_else(|| LexError::InvalidMoney {
+            span: Span::new(start, *i),
+            chars: src[start..*i].to_string(),
+        })?;
+    let frac_cents: i64 = if frac_digits.is_empty() {
+        0
+    } else {
+        frac_digits.parse().unwrap_or(0)
+    };
+    let cents = whole_cents
+        .checked_add(frac_cents)
+        .ok_or_else(|| LexError::InvalidMoney {
+            span: Span::new(start, *i),
+            chars: src[start..*i].to_string(),
+        })?;
+    let cents = if negative { -cents } else { cents };
+
+    Ok((*i, TokenKind::Money(MoneyValue { cents, currency })))
 }
 
 fn consume_digits(bytes: &[u8], mut i: usize) -> usize {
@@ -1776,6 +1952,61 @@ mod tests {
         assert_eq!(toks.len(), 2);
         assert_eq!(toks[0].kind, TokenKind::Percent(0.5));
         assert!(matches!(toks[1].kind, TokenKind::File(_)));
+    }
+
+    #[test]
+    fn money_literal() {
+        // M80: `$`-led money! literals (stored as cents + currency).
+        let mv = |t: &TokenKind| match t {
+            TokenKind::Money(m) => (m.cents, m.currency.as_ref().to_string()),
+            _ => panic!("not Money: {t:?}"),
+        };
+        assert_eq!(mv(&one("$0")), (0, "USD".to_string()));
+        assert_eq!(mv(&one("$10")), (1000, "USD".to_string()));
+        assert_eq!(mv(&one("$10.00")), (1000, "USD".to_string()));
+        assert_eq!(mv(&one("$1,234.56")), (123456, "USD".to_string()));
+        // Currency suffix.
+        assert_eq!(mv(&one("$10.00:EUR")), (1000, "EUR".to_string()));
+        assert_eq!(mv(&one("$10.00:eur")), (1000, "EUR".to_string())); // uppercased
+    }
+
+    #[test]
+    fn money_bad_forms() {
+        // M80: malformed money! literals error. (`$` alone, not followed by a
+        // digit, falls through to `scan_word` as `Word("$")` — not an error.)
+        assert!(matches!(lex("$10."), Err(LexError::InvalidMoney { .. })));
+        assert!(matches!(lex("$10.5"), Err(LexError::InvalidMoney { .. }))); // 1 fractional digit
+        assert!(matches!(lex("$10.555"), Err(LexError::InvalidMoney { .. }))); // 3 fractional digits
+        assert!(matches!(
+            lex("$10.00:US"),
+            Err(LexError::InvalidMoney { .. })
+        )); // 2-letter currency
+        assert!(matches!(
+            lex("$10.00:USDD"),
+            Err(LexError::InvalidMoney { .. })
+        )); // 4-letter currency
+            // `$,100` and `$` alone don't trigger the money arm (`$` not followed
+            // by a digit falls through to scan_word as a Word) — documented
+            // behavior, not an error.
+    }
+
+    #[test]
+    fn money_negative() {
+        // M80: `-$10.00` lexes as a single negative Money token.
+        let mv = |t: &TokenKind| match t {
+            TokenKind::Money(m) => (m.cents, m.currency.as_ref().to_string()),
+            _ => panic!("not Money: {t:?}"),
+        };
+        assert_eq!(mv(&one("-$10.00")), (-1000, "USD".to_string()));
+        assert_eq!(mv(&one("-$0.01")), (-1, "USD".to_string()));
+    }
+
+    #[test]
+    fn money_does_not_collide_with_word() {
+        // `$foo` (not followed by a digit) still scans as a Word.
+        let toks = lex("$foo").expect("lex");
+        assert_eq!(toks.len(), 1);
+        assert!(matches!(toks[0].kind, TokenKind::Word(_)));
     }
 
     #[test]

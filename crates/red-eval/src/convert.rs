@@ -110,6 +110,8 @@ fn to_integer(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Valu
         Value::None => Value::integer(0),
         Value::String { s, .. } => Value::integer(parse_i64(s, v)?),
         Value::Char { c, .. } => Value::integer(*c as i64),
+        // M80: money → its cents value (e.g. $10.00 → 1000).
+        Value::Money { amount, .. } => Value::integer(amount.cents),
         other => {
             return Err(EvalError::TypeError {
                 expected: "integer!, float!, logic!, none!, char!, or string!",
@@ -412,6 +414,7 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
         "integer!" | "integer" => make_integer(spec)?,
         "float!" | "float" => make_float(spec)?,
         "percent!" | "percent" => make_percent(spec)?,
+        "money!" | "money" => make_money(spec)?,
         "string!" | "string" => make_string(spec)?,
         "block!" | "block" => make_block(spec)?,
         "file!" | "file" => make_file(spec)?,
@@ -531,6 +534,77 @@ fn make_percent(spec: &Value) -> Result<Value, EvalError> {
         }
         other => Err(EvalError::TypeError {
             expected: "integer!, float!, percent!, or string!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
+/// `make money! spec` (M80) / `to-money`:
+/// - `integer!` → `n` cents (USD). `make money! 1000` ⇒ `$10.00`.
+/// - `float!` → rounds to nearest cent with banker's rounding (USD).
+/// - `money!` → identity.
+/// - `string!` → parse `"$10.00"` / `"$10.00:EUR"` via the lexer's money
+///   scanner.
+/// - `block!` → `[cents]` or `[cents currency]` (currency is a 3-letter word
+///   or string; default USD).
+fn make_money(spec: &Value) -> Result<Value, EvalError> {
+    match spec {
+        Value::Money { amount, .. } => Ok(Value::money(amount.cents, amount.currency.clone())),
+        Value::Integer { n, .. } => Ok(Value::money(*n, "USD")),
+        Value::Float { f, .. } => {
+            // Banker's rounding to the nearest cent.
+            let cents = (*f * 100.0).round_ties_even() as i64;
+            Ok(Value::money(cents, "USD"))
+        }
+        Value::String { s, .. } => {
+            let toks = lexer::lex(s).map_err(|e| native_err(spec, e.to_string()))?;
+            match toks.first() {
+                Some(t) => match &t.kind {
+                    lexer::TokenKind::Money(mv) => Ok(Value::money(mv.cents, mv.currency.clone())),
+                    _ => Err(native_err(spec, format!("cannot parse {s:?} as money"))),
+                },
+                None => Err(native_err(spec, "empty string for money")),
+            }
+        }
+        Value::Block { series, .. } => {
+            let data = series.data.borrow();
+            let mut iter = data.iter();
+            let cents = match iter.next() {
+                Some(Value::Integer { n, .. }) => *n,
+                Some(other) => {
+                    return Err(EvalError::TypeError {
+                        expected: "integer! (cents)",
+                        found: type_name(other),
+                        span: other.span_or_default(),
+                    });
+                }
+                None => {
+                    return Err(EvalError::TypeError {
+                        expected: "integer! (cents)",
+                        found: "none!",
+                        span: Span::default(),
+                    });
+                }
+            };
+            let currency: std::rc::Rc<str> = match iter.next() {
+                None => std::rc::Rc::from("USD"),
+                Some(Value::String { s, .. }) => s.clone(),
+                Some(Value::Word { sym, .. }) | Some(Value::LitWord { sym, .. }) => {
+                    std::rc::Rc::from(sym.as_str())
+                }
+                Some(other) => {
+                    return Err(EvalError::TypeError {
+                        expected: "string! or word! (currency)",
+                        found: type_name(other),
+                        span: other.span_or_default(),
+                    });
+                }
+            };
+            Ok(Value::money(cents, currency))
+        }
+        other => Err(EvalError::TypeError {
+            expected: "integer!, float!, money!, string!, or block!",
             found: type_name(other),
             span: other.span_or_default(),
         }),
@@ -877,6 +951,14 @@ fn to_percent(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Valu
     make_percent(&args[0])
 }
 
+/// `to-money value` — M80. Coerce to `money!`. Same as `make money!`.
+fn to_money(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "to-money", 1, args.len()));
+    }
+    make_money(&args[0])
+}
+
 /// `make date! spec` — M45. Construct a `date!` from:
 /// - `string!` → parse via the lexer's date scanner (e.g. `"29-Jun-2024"`).
 /// - `date!` → identity (clone).
@@ -976,6 +1058,7 @@ fn to_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
         "integer!" | "integer" => to_integer(one, &RefineArgs::empty(), env),
         "float!" | "float" => to_float(one, &RefineArgs::empty(), env),
         "percent!" | "percent" => to_percent(one, &RefineArgs::empty(), env),
+        "money!" | "money" => to_money(one, &RefineArgs::empty(), env),
         "string!" | "string" => to_string(one, &RefineArgs::empty(), env),
         "block!" | "block" => to_block(one, &RefineArgs::empty(), env),
         "word!" | "word" => to_word_kind(one, "to", WordKind::Word),
@@ -1067,6 +1150,7 @@ pub fn register_convert_natives(env: &mut Env) {
     reg(env, "to-integer", to_integer as NF, 1);
     reg(env, "to-float", to_float as NF, 1);
     reg(env, "to-percent", to_percent as NF, 1);
+    reg(env, "to-money", to_money as NF, 1);
     reg(env, "to-string", to_string as NF, 1);
     reg(env, "to-block", to_block as NF, 1);
     reg(env, "to-word", to_word as NF, 1);

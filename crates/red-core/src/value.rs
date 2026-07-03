@@ -256,6 +256,12 @@ pub enum Value {
     /// back as `50%`. Strict-typed: distinct from `Float` for `=`, but
     /// promotes to `Float` for cross-type arithmetic and ordering.
     Percent { value: f64, span: Span },
+    /// `$10.00` / `$1,234.56:EUR` — a money! literal (M80). Source-origin (the
+    /// lexer scans the `$`-led run); carries the byte-offset span of the whole
+    /// token. Exact-fixed-point: stored as integer cents plus a 3-letter
+    /// currency code (default `"USD"`). No floating point — exact arithmetic.
+    /// Same-currency add/subtract preserves money!; cross-currency errors.
+    Money { amount: Rc<MoneyValue>, span: Span },
     /// `"..."` / `{...}` string literal.
     String { s: Rc<str>, span: Span },
     /// `#"a"` — a char! literal. Source-origin (the lexer scans the `#"-led
@@ -1004,6 +1010,37 @@ impl PortDef {
     }
 }
 
+/// A `money!` payload (M80): a fixed-point decimal currency value stored as
+/// integer cents (`i64`) plus a 3-letter currency code (`Rc<str>`, default
+/// `"USD"`). No floating point — exact arithmetic. `$10.00` ⇒ cents = 1000.
+/// Optional currency suffix `$10.00:EUR` overrides the default USD.
+///
+/// `PartialEq` compares both cents and currency (so `$10.00:USD` ≠
+/// `$10.00:EUR`). `Default` is 0 cents USD.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MoneyValue {
+    pub cents: i64,
+    pub currency: Rc<str>,
+}
+
+impl MoneyValue {
+    /// Construct a `MoneyValue` with `cents` and the given currency code.
+    pub fn new(cents: i64, currency: impl Into<Rc<str>>) -> Self {
+        MoneyValue {
+            cents,
+            currency: currency.into(),
+        }
+    }
+
+    /// Construct a USD `MoneyValue` (`currency = "USD"`).
+    pub fn usd(cents: i64) -> Self {
+        MoneyValue {
+            cents,
+            currency: Rc::from("USD"),
+        }
+    }
+}
+
 /// A `date!` payload (M45): a wall-clock `NaiveDateTime` plus an optional UTC
 /// offset stored as `Option<i32>` minutes (matching Red's internal
 /// `date!/zone` shape). `None` is zone-naive (no offset emitted on mold);
@@ -1198,6 +1235,7 @@ impl Value {
             Value::Integer { span, .. }
             | Value::Float { span, .. }
             | Value::Percent { span, .. }
+            | Value::Money { span, .. }
             | Value::String { span, .. }
             | Value::Char { span, .. }
             | Value::Pair { span, .. }
@@ -1294,6 +1332,15 @@ impl Value {
     pub fn percent(value: f64) -> Self {
         Value::Percent {
             value,
+            span: Span::default(),
+        }
+    }
+
+    /// Constructor shorthand for a money! value with a zero span (test/REPL
+    /// use). Wraps `cents` + `currency` in a `Rc<MoneyValue>`.
+    pub fn money(cents: i64, currency: impl Into<Rc<str>>) -> Self {
+        Value::Money {
+            amount: Rc::new(MoneyValue::new(cents, currency)),
             span: Span::default(),
         }
     }
@@ -1860,6 +1907,10 @@ mod tests {
             value: 0.5,
             span: s
         });
+        check!(Value::Money {
+            amount: Rc::new(MoneyValue::usd(1000)),
+            span: s
+        });
         check!(Value::String {
             s: Rc::from("x"),
             span: s
@@ -1979,6 +2030,7 @@ mod tests {
             Value::Integer { n, .. } => Value::Integer { n, span: s },
             Value::Float { f, .. } => Value::Float { f, span: s },
             Value::Percent { value, .. } => Value::Percent { value, span: s },
+            Value::Money { amount, .. } => Value::Money { amount, span: s },
             Value::String { s: ss, .. } => Value::String { s: ss, span: s },
             Value::Char { c, .. } => Value::Char { c, span: s },
             Value::Pair { x, y, .. } => Value::Pair { x, y, span: s },

@@ -566,6 +566,188 @@ fn percent_binop(
     Ok(None)
 }
 
+/// M80 money arithmetic dispatcher. Returns `Some(Value)` when either operand
+/// is `money!`; `None` otherwise. Rules (per plan8 M80):
+/// - `money + money` (same currency) → money (cents added).
+/// - `money - money` (same currency) → money.
+/// - `money + integer` → money (treat int as cents).
+/// - `money - integer` → money.
+/// - `money * integer` → money.
+/// - `integer * money` → money.
+/// - `money / money` (same currency) → float (ratio of cents).
+/// - `money / integer` → money (cents / int, error on non-divisible? no —
+///   Red floors; here we just integer-divide cents).
+/// - Cross-currency `money OP money` → Native error ("currency mismatch").
+/// - Asymmetric `money OP float`, `float OP money`, `money * float` etc →
+///   TypeError (money arithmetic is exact; mixing with float loses that).
+fn money_binop(args: &[Value], op: &str) -> Result<Option<Value>, EvalError> {
+    let a = &args[0];
+    let b = &args[1];
+    let a_m = matches!(a, Value::Money { .. });
+    let b_m = matches!(b, Value::Money { .. });
+    if !a_m && !b_m {
+        return Ok(None);
+    }
+    let money_parts = |v: &Value| -> (i64, std::rc::Rc<str>) {
+        match v {
+            Value::Money { amount, .. } => (amount.cents, amount.currency.clone()),
+            _ => unreachable!(),
+        }
+    };
+
+    // money OP money — same-currency required for add/subtract; multiply is
+    // a type error (money * money is meaningless); divide → float ratio.
+    if a_m && b_m {
+        let (ca, cca) = money_parts(a);
+        let (cb, ccb) = money_parts(b);
+        match op {
+            "add" | "subtract" | "subtraction" => {
+                if cca != ccb {
+                    return Err(EvalError::Native {
+                        message: format!("money error: currency mismatch ({cca} vs {ccb})"),
+                        span: a.span_or_default(),
+                    });
+                }
+                let r = if op == "add" {
+                    ca.checked_add(cb)
+                } else {
+                    ca.checked_sub(cb)
+                };
+                let cents = r.ok_or_else(|| EvalError::Native {
+                    message: "money error: integer overflow".into(),
+                    span: a.span_or_default(),
+                })?;
+                return Ok(Some(Value::money(cents, cca)));
+            }
+            "divide" => {
+                if cca != ccb {
+                    return Err(EvalError::Native {
+                        message: format!("money error: currency mismatch ({cca} vs {ccb})"),
+                        span: a.span_or_default(),
+                    });
+                }
+                if cb == 0 {
+                    return Err(EvalError::Native {
+                        message: "money error: divide by zero".into(),
+                        span: a.span_or_default(),
+                    });
+                }
+                return Ok(Some(Value::float(ca as f64 / cb as f64)));
+            }
+            "multiply" => {
+                return Err(EvalError::TypeError {
+                    expected: "integer! (money * money is not supported)",
+                    found: "money!",
+                    span: a.span_or_default(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    // money OP integer (or integer OP money for commutative +/*).
+    let as_int = |v: &Value| -> Result<i64, EvalError> {
+        match v {
+            Value::Integer { n, .. } => Ok(*n),
+            _ => Err(EvalError::TypeError {
+                expected: "integer! (money arithmetic with non-int is a type error)",
+                found: type_name(v),
+                span: v.span_or_default(),
+            }),
+        }
+    };
+    match op {
+        "add" | "subtract" | "subtraction" => {
+            let (cents, cur) = if a_m {
+                let (c, cu) = money_parts(a);
+                let n = as_int(b)?;
+                let r = if op == "add" {
+                    c.checked_add(n)
+                } else {
+                    c.checked_sub(n)
+                };
+                (
+                    r.ok_or_else(|| EvalError::Native {
+                        message: "money error: integer overflow".into(),
+                        span: a.span_or_default(),
+                    })?,
+                    cu,
+                )
+            } else {
+                // int + money (commutative for add; subtract guards below).
+                let (c, cu) = money_parts(b);
+                let n = as_int(a)?;
+                let r = if op == "add" {
+                    n.checked_add(c)
+                } else {
+                    // int - money is asymmetric — handled as a type error.
+                    return Err(EvalError::TypeError {
+                        expected: "money! (scalar - money is asymmetric)",
+                        found: type_name(a),
+                        span: a.span_or_default(),
+                    });
+                };
+                (
+                    r.ok_or_else(|| EvalError::Native {
+                        message: "money error: integer overflow".into(),
+                        span: a.span_or_default(),
+                    })?,
+                    cu,
+                )
+            };
+            Ok(Some(Value::money(cents, cur)))
+        }
+        "multiply" => {
+            let (cents, cur) = if a_m {
+                let (c, cu) = money_parts(a);
+                let n = as_int(b)?;
+                let r = c.checked_mul(n);
+                (
+                    r.ok_or_else(|| EvalError::Native {
+                        message: "money error: integer overflow".into(),
+                        span: a.span_or_default(),
+                    })?,
+                    cu,
+                )
+            } else {
+                let (c, cu) = money_parts(b);
+                let n = as_int(a)?;
+                let r = n.checked_mul(c);
+                (
+                    r.ok_or_else(|| EvalError::Native {
+                        message: "money error: integer overflow".into(),
+                        span: a.span_or_default(),
+                    })?,
+                    cu,
+                )
+            };
+            Ok(Some(Value::money(cents, cur)))
+        }
+        "divide" => {
+            // money / integer → money (integer-divide cents). integer / money
+            // is asymmetric → type error.
+            if a_m {
+                let (c, cu) = money_parts(a);
+                let n = as_int(b)?;
+                if n == 0 {
+                    return Err(EvalError::Native {
+                        message: "money error: divide by zero".into(),
+                        span: a.span_or_default(),
+                    });
+                }
+                Ok(Some(Value::money(c / n, cu)))
+            } else {
+                Err(EvalError::TypeError {
+                    expected: "money! (scalar / money is asymmetric)",
+                    found: type_name(a),
+                    span: a.span_or_default(),
+                })
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
 /// `+` infix — numeric addition, with string concatenation when both operands
 /// are strings (M15), and char arithmetic (M38: `char + int → char`,
 /// `char + char → int`). M44: pair/tuple arithmetic. Falls through to numeric
@@ -588,6 +770,10 @@ pub(crate) fn add(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<
     }
     // M45: date arithmetic.
     if let Some(r) = date_add(args)? {
+        return Ok(r);
+    }
+    // M80: money arithmetic (same-currency add/sub; money ± int; money * int).
+    if let Some(r) = money_binop(args, "add")? {
         return Ok(r);
     }
     // M80: percent + percent → percent (everything else promotes to float
@@ -631,6 +817,10 @@ pub(crate) fn subtract(
     if let Some(r) = date_subtract(args)? {
         return Ok(r);
     }
+    // M80: money subtraction (same-currency; or money - int).
+    if let Some(r) = money_binop(args, "subtract")? {
+        return Ok(r);
+    }
     // M80: percent - percent → percent (everything else promotes to float).
     if let Some(r) = percent_binop(args, "subtraction", |a, b| a - b)? {
         return Ok(r);
@@ -648,6 +838,10 @@ pub(crate) fn multiply(
         return Ok(r);
     }
     if let Some(r) = tuple_binop(args, "multiply", |a, b| Some(a * b), |a, b| a * b)? {
+        return Ok(r);
+    }
+    // M80: money * integer → money (integer * money → money).
+    if let Some(r) = money_binop(args, "multiply")? {
         return Ok(r);
     }
     num_binop(args, "multiply", |a, b| Some(a * b), |a, b| a * b)
@@ -684,6 +878,10 @@ pub(crate) fn divide(
             &args[0],
             "division: tuple division not supported",
         ));
+    }
+    // M80: money / money → float (ratio); money / integer → money.
+    if let Some(r) = money_binop(args, "divide")? {
+        return Ok(r);
     }
     num_binop(
         args,
@@ -753,6 +951,10 @@ fn abs_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Valu
         Value::Float { f, .. } => Ok(Value::float(f.abs())),
         // M80: abs on a percent preserves the percent wrapper.
         Value::Percent { value, .. } => Ok(Value::percent(value.abs())),
+        // M80: abs on money preserves the currency; abs the cents.
+        Value::Money { amount, .. } => {
+            Ok(Value::money(amount.cents.abs(), amount.currency.clone()))
+        }
         // M44: abs on a pair → componentwise abs.
         Value::Pair { x, y, .. } => {
             let nx = abs_one(x)?;
@@ -786,6 +988,11 @@ fn negate_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<V
         Value::Float { f, .. } => Ok(Value::float(-f)),
         // M80: negate on a percent preserves the percent wrapper.
         Value::Percent { value, .. } => Ok(Value::percent(-value)),
+        // M80: negate on money preserves the currency; negate the cents.
+        Value::Money { amount, .. } => Ok(Value::money(
+            amount.cents.wrapping_neg(),
+            amount.currency.clone(),
+        )),
         // M44: negate on a pair → componentwise negate.
         Value::Pair { x, y, .. } => {
             let nx = negate_one(x)?;
