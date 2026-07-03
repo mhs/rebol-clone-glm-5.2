@@ -671,6 +671,7 @@ fn compile_prefix(
         | Value::Money { .. }
         | Value::Issue { .. }
         | Value::Email { .. }
+        | Value::Tag { .. }
         | Value::String { .. }
         | Value::Char { .. }
         | Value::Pair { .. }

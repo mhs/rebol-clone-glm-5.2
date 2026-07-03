@@ -25,6 +25,7 @@ pub fn mold(value: &Value, out: &mut String) {
             out.push_str(s);
         }
         Value::Email { addr, .. } => out.push_str(addr),
+        Value::Tag { text, .. } => mold_tag(text, out),
         Value::String { s, .. } => mold_string(s, out),
         Value::Char { c, .. } => mold_char(*c, out),
         Value::Pair { x, y, .. } => {
@@ -202,6 +203,7 @@ pub fn form(value: &Value, out: &mut String) {
         Value::Money { amount, .. } => mold_money(amount, out),
         Value::Issue { s, .. } => out.push_str(s),
         Value::Email { addr, .. } => out.push_str(addr),
+        Value::Tag { text, .. } => mold_tag(text, out),
         Value::String { s, .. } => out.push_str(s),
         Value::Char { c, .. } => out.push(*c),
         Value::Pair { x, y, .. } => {
@@ -315,6 +317,22 @@ fn mold_money(m: &MoneyValue, out: &mut String) {
         out.push(':');
         out.push_str(&m.currency);
     }
+}
+
+/// M81: mold a tag! value. The body is wrapped in `<...>`; any `<`/`>`/`\`
+/// in the body is escaped as `\<`/`\>`/`\\` so the result round-trips through
+/// the lexer's `scan_tag` (which decodes the escapes).
+fn mold_tag(text: &str, out: &mut String) {
+    out.push('<');
+    for c in text.chars() {
+        match c {
+            '<' => out.push_str("\\<"),
+            '>' => out.push_str("\\>"),
+            '\\' => out.push_str("\\\\"),
+            _ => out.push(c),
+        }
+    }
+    out.push('>');
 }
 
 fn mold_object(obj: &ObjectDef, out: &mut String) {
@@ -927,6 +945,51 @@ mod tests {
                     );
                 }
                 other => panic!("expected Email token for {molded}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn mold_tag() {
+        // M81: tag molds as `<body>` with escapes for `<`/`>`/`\`.
+        assert_eq!(mold_to_string(&Value::tag("b")), "<b>");
+        assert_eq!(mold_to_string(&Value::tag("/p")), "</p>");
+        assert_eq!(
+            mold_to_string(&Value::tag("img src=\"x\"")),
+            "<img src=\"x\">"
+        );
+        // Escapes: body chars that would close/nest the tag are escaped.
+        assert_eq!(mold_to_string(&Value::tag("a>b")), "<a\\>b>");
+        assert_eq!(mold_to_string(&Value::tag("a<b")), "<a\\<b>");
+        assert_eq!(mold_to_string(&Value::tag("a\\b")), "<a\\\\b>");
+    }
+
+    #[test]
+    fn mold_tag_round_trips_via_lexer() {
+        // M81: molded tags reparse to the same body.
+        for body in [
+            "b",
+            "/p",
+            "br/",
+            "img src=\"x\"",
+            "a=b",
+            "a>b",
+            "a<b",
+            "a\\b",
+        ] {
+            let v = Value::tag(body);
+            let molded = mold_to_string(&v);
+            let toks = crate::lexer::lex(&molded).expect("lex tag");
+            assert_eq!(toks.len(), 1, "{body:?} molded to {molded:?}");
+            match &toks[0].kind {
+                crate::lexer::TokenKind::Tag(parsed) => {
+                    assert_eq!(
+                        parsed.as_ref(),
+                        body,
+                        "round-trip mismatch: {body:?} → {molded:?}"
+                    );
+                }
+                other => panic!("expected Tag token for {molded:?}, got {other:?}"),
             }
         }
     }

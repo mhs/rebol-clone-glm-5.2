@@ -169,6 +169,13 @@ pub(crate) fn extract_spec(spec_block: &Value) -> Result<FuncSpec, EvalError> {
     let mut section = Section::Params;
     for v in data.iter() {
         match v {
+            // M81: `<local>` now lexes as a `tag!` (`Tag("local")`). Accept
+            // both the new `Tag` form and the legacy `Word("<local>")` form
+            // (the latter is unreachable from source post-M81 but kept for
+            // synthetic/programmatic spec blocks).
+            Value::Tag { text, .. } if text.as_ref() == "local" => {
+                section = Section::Local;
+            }
             Value::Word { sym, .. } if sym.as_str() == "<local>" => {
                 section = Section::Local;
             }

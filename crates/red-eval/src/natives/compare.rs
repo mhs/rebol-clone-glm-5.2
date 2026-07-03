@@ -30,6 +30,8 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Issue { s: x, .. }, Value::Issue { s: y, .. }) => x == y,
         // M80: email! equality by string compare.
         (Value::Email { addr: x, .. }, Value::Email { addr: y, .. }) => x == y,
+        // M81: tag! equality by string compare on the body text.
+        (Value::Tag { text: x, .. }, Value::Tag { text: y, .. }) => x == y,
         (Value::Integer { n: x, .. }, Value::Float { f: y, .. }) => (*x as f64) == *y,
         (Value::Float { f: x, .. }, Value::Integer { n: y, .. }) => *x == (*y as f64),
         (Value::String { s: x, .. }, Value::String { s: y, .. }) => x == y,

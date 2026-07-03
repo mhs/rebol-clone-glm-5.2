@@ -417,6 +417,7 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
         "money!" | "money" => make_money(spec)?,
         "issue!" | "issue" => make_issue(spec)?,
         "email!" | "email" => make_email(spec)?,
+        "tag!" | "tag" => make_tag(spec)?,
         "string!" | "string" => make_string(spec)?,
         "block!" | "block" => make_block(spec)?,
         "file!" | "file" => make_file(spec)?,
@@ -985,6 +986,18 @@ fn to_email(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value,
     make_email(&args[0])
 }
 
+/// `to-tag value` — M81. Coerce to `tag!`. Same as `make tag!`.
+/// - `string!` → `<string>`.
+/// - `tag!` → identity.
+/// - `block!` → `<joined elements>`.
+/// - word-family → `<word name>`.
+fn to_tag(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "to-tag", 1, args.len()));
+    }
+    make_tag(&args[0])
+}
+
 /// `make email! spec` (M80) / `to-email`:
 /// - `string!` → the string as the address.
 /// - `email!` → identity.
@@ -1033,6 +1046,53 @@ fn make_email(spec: &Value) -> Result<Value, EvalError> {
         }
         other => Err(EvalError::TypeError {
             expected: "string!, email!, or block!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
+/// `make tag! spec` (M81) / `to-tag`:
+/// - `string!` → `<string>` (the string body becomes the tag body).
+/// - `tag!` → identity.
+/// - `block!` → `<joined>` (each element stringified and space-joined, so
+///   `to-tag [a b]` ⇒ `<a b>` and `to-tag [img src "x"]` ⇒ `<img src x>`).
+/// - word-family → `<word name>` (so `to-tag 'b` ⇒ `<b>`).
+fn make_tag(spec: &Value) -> Result<Value, EvalError> {
+    match spec {
+        Value::Tag { text, .. } => Ok(Value::tag(text.clone())),
+        Value::String { s, .. } => Ok(Value::tag(s.clone())),
+        Value::Block { series, .. } => {
+            let data = series.data.borrow();
+            let mut out = String::new();
+            let mut first = true;
+            for v in data.iter() {
+                if !first {
+                    out.push(' ');
+                }
+                first = false;
+                match v {
+                    Value::String { s, .. } => out.push_str(s),
+                    Value::Integer { n, .. } => out.push_str(&n.to_string()),
+                    Value::Char { c, .. } => out.push(*c),
+                    w if word_sym(w).is_some() => out.push_str(word_sym(w).unwrap().as_str()),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "string!, integer!, char!, or word! (tag element)",
+                            found: type_name(v),
+                            span: v.span_or_default(),
+                        });
+                    }
+                }
+            }
+            Ok(Value::tag(std::rc::Rc::from(out.as_str())))
+        }
+        w if word_sym(w).is_some() => {
+            let sym = word_sym(w).unwrap();
+            Ok(Value::tag(std::rc::Rc::from(sym.as_str())))
+        }
+        other => Err(EvalError::TypeError {
+            expected: "string!, tag!, block!, or word!",
             found: type_name(other),
             span: other.span_or_default(),
         }),
@@ -1183,6 +1243,7 @@ fn to_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
         "money!" | "money" => to_money(one, &RefineArgs::empty(), env),
         "issue!" | "issue" => to_issue(one, &RefineArgs::empty(), env),
         "email!" | "email" => to_email(one, &RefineArgs::empty(), env),
+        "tag!" | "tag" => to_tag(one, &RefineArgs::empty(), env),
         "string!" | "string" => to_string(one, &RefineArgs::empty(), env),
         "block!" | "block" => to_block(one, &RefineArgs::empty(), env),
         "word!" | "word" => to_word_kind(one, "to", WordKind::Word),
@@ -1277,6 +1338,7 @@ pub fn register_convert_natives(env: &mut Env) {
     reg(env, "to-money", to_money as NF, 1);
     reg(env, "to-issue", to_issue as NF, 1);
     reg(env, "to-email", to_email as NF, 1);
+    reg(env, "to-tag", to_tag as NF, 1);
     reg(env, "to-string", to_string as NF, 1);
     reg(env, "to-block", to_block as NF, 1);
     reg(env, "to-word", to_word as NF, 1);

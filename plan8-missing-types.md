@@ -126,42 +126,42 @@ after v0.6.
 
 A `Float`-backed percentage: `50%` = 0.5 internally, molds back as `50%`.
 
-- [ ] Add `Value::Percent { value: f64, span: Span }` in
+- [x] Add `Value::Percent { value: f64, span: Span }` in
       `crates/red-core/src/value.rs` (after `Float` — they share `f64`).
-- [ ] Add `Value::percent(f) -> Value` constructor (rounds to 6 sig figs on
+- [x] Add `Value::percent(f) -> Value` constructor (rounds to 6 sig figs on
       mold to match Red's printing; the stored value is the exact float).
-- [ ] Extend `Lexer` (`crates/red-core/src/lexer.rs`):
-  - [ ] In `scan_number`, when a digit run is immediately followed by `%`,
+- [x] Extend `Lexer` (`crates/red-core/src/lexer.rs`):
+  - [x] In `scan_number`, when a digit run is immediately followed by `%`,
         emit `TokenKind::Percent(parsed / 100.0)` and consume the `%`. (No
         conflict: bare `%` is the file-literal lead; a digit-run-then-`%` is
         unambiguous because `%`-files don't follow digits.)
-  - [ ] Error `InvalidPercent` on overflow (`f64::infinity`).
-- [ ] Extend `Parser`: `TokenKind::Percent(f) => Value::Percent { value: f, span }`.
-- [ ] Extend `printer.rs`:
-  - [ ] `mold`: `format!("{:.6}", value * 100.0).trim_end_matches('0')
+  - [x] Error `InvalidPercent` on overflow (`f64::infinity`).
+- [x] Extend `Parser`: `TokenKind::Percent(f) => Value::Percent { value: f, span }`.
+- [x] Extend `printer.rs`:
+  - [x] `mold`: `format!("{:.6}", value * 100.0).trim_end_matches('0')
         .trim_end_matches('.').to_string() + "%"`.
-  - [ ] `form`: same as mold (Red parity — `form` of `percent!` is the
+  - [x] `form`: same as mold (Red parity — `form` of `percent!` is the
         printed percent form).
-- [ ] Extend `interp_walker.rs` `eval_prefix` self-evaluating arm with
+- [x] Extend `interp_walker.rs` `eval_prefix` self-evaluating arm with
       `Value::Percent { .. } => Ok(v.clone())`.
-- [ ] Extend `vm/compiler.rs` const-pool arm with `Value::Percent { .. }`.
-- [ ] Add `percent?` predicate in `natives/words.rs`.
-- [ ] Add `to-percent` converter (from float → percent; from integer →
+- [x] Extend `vm/compiler.rs` const-pool arm with `Value::Percent { .. }`.
+- [x] Add `percent?` predicate in `natives/words.rs`.
+- [x] Add `to-percent` converter (from float → percent; from integer →
         percent; from string parse `"50%"`).
-- [ ] Add `make percent! <value>` to the `make` dispatcher (float/int/string
+- [x] Add `make percent! <value>` to the `make` dispatcher (float/int/string
         as above).
-- [ ] Arithmetic: `percent + percent` → percent; `percent + float` → float
+- [x] Arithmetic: `percent + percent` → percent; `percent + float` → float
         (percent promotes to its float value); `percent * float` → float.
         Add arms in `math.rs` `as_number`/promotion helpers.
-- [ ] Update `type_name` (`natives/mod.rs:134`) → `"percent!"`.
-- [ ] Update `compare.rs::values_equal` with a `Percent` arm (compare `value`
+- [x] Update `type_name` (`natives/mod.rs:134`) → `"percent!"`.
+- [x] Update `compare.rs::values_equal` with a `Percent` arm (compare `value`
         field).
-- [ ] Inline `#[test]`: `50%` lexes to `Percent { value: 0.5 }`.
-- [ ] Inline `#[test]`: `mold 50%` → `"50%"`; `mold 0.5%` → `"0.5%"`.
-- [ ] Inline `#[test]`: `50% + 25%` → `75%`; `50% * 2` → `1.0` (float).
-- [ ] Inline `#[test]`: `percent? 50%` → true; `percent? 0.5` → false.
-- [ ] Add golden fixtures: `percent_literal`, `percent_arith`, `percent_convert`.
-- [ ] Update `property.rs` to include `Percent` in the round-trip proptest.
+- [x] Inline `#[test]`: `50%` lexes to `Percent { value: 0.5 }`.
+- [x] Inline `#[test]`: `mold 50%` → `"50%"`; `mold 0.5%` → `"0.5%"`.
+- [x] Inline `#[test]`: `50% + 25%` → `75%`; `50% * 2` → `1.0` (float).
+- [x] Inline `#[test]`: `percent? 50%` → true; `percent? 0.5` → false.
+- [x] Add golden fixtures: `percent_literal`, `percent_arith`, `percent_convert`.
+- [x] Update `property.rs` to include `Percent` in the round-trip proptest.
 
 ### `money!`
 
@@ -169,39 +169,39 @@ A fixed-point decimal currency type: `$10.00`, `$1,234.56` (commas optional,
 stripped on lex). Stored as integer cents (i64) plus a currency-code string
 (default `"USD"`). No floating-point — exact arithmetic.
 
-- [ ] Add `struct MoneyValue { cents: i64, currency: Rc<str> }` in `value.rs`.
-- [ ] Add `Value::Money { amount: Rc<MoneyValue>, span: Span }` variant.
-- [ ] Add `Value::money(cents, currency)` constructor.
-- [ ] Extend `Lexer`:
-  - [ ] `scan_money` on `$` lead (today `$` is not a word-start char —
+- [x] Add `struct MoneyValue { cents: i64, currency: Rc<str> }` in `value.rs`.
+- [x] Add `Value::Money { amount: Rc<MoneyValue>, span: Span }` variant.
+- [x] Add `Value::money(cents, currency)` constructor.
+- [x] Extend `Lexer`:
+  - [x] `scan_money` on `$` lead (today `$` is not a word-start char —
         verify; if it is, this is the only collision and the rule wins by
         order). Accept `$<digits>` and `$<digits>.<digits>` and an optional
         3-letter currency suffix `:$USD` (Red form: `$10.00:USD`).
-  - [ ] Strip commas between digit groups (`$1,234.56` → 123456 cents).
-  - [ ] Error `InvalidMoney` on malformed forms.
-- [ ] Extend `Parser`: `TokenKind::Money(MoneyValue) => Value::Money { ... }`.
-- [ ] Extend `printer.rs`:
-  - [ ] `mold`: `$10.00` (always two decimal places); with currency suffix
+  - [x] Strip commas between digit groups (`$1,234.56` → 123456 cents).
+  - [x] Error `InvalidMoney` on malformed forms.
+- [x] Extend `Parser`: `TokenKind::Money(MoneyValue) => Value::Money { ... }`.
+- [x] Extend `printer.rs`:
+  - [x] `mold`: `$10.00` (always two decimal places); with currency suffix
         if non-USD: `$10.00:EUR`.
-  - [ ] `form`: same as mold.
-- [ ] Extend `interp_walker.rs`/`vm/compiler.rs` self-evaluating arms.
-- [ ] Add `money?` predicate.
-- [ ] Add `to-money` converter (from integer cents, from string parse, from
+  - [x] `form`: same as mold.
+- [x] Extend `interp_walker.rs`/`vm/compiler.rs` self-evaluating arms.
+- [x] Add `money?` predicate.
+- [x] Add `to-money` converter (from integer cents, from string parse, from
         float — float rounds to nearest cent with banker's rounding).
-- [ ] Add `make money! <value>` (int → cents; string parse; float rounds).
-- [ ] Arithmetic: `money + money` (same currency only — error on mismatch);
+- [x] Add `make money! <value>` (int → cents; string parse; float rounds).
+- [x] Arithmetic: `money + money` (same currency only — error on mismatch);
         `money + integer` → money (treat int as cents); `money * integer` →
         money; `money / money` → float (ratio). Add `math.rs` arms.
-- [ ] Comparison: `= <> < >` compare by cents; cross-currency errors.
-- [ ] Update `type_name` → `"money!"`.
-- [ ] Update `compare.rs` with a `Money` arm.
-- [ ] Inline `#[test]`: `$10.00` lexes to `Money { cents: 1000, "USD" }`.
-- [ ] Inline `#[test]`: `$1,234.56` → `123456` cents (commas stripped).
-- [ ] Inline `#[test]`: `$10.00 + $5.00` → `$15.00`; cross-currency errors.
-- [ ] Inline `#[test]`: `mold $10.00:EUR` → `"$10.00:EUR"`.
-- [ ] Add golden fixtures: `money_literal`, `money_arith`, `money_currency`.
-- [ ] Add `programs_errors/money_currency_mismatch.red`.
-- [ ] Update `property.rs` for `Money` round-trip.
+- [x] Comparison: `= <> < >` compare by cents; cross-currency errors.
+- [x] Update `type_name` → `"money!"`.
+- [x] Update `compare.rs` with a `Money` arm.
+- [x] Inline `#[test]`: `$10.00` lexes to `Money { cents: 1000, "USD" }`.
+- [x] Inline `#[test]`: `$1,234.56` → `123456` cents (commas stripped).
+- [x] Inline `#[test]`: `$10.00 + $5.00` → `$15.00`; cross-currency errors.
+- [x] Inline `#[test]`: `mold $10.00:EUR` → `"$10.00:EUR"`.
+- [x] Add golden fixtures: `money_literal`, `money_arith`, `money_currency`.
+- [x] Add `programs_errors/money_currency_mismatch.red`.
+- [x] Update `property.rs` for `Money` round-trip.
 
 ### `issue!`
 
@@ -209,37 +209,37 @@ A short identifier literal: `#1234`, `#ABC`, `#FF00` (any run of non-delimiter
 chars after `#` that isn't `"` (char) or `{` (binary)). Stored as a `Rc<str>`.
 Distinct from `binary!` (`#{hex}`) and `char!` (`#"x"`).
 
-- [ ] Add `Value::Issue { s: Rc<str>, span: Span }` variant.
-- [ ] Add `Value::issue(s)` constructor (validates: non-empty, no whitespace).
-- [ ] Extend `Lexer`:
-  - [ ] In the `#`-dispatch branch, after `#"` → Char and `#{` → Binary,
+- [x] Add `Value::Issue { s: Rc<str>, span: Span }` variant.
+- [x] Add `Value::issue(s)` constructor (validates: non-empty, no whitespace).
+- [x] Extend `Lexer`:
+  - [x] In the `#`-dispatch branch, after `#"` → Char and `#{` → Binary,
         fall through to `scan_issue`: consume a run of word-chars (letters,
         digits, `-`, `_`, `.`, `?`, `!`) → `TokenKind::Issue(s)`.
-  - [ ] Error `InvalidIssue` on `#` followed by whitespace or delimiter.
+  - [x] Error `InvalidIssue` on `#` followed by whitespace or delimiter.
         (This is the one M80 disambiguation case — confirm no existing
         fixture starts a word with `#` other than the two known forms; the
         `natives/mod.rs` `type_name` switch confirms none of the existing
         `Value` arms collide.)
-- [ ] Extend `Parser`: `TokenKind::Issue(s) => Value::Issue { s, span }`.
-- [ ] Extend `printer.rs`:
-  - [ ] `mold`: `"#" + s` (no quoting — issue chars are non-delimiter).
-  - [ ] `form`: same as mold.
-- [ ] Extend `interp_walker.rs`/`vm/compiler.rs` self-evaluating arms.
-- [ ] Add `issue?` predicate.
-- [ ] Add `to-issue` converter (from string, from integer → `#<decimal>`).
-- [ ] Add `make issue! <value>` (string; integer → `#<n>`; block of ints →
+- [x] Extend `Parser`: `TokenKind::Issue(s) => Value::Issue { s, span }`.
+- [x] Extend `printer.rs`:
+  - [x] `mold`: `"#" + s` (no quoting — issue chars are non-delimiter).
+  - [x] `form`: same as mold.
+- [x] Extend `interp_walker.rs`/`vm/compiler.rs` self-evaluating arms.
+- [x] Add `issue?` predicate.
+- [x] Add `to-issue` converter (from string, from integer → `#<decimal>`).
+- [x] Add `make issue! <value>` (string; integer → `#<n>`; block of ints →
         `#<concat>`).
-- [ ] Equality/ordering by string compare.
-- [ ] Update `type_name` → `"issue!"`.
-- [ ] Update `compare.rs` with an `Issue` arm.
-- [ ] Inline `#[test]`: `#1234` lexes to `Issue("1234")`.
-- [ ] Inline `#[test]`: `#ABC` lexes to `Issue("ABC")`.
-- [ ] Inline `#[test]`: `#"a"` still lexes to `Char` (regression guard).
-- [ ] Inline `#[test]`: `#{00FF}` still lexes to `Binary` (regression guard).
-- [ ] Inline `#[test]`: `mold #ABC` → `"#ABC"`.
-- [ ] Add golden fixtures: `issue_literal`, `issue_convert`.
-- [ ] Add `programs_errors/issue_bad_form.red` (e.g. `# ` with space).
-- [ ] Update `property.rs` for `Issue` round-trip.
+- [x] Equality/ordering by string compare.
+- [x] Update `type_name` → `"issue!"`.
+- [x] Update `compare.rs` with an `Issue` arm.
+- [x] Inline `#[test]`: `#1234` lexes to `Issue("1234")`.
+- [x] Inline `#[test]`: `#ABC` lexes to `Issue("ABC")`.
+- [x] Inline `#[test]`: `#"a"` still lexes to `Char` (regression guard).
+- [x] Inline `#[test]`: `#{00FF}` still lexes to `Binary` (regression guard).
+- [x] Inline `#[test]`: `mold #ABC` → `"#ABC"`.
+- [x] Add golden fixtures: `issue_literal`, `issue_convert`.
+- [x] Add `programs_errors/issue_bad_form.red` (e.g. `# ` with space).
+- [x] Update `property.rs` for `Issue` round-trip.
 
 ### `email!`
 
@@ -247,42 +247,42 @@ An `user@host` literal: `foo@bar.com`. Stored as a `Rc<str>` (the whole
 address). The lexer detects a word run containing a single `@` with dots on
 the host side.
 
-- [ ] Add `Value::Email { addr: Rc<str>, span: Span }` variant.
-- [ ] Add `Value::email(addr)` constructor (validates: one `@`, non-empty
+- [x] Add `Value::Email { addr: Rc<str>, span: Span }` variant.
+- [x] Add `Value::email(addr)` constructor (validates: one `@`, non-empty
       local, non-empty host with at least one dot — Red parity; bare
       `user@localhost` is **not** an email! in Red, it's two words).
-- [ ] Extend `Lexer`:
-  - [ ] In the word-scan run, detect `@` mid-run: if the run matches
+- [x] Extend `Lexer`:
+  - [x] In the word-scan run, detect `@` mid-run: if the run matches
         `<word-chars>@<word-chars>.<word-chars>`, emit
         `TokenKind::Email(s)`. Otherwise, `@` ends the word (today `@` is a
         delimiter — confirm; if not, this rule wins by order).
-  - [ ] Error `InvalidEmail` on `@` with no dot in the host portion.
-- [ ] Extend `Parser`: `TokenKind::Email(s) => Value::Email { addr: s, span }`.
-- [ ] Extend `printer.rs`:
-  - [ ] `mold`: the raw address (no quoting).
-  - [ ] `form`: same as mold.
-- [ ] Extend `interp_walker.rs`/`vm/compiler.rs` self-evaluating arms.
-- [ ] Add `email?` predicate.
-- [ ] Add `to-email` converter (from string parse, from block `[user host]`).
-- [ ] Add `make email! <value>`.
-- [ ] Path access: `email/user` → local part string; `email/host` → host
+  - [x] Error `InvalidEmail` on `@` with no dot in the host portion.
+- [x] Extend `Parser`: `TokenKind::Email(s) => Value::Email { addr: s, span }`.
+- [x] Extend `printer.rs`:
+  - [x] `mold`: the raw address (no quoting).
+  - [x] `form`: same as mold.
+- [x] Extend `interp_walker.rs`/`vm/compiler.rs` self-evaluating arms.
+- [x] Add `email?` predicate.
+- [x] Add `to-email` converter (from string parse, from block `[user host]`).
+- [x] Add `make email! <value>`.
+- [x] Path access: `email/user` → local part string; `email/host` → host
         part string (Red parity — `email!` is pathable).
-- [ ] Update `type_name` → `"email!"`.
-- [ ] Update `compare.rs` with an `Email` arm.
-- [ ] Inline `#[test]`: `foo@bar.com` lexes to `Email("foo@bar.com")`.
-- [ ] Inline `#[test]`: `user@localhost` lexes to two words (regression
+- [x] Update `type_name` → `"email!"`.
+- [x] Update `compare.rs` with an `Email` arm.
+- [x] Inline `#[test]`: `foo@bar.com` lexes to `Email("foo@bar.com")`.
+- [x] Inline `#[test]`: `user@localhost` lexes to two words (regression
         guard — bare host without a dot is not an email!).
-- [ ] Inline `#[test]`: `mold foo@bar.com` → `"foo@bar.com"`.
-- [ ] Inline `#[test]`: `foo@bar.com/user` → `"foo"`.
-- [ ] Add golden fixtures: `email_literal`, `email_paths`.
-- [ ] Add `programs_errors/email_bad_form.red` (e.g. `@bar.com`, `foo@`).
-- [ ] Update `property.rs` for `Email` round-trip.
+- [x] Inline `#[test]`: `mold foo@bar.com` → `"foo@bar.com"`.
+- [x] Inline `#[test]`: `foo@bar.com/user` → `"foo"`.
+- [x] Add golden fixtures: `email_literal`, `email_paths`.
+- [x] Add `programs_errors/email_bad_form.red` (e.g. `@bar.com`, `foo@`).
+- [x] Update `property.rs` for `Email` round-trip.
 
 ### M80 closeout
 
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` clean.
-- [ ] `cargo fmt --all --check` clean.
+- [x] `cargo test --workspace` green; `--features force-walk` green.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- [x] `cargo fmt --all --check` clean.
 
 ---
 
@@ -294,41 +294,41 @@ and `>` are not used by any existing literal today (confirm by grepping the
 lexer for `<`/`>` first-class handling — they appear only as comparison
 operators, which are word-tokens, not leading-char dispatch).
 
-- [ ] Add `Value::Tag { text: Rc<str>, span: Span }` variant.
-- [ ] Add `Value::tag(text)` constructor.
-- [ ] Extend `Lexer`:
-  - [ ] `scan_tag` on `<` lead: consume to the matching `>` (no nesting —
+- [x] Add `Value::Tag { text: Rc<str>, span: Span }` variant.
+- [x] Add `Value::tag(text)` constructor.
+- [x] Extend `Lexer`:
+  - [x] `scan_tag` on `<` lead: consume to the matching `>` (no nesting —
         Red's `tag!` is a single tag, not a tree). Honor backslash escapes for
         `\<`/`\>` inside the tag (Red behavior). Emit `TokenKind::Tag(s)`.
-  - [ ] Error `UnterminatedTag` on EOF before `>`.
-  - [ ] Disambiguation: `<` followed by space or operator char (`=`/`<`/`>`)
+  - [x] Error `UnterminatedTag` on EOF before `>`.
+  - [x] Disambiguation: `<` followed by space or operator char (`=`/`<`/`>`)
         is the comparison operator, not a tag. The rule: `<` followed by a
         non-space, non-operator char starts a tag; else it's the operator
         (today's behavior). **Confirm** no existing fixture breaks — the
         parity harness gates this.
-- [ ] Extend `Parser`: `TokenKind::Tag(s) => Value::Tag { text: s, span }`.
-- [ ] Extend `printer.rs`:
-  - [ ] `mold`: `"<" + text + ">"`.
-  - [ ] `form`: same as mold.
-- [ ] Extend `interp_walker.rs`/`vm/compiler.rs` self-evaluating arms.
-- [ ] Add `tag?` predicate.
-- [ ] Add `to-tag` converter (from string → `<string>`; from block →
+- [x] Extend `Parser`: `TokenKind::Tag(s) => Value::Tag { text: s, span }`.
+- [x] Extend `printer.rs`:
+  - [x] `mold`: `"<" + text + ">"`.
+  - [x] `form`: same as mold.
+- [x] Extend `interp_walker.rs`/`vm/compiler.rs` self-evaluating arms.
+- [x] Add `tag?` predicate.
+- [x] Add `to-tag` converter (from string → `<string>`; from block →
         `<word args>`).
-- [ ] Add `make tag! <value>`.
-- [ ] Series semantics: `tag!` is **not** a `series!` in Red (it's a scalar);
+- [x] Add `make tag! <value>`.
+- [x] Series semantics: `tag!` is **not** a `series!` in Red (it's a scalar);
         `length?`/`pick` don't apply. Confirm and document.
-- [ ] Update `type_name` → `"tag!"`.
-- [ ] Update `compare.rs` with a `Tag` arm (string compare on `text`).
-- [ ] Inline `#[test]`: `<b>` lexes to `Tag("b")`.
-- [ ] Inline `#[test]`: `<img src="x">` lexes to `Tag("img src=\"x\"")`.
-- [ ] Inline `#[test]`: `</p>` lexes to `Tag("/p")`.
-- [ ] Inline `#[test]`: `< 5` lexes to two tokens (operator + integer) —
+- [x] Update `type_name` → `"tag!"`.
+- [x] Update `compare.rs` with a `Tag` arm (string compare on `text`).
+- [x] Inline `#[test]`: `<b>` lexes to `Tag("b")`.
+- [x] Inline `#[test]`: `<img src="x">` lexes to `Tag("img src=\"x\"")`.
+- [x] Inline `#[test]`: `</p>` lexes to `Tag("/p")`.
+- [x] Inline `#[test]`: `< 5` lexes to two tokens (operator + integer) —
         regression guard.
-- [ ] Inline `#[test]`: `mold <b>` → `"<b>"`.
-- [ ] Add golden fixtures: `tag_literal`, `tag_convert`.
-- [ ] Add `programs_errors/tag_unterminated.red`.
-- [ ] Update `property.rs` for `Tag` round-trip.
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+- [x] Inline `#[test]`: `mold <b>` → `"<b>"`.
+- [x] Add golden fixtures: `tag_literal`, `tag_convert`.
+- [x] Add `programs_errors/tag_unterminated.red`.
+- [x] Update `property.rs` for `Tag` round-trip.
+- [x] `cargo test --workspace` green; `--features force-walk` green.
 
 ---
 

@@ -34,6 +34,13 @@ pub enum TokenKind {
     /// least one dot in the host portion. Bare `user@localhost` (no dot in
     /// host) is NOT an email! — it lexes as a plain Word.
     Email(Rc<str>),
+    /// `<b>` / `</p>` / `<img src="x">` — a tag! literal (M81). Stored as the
+    /// raw body `Rc<str>` (the text between `<` and `>`, with `\<`/`\>`/`\\`
+    /// escapes decoded). Produced by `scan_tag` when `<` is followed by a
+    /// non-delimiter, non-operator char. `<` followed by EOF/delimiter/
+    /// `=`/`<`/`>` falls through to `scan_word` (preserves `<=`/`<>`/`<`/`<<`
+    /// as comparison operators).
+    Tag(Rc<str>),
     String(Rc<str>),
     Word(Symbol),
     SetWord(Symbol),
@@ -113,6 +120,9 @@ pub enum LexError {
     /// instead — this error is reserved for runs that match the email shape
     /// structurally but fail validation.
     InvalidEmail { span: Span, chars: String },
+    /// A `<...` tag! literal (M81) that hit EOF before the closing `>`.
+    /// `chars` is the unterminated body (for the diagnostic).
+    UnterminatedTag { span: Span, chars: String },
     /// A word-shaped token had an empty body (e.g. `::`, `''`).
     InvalidWord { span: Span },
     /// `{...` hit EOF with braces still open. `depth` is the number of
@@ -148,6 +158,7 @@ impl LexError {
             | LexError::InvalidMoney { span, .. }
             | LexError::InvalidIssue { span, .. }
             | LexError::InvalidEmail { span, .. }
+            | LexError::UnterminatedTag { span, .. }
             | LexError::InvalidWord { span }
             | LexError::UnbalancedBrace { span, .. }
             | LexError::InvalidChar { span, .. }
@@ -180,6 +191,9 @@ impl std::fmt::Display for LexError {
             }
             LexError::InvalidEmail { chars, .. } => {
                 write!(f, "invalid email literal: {chars:?}")
+            }
+            LexError::UnterminatedTag { chars, .. } => {
+                write!(f, "unterminated tag literal: {chars:?}")
             }
             LexError::InvalidWord { .. } => write!(f, "invalid word (empty body)"),
             LexError::UnbalancedBrace { depth, .. } => {
@@ -449,6 +463,21 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
         {
             i += 1; // consume the `-`
             let (end, kind) = scan_money(src, &mut i, true)?;
+            out.push(Token {
+                kind,
+                span: Span::new(start, end),
+            });
+            continue;
+        }
+
+        // M81: Tag literal: `<...>`. A `<` starts a tag ONLY when followed by
+        // a non-delimiter, non-operator char. `<` followed by EOF, a delimiter
+        // (`[](){}/;"`+whitespace), or an operator char (`=`/`<`/`>`) falls
+        // through to `scan_word` so the comparison operators (`<`/`<=`/`<>`/
+        // `<<`) lex as Words (today's behavior). Escapes `\<`/`\>`/`\\` are
+        // honored inside the tag body; EOF before `>` → `UnterminatedTag`.
+        if c == b'<' && starts_tag_body(bytes.get(i + 1).copied()) {
+            let (end, kind) = scan_tag(src, &mut i)?;
             out.push(Token {
                 kind,
                 span: Span::new(start, end),
@@ -1019,6 +1048,66 @@ fn scan_issue(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError> 
 /// as `Issue("foo")` + `Refinement("bar")` for path folding).
 fn is_issue_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'?' | b'!')
+}
+
+/// M81: Does the char after `<` begin a tag body? A tag starts iff the next
+/// char is NOT a structural delimiter (`[](){}`/whitespace/`;`/`"`/`{`) and
+/// NOT one of the operator chars (`=`/`<`/`>`). Note `/` IS allowed (closing
+/// tags like `</p>`), even though `/` is normally a delimiter — `<` + `/`
+/// unambiguously starts a closing tag, not the `<` comparison operator (Red
+/// has no `</` token). This preserves `<`/`<=`/`<>`/`<<` and `<` + delimiter
+/// (e.g. `<`/`<[`) as the comparison-operator form (`scan_word`).
+fn starts_tag_body(next: Option<u8>) -> bool {
+    match next {
+        None => false,
+        Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n') | Some(b',') => false,
+        Some(b'[') | Some(b']') | Some(b'(') | Some(b')') | Some(b'{') | Some(b'}')
+        | Some(b';') | Some(b'"') => false,
+        Some(b'=') | Some(b'<') | Some(b'>') => false,
+        // Everything else (letters, digits, `/`, symbols) starts a tag.
+        _ => true,
+    }
+}
+
+/// `<...>` tag! literal (M81). Consume from `<` to the next `>`, honoring
+/// `\<`/`\>`/`\\` escapes (the body stores the decoded forms). EOF before `>`
+/// → `UnterminatedTag`. The stored body is the text between `<` and `>`
+/// (escapes decoded); the span covers the whole `<...>` run including the
+/// brackets.
+fn scan_tag(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError> {
+    let start = *i;
+    *i += 1; // consume the `<`
+    let rest = &src[*i..];
+    let mut body = String::new();
+    let mut chars = rest.char_indices();
+    while let Some((offset, ch)) = chars.next() {
+        if ch == '>' {
+            *i += offset + ch.len_utf8();
+            return Ok((*i, TokenKind::Tag(Rc::from(body.as_str()))));
+        }
+        if ch == '\\' {
+            match chars.next() {
+                Some((_, '<')) => body.push('<'),
+                Some((_, '>')) => body.push('>'),
+                Some((_, '\\')) => body.push('\\'),
+                // Unknown escape: keep backslash + char verbatim (mirrors the
+                // quoted-string escape policy).
+                Some((_, other)) => {
+                    body.push('\\');
+                    body.push(other);
+                }
+                None => break, // `\` at EOF → unterminated
+            }
+            continue;
+        }
+        body.push(ch);
+    }
+    // EOF before `>`.
+    *i = src.len();
+    Err(LexError::UnterminatedTag {
+        span: Span::new(start, src.len()),
+        chars: body,
+    })
 }
 
 fn consume_digits(bytes: &[u8], mut i: usize) -> usize {
@@ -2213,6 +2302,77 @@ mod tests {
         let toks = lex("user@localhost").expect("lex");
         assert_eq!(toks.len(), 1);
         assert!(matches!(toks[0].kind, TokenKind::Word(_)));
+    }
+
+    #[test]
+    fn tag_literal() {
+        // M81: `<...>` lexes as a tag! literal. Body is the text between the
+        // angle brackets (escapes decoded).
+        assert_eq!(one("<b>"), TokenKind::Tag(std::rc::Rc::from("b")));
+        assert_eq!(one("</p>"), TokenKind::Tag(std::rc::Rc::from("/p")));
+        assert_eq!(one("<br/>"), TokenKind::Tag(std::rc::Rc::from("br/")));
+        // Spaces, quotes, and `=` inside the body are verbatim.
+        assert_eq!(
+            one("<img src=\"x\">"),
+            TokenKind::Tag(std::rc::Rc::from("img src=\"x\""))
+        );
+        assert_eq!(one("<a=b>"), TokenKind::Tag(std::rc::Rc::from("a=b")));
+    }
+
+    #[test]
+    fn tag_escape_decoding() {
+        // M81: `\<`/`\>`/`\\` decode to literal `<`/`>`/`\` in the body.
+        assert_eq!(one("<a\\>b>"), TokenKind::Tag(std::rc::Rc::from("a>b")));
+        assert_eq!(one("<a\\<b>"), TokenKind::Tag(std::rc::Rc::from("a<b")));
+        assert_eq!(one("<a\\\\b>"), TokenKind::Tag(std::rc::Rc::from("a\\b")));
+    }
+
+    #[test]
+    fn tag_operator_disambiguation() {
+        // M81: `<` followed by EOF/delimiter/operator char is the comparison
+        // operator, not a tag (regression guard).
+        let toks = lex("< 5").expect("lex");
+        assert_eq!(toks.len(), 2);
+        assert_eq!(toks[0].kind, TokenKind::Word(Symbol::new("<")));
+        assert_eq!(toks[1].kind, TokenKind::Integer(5));
+        assert_eq!(one("<="), TokenKind::Word(Symbol::new("<=")));
+        assert_eq!(one("<>"), TokenKind::Word(Symbol::new("<>")));
+        assert_eq!(one("<"), TokenKind::Word(Symbol::new("<")));
+        // `<` + delimiter → operator (single Word).
+        let toks = lex("<[").expect("lex");
+        assert_eq!(toks.len(), 2);
+        assert_eq!(toks[0].kind, TokenKind::Word(Symbol::new("<")));
+        assert!(matches!(toks[1].kind, TokenKind::LBracket));
+    }
+
+    #[test]
+    fn tag_regression_char_and_binary_still_work() {
+        // M81: the `<`-dispatch does not interfere with `#`-dispatch (char/
+        // binary). Regression guards.
+        assert_eq!(one("#\"a\""), TokenKind::Char('a'));
+        assert_eq!(
+            one("#{00FF}"),
+            TokenKind::Binary(Rc::from(&[0x00, 0xFF][..]))
+        );
+    }
+
+    #[test]
+    fn tag_unterminated() {
+        // M81: EOF before `>` → UnterminatedTag.
+        assert!(matches!(lex("<b"), Err(LexError::UnterminatedTag { .. })));
+        assert!(matches!(
+            lex("<img src=\"x\""),
+            Err(LexError::UnterminatedTag { .. })
+        ));
+        // A backslash at EOF is also unterminated.
+        assert!(matches!(lex("<a\\"), Err(LexError::UnterminatedTag { .. })));
+    }
+
+    #[test]
+    fn tag_local_marker_lexes_as_tag() {
+        // M81: `<local>` (the `function` spec marker) now lexes as a Tag, not
+        // a Word. `function`'s spec parser accepts both forms.
+        assert_eq!(one("<local>"), TokenKind::Tag(std::rc::Rc::from("local")));
     }
 
     #[test]

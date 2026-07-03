@@ -373,6 +373,7 @@ fn eval_prefix(
         | Value::Money { .. }
         | Value::Issue { .. }
         | Value::Email { .. }
+        | Value::Tag { .. }
         | Value::String { .. }
         | Value::String8 { .. }
         | Value::LitWord { .. }

@@ -274,6 +274,16 @@ pub enum Value {
     /// Stored as the raw address `Rc<str>`. Hashable (a member of
     /// `any-string!` in Red). Pathable (`email/user`, `email/host`).
     Email { addr: Rc<str>, span: Span },
+    /// `<b>` / `</p>` / `<img src="x">` — a tag! literal (M81). Source-origin
+    /// (the lexer scans a `<`-led run to the next `>`, honoring `\<`/`\>`/`\\`
+    /// escapes); carries the byte-offset span of the whole token (including
+    /// the angle brackets). Stored as the raw body `Rc<str>` (the text between
+    /// `<` and `>`, with escapes decoded). A standalone scalar: NOT a
+    /// `series!`, NOT `any-string!`, NOT hashable, NOT pathable. Distinct from
+    /// the comparison operators (`<`/`<=`/`<>`) which lex as `Word` tokens —
+    /// `<` starts a tag only when followed by a non-delimiter, non-operator
+    /// char.
+    Tag { text: Rc<str>, span: Span },
     /// `"..."` / `{...}` string literal.
     String { s: Rc<str>, span: Span },
     /// `#"a"` — a char! literal. Source-origin (the lexer scans the `#"-led
@@ -1254,6 +1264,7 @@ impl Value {
             | Value::Money { span, .. }
             | Value::Issue { span, .. }
             | Value::Email { span, .. }
+            | Value::Tag { span, .. }
             | Value::String { span, .. }
             | Value::Char { span, .. }
             | Value::Pair { span, .. }
@@ -1377,6 +1388,15 @@ impl Value {
     pub fn email(addr: impl Into<Rc<str>>) -> Self {
         Value::Email {
             addr: addr.into(),
+            span: Span::default(),
+        }
+    }
+
+    /// Constructor shorthand for a tag! literal with a zero span (test/REPL
+    /// use). `text` is the body between `<` and `>` (escapes already decoded).
+    pub fn tag(text: impl Into<Rc<str>>) -> Self {
+        Value::Tag {
+            text: text.into(),
             span: Span::default(),
         }
     }
@@ -1955,6 +1975,10 @@ mod tests {
             addr: Rc::from("foo@bar.com"),
             span: s
         });
+        check!(Value::Tag {
+            text: Rc::from("b"),
+            span: s
+        });
         check!(Value::String {
             s: Rc::from("x"),
             span: s
@@ -2080,6 +2104,7 @@ mod tests {
                 span: s,
             },
             Value::Email { addr, .. } => Value::Email { addr, span: s },
+            Value::Tag { text, .. } => Value::Tag { text, span: s },
             Value::String { s: ss, .. } => Value::String { s: ss, span: s },
             Value::Char { c, .. } => Value::Char { c, span: s },
             Value::Pair { x, y, .. } => Value::Pair { x, y, span: s },

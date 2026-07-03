@@ -142,6 +142,7 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Money { .. } => "money!",
         Value::Issue { .. } => "issue!",
         Value::Email { .. } => "email!",
+        Value::Tag { .. } => "tag!",
         Value::String { .. } => "string!",
         Value::Char { .. } => "char!",
         Value::Pair { .. } => "pair!",

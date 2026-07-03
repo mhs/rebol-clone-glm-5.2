@@ -64,6 +64,14 @@ fn gen_value(_depth: u32) -> BoxedStrategy<Value> {
             addr: s.into(),
             span: Span::new(0, 0),
         }),
+        // M81: tag! literals — short alphanumeric bodies. The mold form
+        // `<body>` reparses through `scan_tag` (no escapes needed since the
+        // body has no `<`/`>`/`\`). Escaped forms are exercised by inline
+        // unit tests in printer.rs.
+        "[a-zA-Z0-9_]{1,8}".prop_map(|s: String| Value::Tag {
+            text: s.into(),
+            span: Span::new(0, 0),
+        }),
         // mold form `$<dollars>.<DD>[:CCC]` round-trips. Keep cents small to
         // avoid i64 edge cases; use 3 currencies (USD default, EUR/JPY
         // non-default to exercise the suffix).

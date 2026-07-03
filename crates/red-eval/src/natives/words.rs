@@ -321,6 +321,16 @@ pub(crate) fn email_predicate(
     pred1(args, "email?", |v| matches!(v, Value::Email { .. }))
 }
 
+/// `tag?` — true for `tag!` (`Value::Tag`). M81. Red parity: tag! is a
+/// standalone scalar (NOT a member of `series!`/`any-string!`/`any-word!`).
+pub(crate) fn tag_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "tag?", |v| matches!(v, Value::Tag { .. }))
+}
+
 /// `number?` — true for `integer!` or `float!`.
 pub(crate) fn number_predicate(
     args: &[Value],
@@ -650,6 +660,7 @@ pub(crate) fn register_word_predicate_natives(env: &mut Env) {
     reg(env, "money?", money_predicate);
     reg(env, "issue?", issue_predicate);
     reg(env, "email?", email_predicate);
+    reg(env, "tag?", tag_predicate);
     reg(env, "number?", number_predicate);
     reg(env, "string?", string_predicate);
     reg(env, "logic?", logic_predicate);

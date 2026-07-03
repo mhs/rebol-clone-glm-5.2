@@ -172,6 +172,14 @@ impl<'a> Parser<'a> {
                 // M80: fold adjacent refinements (`foo@bar.com/user`) into a path.
                 self.assemble_path(head, tok.span)
             }
+            TokenKind::Tag(text) => {
+                self.advance()?;
+                // M81: tag! is a standalone scalar (NOT pathable, like char!).
+                Ok(Value::Tag {
+                    text,
+                    span: tok.span,
+                })
+            }
             TokenKind::String(s) => {
                 self.advance()?;
                 Ok(Value::String { s, span: tok.span })
