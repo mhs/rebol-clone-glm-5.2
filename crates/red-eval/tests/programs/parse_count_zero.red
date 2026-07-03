@@ -1,0 +1,5 @@
+Red []
+print parse "" [0 skip]
+print parse "x" [0 skip "x"]
+print parse "" [0 3 skip]
+print parse "xx" [0 0 skip "x" "x"]

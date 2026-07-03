@@ -5,7 +5,12 @@ print "string match:"
 print parse "abc" ["a" "b" "c"]
 
 print "block match:"
-print parse [1 2 3] [1 2 3]
+print parse [a b c] ['a 'b 'c]
+
+print "integer-count repetition:"
+digit: charset "0123456789"
+print parse "2026-07-03" [4 digit "-" 2 digit "-" 2 digit]
+print parse "123" [2 5 digit]
 
 print "capture with copy:"
 parse "hello world" [copy w to " " skip copy rest to end]

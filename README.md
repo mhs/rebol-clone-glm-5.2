@@ -217,6 +217,12 @@ for `parse`), `Port` (synchronous I/O handle — file or HTTP; v0.6).
   `into 'word rule`, `fail`, `break`, `if (expr)`, `not rule`, `??` (debug),
   `accept value`, `reject`, `ahead rule`, `behind rule`, `bitset!` charset
   matching, `/case` refinement for case-sensitive string matching.
+  **v0.7 integer-count rules:** `n rule` and `n m rule` (exact-count and
+  range-count repetition), where `n`/`m` are `integer!` literals or words
+  resolving to a non-negative `integer!`. Per Red semantics, *every*
+  `integer!` in a rule block is a count prefix (literal-integer matching
+  against block input uses `match`/lit-word/string forms instead).
+  Negative counts and inverted ranges (`3 1 rule`) raise a parse error.
   **v0.6 named-rule recursion:** a bound word resolving to a `block!` is
   treated as a named sub-rule (parsed recursively against the same cursor);
   a word resolving to a `bitset!` still does charset matching. A depth

@@ -586,4 +586,128 @@ addition, not a rework.
 - [x] Final `cargo clippy --workspace --all-targets -- -D warnings` clean.
 - [x] Tag release `v0.6.0`.
 
+---
+
+## Milestone 138 — `parse` integer-count rules
+
+The gap surfaced by `digit: charset "0123456789"` then `parse "2026-07-03"
+[4 digit "-" 2 digit "-" 2 digit]` returning `false`. Per Red's parse
+dialect spec (§3.6.1 "Iteration count"), an `integer!` in a rule block is
+a **count prefix**: `n rule` matches `rule` exactly `n` times, and
+`n m rule` matches `rule` between `n` and `m` times (inclusive range,
+lower ≤ upper). The count may be an `integer!` literal or a `word!`
+referring to a non-negative `integer!` (`THX: 1138 … 0 thx [rule]`).
+
+The pre-M138 implementation treated `integer!` rules as literal-value
+matches against block input (so `parse [1 2 3] [1 2 3]` returned `true`),
+which is the *opposite* of Red's disambiguation. M138 corrects this to
+full Red parity.
+
+### Implementation (in `crates/red-eval/src/parse.rs`)
+
+- [x] `resolve_count(v, env) -> Result<Option<usize>, EvalError>`: returns
+      `Ok(Some(n))` for an `integer!` literal (n ≥ 0) or a `word!`/
+      `lit-word!` whose bound value is an `integer!`; `Ok(None)` for
+      anything else (so a word resolving to a `bitset!`/`block!` still
+      dispatches correctly); `Err(EvalError::Native)` for a negative
+      count.
+- [x] `rule_extent` is now env-aware (takes `&Env`): at its top, if the
+      element resolves to a count, peek the next element — if also a
+      count, return `2 + extent(i+2)` (range form); else
+      `1 + extent(i+1)` (exact form). The pre-M138 body was factored
+      into `extent_keyword`. All 6 external call sites (`:712`/`:799`/
+      `:815`/`:828`/`:846`/`:872`) and all internal recursive calls now
+      thread `env`. This is required so `any`/`some`/`opt`/`while`/
+      `ahead`/`behind`/`not` advance past a counted inner rule correctly
+      (e.g. `some [2 digit "-"]`).
+- [x] `run_counted(input, rules, inner_start, min, max, …)`: mirrors
+      `run_repetition`; loops up to `max` iterations, restores cursor on
+      a failed iteration and breaks, returns `count >= min`. Reuses
+      `run_repetition`'s no-progress guard (count once, then break) to
+      avoid infinite loops on no-op inner rules — a documented slight
+      deviation from Red's pure-possessive count semantics. Forwards
+      `collect_stack` so `collect`/`keep`/`copy`/`set`/`into` work
+      inside counted rules.
+- [x] Count dispatch at the top of `rule_one` (before the keyword
+      check): on `resolve_count` → `Some(n1)`, advance `*i`, peek the
+      next element — if also a count `Some(n2)`, range form (error if
+      `n2 < n1`); else exact form (`min == max == n1`). Call
+      `run_counted`, then advance `*i` past the inner rule via
+      `rule_extent` (env-aware, so nested counts work).
+
+### Disambiguation decisions (confirmed before implementation)
+
+1. **Full Red parity** — every `integer!` in a rule block is a count
+   prefix. `parse [1 2 3] [1 2 3]` no longer matches the literal
+   integers (it parses as "range `1 2` applied to rule `3`"). The
+   existing `parse_block_match` inline test + golden fixture were
+   updated to use lit-word/string/`match` forms for literal matching.
+2. **Word-resolved counts** — a `word!`/`lit-word!` in count position
+   resolving to an `integer!` is the count (`THX: 1138 … 0 thx [rule]`).
+   A word resolving to a non-integer returns `Ok(None)` from
+   `resolve_count` and falls through to existing bitset/block/literal
+   dispatch (no regression).
+3. **Error model** — reuse `EvalError::Native { message, span }` for
+   negative-count and inverted-range errors (avoids touching the
+   specific-error pass-through list in `natives/mod.rs` and the `span()`
+   match in `env.rs`). Messages: `"parse count cannot be negative: N"`
+   and `"parse range lower bound N exceeds upper bound M"`.
+4. **No-operand count** — `parse "" [3]` (count with no following rule)
+   returns `false`, mirroring `any`/`some`'s no-operand handling at
+   `parse.rs:695`.
+
+### Tests & fixtures
+
+- [x] Inline `#[test]` `parse_count_exact` — `4 digit` on `"2026"` →
+      true; `"202"` → false; `"20260"` → false (trailing input).
+- [x] Inline `#[test]` `parse_count_user_case` — the issue's exact
+      `parse "2026-07-03" [4 digit "-" 2 digit "-" 2 digit]` → true.
+- [x] Inline `#[test]` `parse_count_range` — `2 5 digit` on `"123"` →
+      true; `"1"` → false (below min); `"123456"` → false (above max);
+      `"12345"` → true (exact upper bound).
+- [x] Inline `#[test]` `parse_count_zero` — `0 skip` always succeeds
+      (no advance); `0 3 skip`; degenerate `0 0 skip`.
+- [x] Inline `#[test]` `parse_count_word` — `n: 4` then `[n digit]`;
+      `lo: 2 hi: 5` then `[lo hi digit]`.
+- [x] Inline `#[test]` `parse_count_with_subrule` — `2 [#"a" #"b"]` on
+      `"abab"`; count applied to sub-rule group then literal tail.
+- [x] Inline `#[test]` `parse_count_inside_some` —
+      `some [2 digit "-"] 2 digit` on `"12-34-56"` (verifies env-aware
+      `rule_extent`).
+- [x] Inline `#[test]` `parse_count_collect` — `collect w 3 digit`
+      captures `[#"1" #"2" #"3"]`.
+- [x] Inline `#[test]` `parse_count_negative_error` — `[-1 skip]` →
+      `Err` with "negative".
+- [x] Inline `#[test]` `parse_count_range_inverted_error` —
+      `[3 1 skip]` → `Err` with "exceeds".
+- [x] Inline `#[test]` `parse_count_no_following_rule` —
+      `parse "" [3]` and `parse "" [2 3]` → false.
+- [x] Updated inline `parse_block_match` and its golden fixture for the
+      new disambiguation (lit-word/string/`match` forms).
+- [x] Golden fixtures: `parse_count_exact`, `parse_count_range`,
+      `parse_count_word`, `parse_count_zero`.
+- [x] `examples/parse.red` updated (block-match line uses lit-words;
+      added an integer-count demo block).
+- [x] `README.md` parse inventory documents `n rule` / `n m rule` +
+      the integer-is-always-a-count disambiguation.
+- [x] `cargo test -p red-eval` green (676 lib + 11 integration + 4
+      golden harness tests).
+- [x] `cargo test --workspace --features force-walk` green (parity
+      preserved between walker and VM).
+
+### M138 deviations / out of scope
+
+- **`quote` keyword** — Red's literal-match escape (needed to match a
+  literal `integer!` in block input now that integers are always
+  counts). Not implemented; belongs in a future "parse direct-matching
+  parity" milestone alongside `datatype!`/`typeset!` matching. The
+  `match` keyword and lit-word/string forms cover the same ground.
+- **No-progress guard** — `run_counted` breaks after one no-advance
+  iteration rather than looping `max` times (mirrors `run_repetition`).
+  Slight deviation from Red's pure-possessive count semantics; safer
+  (no infinite loops on no-op inner rules).
+- **`break`/`reject` inside a counted rule** — pre-existing deviation
+  (exits the whole parse, not just the repetition); unchanged by M138.
+- **`/all` and `/part` parse refinements** — already covered by M136.
+
 (End of plan11-functional-gaps.md)

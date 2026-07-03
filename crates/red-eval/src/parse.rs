@@ -603,6 +603,59 @@ fn rule_one(
     }
     let v = rules[*i].clone();
 
+    // M138: integer-count / range-count rule — `n rule` or `n m rule`,
+    // where n/m are `integer!` literals or words resolving to a
+    // non-negative `integer!`. Per Red's parse dialect, EVERY integer in
+    // a rule block is a count prefix (literal-integer matching against
+    // block input is no longer supported — use `quote`/`match`/lit-word
+    // forms instead). A word that resolves to a non-integer (bitset/
+    // block/etc.) is NOT a count and falls through to the dispatch below.
+    if let Some(n1) = resolve_count(&v, env)? {
+        *i += 1;
+        if *i >= rules.len() {
+            // Count with no following rule — fail (mirrors `any`/`some`'s
+            // no-operand handling).
+            return Ok(false);
+        }
+        // Peek the next element: if it's also a count, this is the range
+        // form `n m rule`; otherwise it's the exact form `n rule`.
+        let (min, max, inner_start) = match resolve_count(&rules[*i], env)? {
+            Some(n2) => {
+                if n2 < n1 {
+                    return Err(EvalError::Native {
+                        message: format!(
+                            "parse range lower bound {n1} exceeds upper bound {n2}"
+                        ),
+                        span: v.span_or_default(),
+                    });
+                }
+                *i += 1;
+                if *i >= rules.len() {
+                    return Ok(false);
+                }
+                (n1, n2, *i)
+            }
+            None => (n1, n1, *i),
+        };
+        let result = run_counted(
+            input,
+            rules,
+            inner_start,
+            min,
+            max,
+            env,
+            case_sensitive,
+            collect_stack,
+            depth,
+        )?;
+        // Advance past the inner rule's syntactic extent (without
+        // re-evaluating it — avoids double side-effects from `(...)`
+        // rules). `rule_extent` is env-aware so a counted inner rule
+        // (nested counts) is accounted for.
+        *i = inner_start + rule_extent(rules, inner_start, env);
+        return Ok(result);
+    }
+
     // Keyword rules — recognized by an unbound `Word`.
     if let Some(sym) = word_sym(&v) {
         match sym.as_str() {
@@ -709,7 +762,7 @@ fn rule_one(
                 // Advance the rule cursor past the inner rule's syntactic
                 // extent (without evaluating it — avoids double-evaluating
                 // side-effects like `(...)`).
-                *i = inner_start + rule_extent(rules, inner_start);
+                *i = inner_start + rule_extent(rules, inner_start, env);
                 return Ok(result);
             }
             "copy" => {
@@ -796,7 +849,7 @@ fn rule_one(
                     depth,
                 )?;
                 input.restore(&saved);
-                *i = inner_start + rule_extent(rules, inner_start);
+                *i = inner_start + rule_extent(rules, inner_start, env);
                 return Ok(ok);
             }
             // M46: `behind rule` — reverse lookahead. Best-effort: snapshot
@@ -812,7 +865,7 @@ fn rule_one(
                 match &mut *input {
                     Input::Str { src, cursor } => {
                         if *cursor == 0 {
-                            *i += rule_extent(rules, *i);
+                            *i += rule_extent(rules, *i, env);
                             return Ok(false);
                         }
                         // Find previous char boundary.
@@ -825,7 +878,7 @@ fn rule_one(
                     }
                     Input::Series { series, .. } => {
                         if series.index == 0 {
-                            *i += rule_extent(rules, *i);
+                            *i += rule_extent(rules, *i, env);
                             return Ok(false);
                         }
                         series.index -= 1;
@@ -843,7 +896,7 @@ fn rule_one(
                     depth,
                 )?;
                 input.restore(&saved);
-                *i = inner_start + rule_extent(rules, inner_start);
+                *i = inner_start + rule_extent(rules, inner_start, env);
                 return Ok(ok);
             }
             // M46: `not rule` — negation; succeed iff sub-rule fails. Cursor
@@ -869,7 +922,7 @@ fn rule_one(
                 input.restore(&saved);
                 // Advance past the inner rule's extent regardless of
                 // success/failure (the inner rule was consumed syntactically).
-                *i = inner_start + rule_extent(rules, inner_start);
+                *i = inner_start + rule_extent(rules, inner_start, env);
                 return Ok(!ok);
             }
             // M46: `if (expr)` — evaluate the paren expr and succeed iff
@@ -1358,6 +1411,62 @@ fn run_repetition(
     Ok(success)
 }
 
+/// M138: Repetition runner for the integer-count forms `n rule` and
+/// `n m rule`. Runs the inner rule (located at `inner_start` in `rules`)
+/// repeatedly, up to `max` iterations; on the first failed iteration
+/// restores the cursor and stops. Succeeds iff the iteration count is
+/// within `[min, max]`. Possessive (matches as much as possible up to
+/// `max`), mirroring Red's repetition semantics. Forwards
+/// `collect_stack` so `collect`/`keep`/`copy`/`set`/`into` work inside a
+/// counted rule, exactly as in `run_repetition`.
+///
+/// Deviation: a no-progress success (the inner rule matched without
+/// advancing the input) breaks the loop after one such iteration, rather
+/// than looping `max` times. This matches `run_repetition`'s guard and
+/// prevents an infinite loop on no-op inner rules (a slight deviation
+/// from Red's pure-possessive count semantics, documented in the README
+/// parse inventory).
+#[allow(clippy::too_many_arguments)]
+fn run_counted(
+    input: &mut Input,
+    rules: &[Value],
+    inner_start: usize,
+    min: usize,
+    max: usize,
+    env: &mut Env,
+    case_sensitive: bool,
+    collect_stack: &mut Vec<Vec<Value>>,
+    depth: usize,
+) -> Result<bool, EvalError> {
+    let mut count = 0usize;
+    while count < max {
+        let saved = input.save();
+        let mut j = inner_start;
+        let ok = rule_one(
+            input,
+            rules,
+            &mut j,
+            env,
+            case_sensitive,
+            collect_stack,
+            depth,
+        )?;
+        if !ok {
+            input.restore(&saved);
+            break;
+        }
+        // Progress guard (mirrors `run_repetition`): a no-advance match
+        // counts once and stops, avoiding an infinite loop on a no-op
+        // inner rule.
+        if input.save().equals(&saved) {
+            count += 1;
+            break;
+        }
+        count += 1;
+    }
+    Ok(count >= min)
+}
+
 impl Cursor {
     fn equals(&self, other: &Cursor) -> bool {
         match (self, other) {
@@ -1378,9 +1487,41 @@ impl Cursor {
 
 /// Number of rule slots consumed by the rule starting at `rules[i]`,
 /// computed syntactically (no evaluation, no side-effects). Used by
-/// `any`/`some`/`opt`/`while` to advance the rule cursor past their inner
-/// rule without re-running it.
-fn rule_extent(rules: &[Value], i: usize) -> usize {
+/// `any`/`some`/`opt`/`while`/`ahead`/`behind`/`not` to advance the rule
+/// cursor past their inner rule without re-running it.
+///
+/// M138: env-aware so that an integer/word count prefix (`n rule` or
+/// `n m rule`) is accounted for. A `word!` resolves via `env.user_ctx`;
+/// if it points to an `integer!` it's a count (consume 1–2 count slots
+/// plus the inner rule's extent), otherwise it's a literal/bitset/sub-rule
+/// reference (one slot, per the existing fallback).
+fn rule_extent(rules: &[Value], i: usize, env: &Env) -> usize {
+    if i >= rules.len() {
+        return 0;
+    }
+    let v = &rules[i];
+    // M138: count prefix (integer literal or word resolving to integer).
+    // `resolve_count` only errs on a negative count; `rule_extent` is
+    // infallible, so on error we fall through to the non-count dispatch
+    // (the negative-count error is surfaced by `rule_one`'s count
+    // dispatch, which runs before any `rule_extent` skip in practice).
+    let is_count = matches!(resolve_count(v, env), Ok(Some(_)));
+    if is_count {
+        // Peek the next element: if it's also a count, this is the range
+        // form `n m rule`; otherwise it's the exact form `n rule`.
+        if i + 1 < rules.len() && matches!(resolve_count(&rules[i + 1], env), Ok(Some(_))) {
+            2 + rule_extent(rules, i + 2, env)
+        } else {
+            1 + rule_extent(rules, i + 1, env)
+        }
+    } else {
+        extent_keyword(rules, i, env)
+    }
+}
+
+/// Dispatch the keyword/value forms of `rule_extent` (the pre-M138 body,
+/// factored out so the count-prefix check above can fall through cleanly).
+fn extent_keyword(rules: &[Value], i: usize, env: &Env) -> usize {
     if i >= rules.len() {
         return 0;
     }
@@ -1401,7 +1542,7 @@ fn rule_extent(rules: &[Value], i: usize) -> usize {
         }
         "any" | "some" | "opt" | "while" | "ahead" | "behind" | "not" | "if" => {
             1 + if i + 1 < rules.len() {
-                rule_extent(rules, i + 1)
+                rule_extent(rules, i + 1, env)
             } else {
                 0
             }
@@ -1409,7 +1550,7 @@ fn rule_extent(rules: &[Value], i: usize) -> usize {
         "copy" | "set" => {
             // `copy W R` / `set W R` — W is one slot, R is one rule.
             2 + if i + 2 < rules.len() {
-                rule_extent(rules, i + 2)
+                rule_extent(rules, i + 2, env)
             } else {
                 0
             }
@@ -1431,7 +1572,7 @@ fn rule_extent(rules: &[Value], i: usize) -> usize {
             // inner rule
             slots
                 + if j < rules.len() {
-                    rule_extent(rules, j)
+                    rule_extent(rules, j, env)
                 } else {
                     0
                 }
@@ -1447,13 +1588,42 @@ fn rule_extent(rules: &[Value], i: usize) -> usize {
         "into" => {
             // `into W R` — W is one slot, R is one rule.
             2 + if i + 2 < rules.len() {
-                rule_extent(rules, i + 2)
+                rule_extent(rules, i + 2, env)
             } else {
                 0
             }
         }
         _ => 1, // a word used as a literal match — one slot
     }
+}
+
+/// M138: Resolve a value to a non-negative repetition count. Returns
+/// `Ok(Some(n))` for an `integer!` literal (n ≥ 0) or a `word!`/`lit-word!`
+/// whose bound value is an `integer!`; `Ok(None)` for anything else (so
+/// callers fall through to other dispatch — a word resolving to a
+/// `bitset!`/`block!` is not a count); `Err` for a negative count.
+fn resolve_count(v: &Value, env: &Env) -> Result<Option<usize>, EvalError> {
+    let n = match v {
+        Value::Integer { n, .. } => *n,
+        Value::Word { sym, .. } | Value::LitWord { sym, .. } => match env
+            .user_ctx
+            .index_of(sym)
+        {
+            Some(idx) => match env.user_ctx.slot_value_unchecked(idx) {
+                Value::Integer { n, .. } => n,
+                _ => return Ok(None),
+            },
+            None => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    if n < 0 {
+        return Err(EvalError::Native {
+            message: format!("parse count cannot be negative: {n}"),
+            span: v.span_or_default(),
+        });
+    }
+    Ok(Some(n as usize))
 }
 
 // ---------------------------------------------------------------------------
@@ -1517,7 +1687,17 @@ mod tests {
 
     #[test]
     fn parse_block_match() {
-        assert_eq!(m(&val("parse [1 2 3] [1 2 3]")), "true");
+        // M138: every `integer!` in a rule block is a count prefix, so
+        // `parse [1 2 3] [1 2 3]` no longer matches the literal integers
+        // (it parses as "range 1 2 applied to rule 3", and a bare
+        // integer can't be a rule — use `match`/lit-word/string forms
+        // for literal matching instead).
+        assert_eq!(m(&val("parse [a b c] ['a 'b 'c]")), "true");
+        assert_eq!(m(&val("parse [\"x\" \"y\"] [\"x\" \"y\"]")), "true");
+        // Count prefix on block input: `3 match 3` = match literal-3
+        // (via the `match` keyword) exactly 3 times against [3 3 3].
+        assert_eq!(m(&val("parse [3 3 3] [3 match 3]")), "true");
+        assert_eq!(m(&val("parse [3 3] [3 match 3]")), "false");
     }
 
     #[test]
@@ -1744,5 +1924,127 @@ mod tests {
         assert_eq!(m(&v), "true");
         let v2 = val(r#"cs: charset "abc" parse "aaa" [some cs]"#);
         assert_eq!(m(&v2), "true");
+    }
+
+    // --- M138 integer-count rule tests ---
+
+    #[test]
+    fn parse_count_exact() {
+        // `4 digit` = match the digit charset exactly 4 times.
+        let pre = r#"digit: charset "0123456789" "#;
+        assert_eq!(m(&val(&format!("{pre}parse \"2026\" [4 digit]"))), "true");
+        // Too few → fails (and leaves input, so overall parse fails).
+        assert_eq!(m(&val(&format!("{pre}parse \"202\" [4 digit]"))), "false");
+        // Too many → the 4-count stops at 4, but trailing input means the
+        // parse doesn't fully consume → false.
+        assert_eq!(m(&val(&format!("{pre}parse \"20260\" [4 digit]"))), "false");
+    }
+
+    #[test]
+    fn parse_count_user_case() {
+        // The exact case from the issue: a YYYY-MM-DD date grammar.
+        let src = r#"digit: charset "0123456789"
+            parse "2026-07-03" [4 digit "-" 2 digit "-" 2 digit]"#;
+        assert_eq!(m(&val(src)), "true");
+        // Wrong shape fails.
+        let bad = r#"digit: charset "0123456789"
+            parse "26-7-3" [4 digit "-" 2 digit "-" 2 digit]"#;
+        assert_eq!(m(&val(bad)), "false");
+    }
+
+    #[test]
+    fn parse_count_range() {
+        let pre = r#"digit: charset "0123456789" "#;
+        // 2..5 matches of digit against "123" (3 digits) → true.
+        assert_eq!(m(&val(&format!("{pre}parse \"123\" [2 5 digit]"))), "true");
+        // Below min: "1" has only 1 digit, min is 2 → false.
+        assert_eq!(m(&val(&format!("{pre}parse \"1\" [2 5 digit]"))), "false");
+        // Above max: "123456" has 6 digits, max is 5 → the count stops at
+        // 5 but trailing "6" remains → false.
+        assert_eq!(m(&val(&format!("{pre}parse \"123456\" [2 5 digit]"))), "false");
+        // Exact upper bound: 5 digits, max 5 → true.
+        assert_eq!(m(&val(&format!("{pre}parse \"12345\" [2 5 digit]"))), "true");
+    }
+
+    #[test]
+    fn parse_count_zero() {
+        // `0 skip` matches zero times — always succeeds, no advance.
+        assert_eq!(m(&val(r#"parse "" [0 skip]"#)), "true");
+        assert_eq!(m(&val(r#"parse "x" [0 skip "x"]"#)), "true");
+        // `0 3 skip` — range [0,3], zero matches is fine.
+        assert_eq!(m(&val(r#"parse "" [0 3 skip]"#)), "true");
+        // `0 0 skip` — degenerate range, matches zero times.
+        assert_eq!(m(&val(r#"parse "xx" [0 0 skip "x" "x"]"#)), "true");
+    }
+
+    #[test]
+    fn parse_count_word() {
+        // A word bound to an integer! is a valid count.
+        let pre = r#"digit: charset "0123456789" n: 4 "#;
+        assert_eq!(m(&val(&format!("{pre}parse \"2026\" [n digit]"))), "true");
+        // Word-resolved range: `lo hi rule`.
+        let pre2 = r#"digit: charset "0123456789" lo: 2 hi: 5 "#;
+        assert_eq!(m(&val(&format!("{pre2}parse \"123\" [lo hi digit]"))), "true");
+    }
+
+    #[test]
+    fn parse_count_with_subrule() {
+        // Count applied to a `[...]` sub-rule group: match the group
+        // (which itself matches "ab") exactly twice against "abab".
+        assert_eq!(m(&val(r#"parse "abab" [2 [#"a" #"b"]]"#)), "true");
+        assert_eq!(m(&val(r#"parse "aba" [2 [#"a" #"b"]]"#)), "false");
+        // Count applied to a sub-rule, then a literal tail.
+        assert_eq!(m(&val(r#"parse "aabbcc" [2 [#"a"] 2 [#"b"] "cc"]"#)), "true");
+    }
+
+    #[test]
+    fn parse_count_inside_some() {
+        // `some [2 digit "-"]` then `2 digit` — verifies the env-aware
+        // `rule_extent` correctly advances past `2 digit "-"` inside the
+        // `some` keyword's inner rule (without this, `some` would
+        // under-advance and re-match the same slot).
+        let src = r#"digit: charset "0123456789"
+            parse "12-34-56" [some [2 digit "-"] 2 digit]"#;
+        assert_eq!(m(&val(src)), "true");
+    }
+
+    #[test]
+    fn parse_count_collect() {
+        // `collect w 3 digit` — the count rule's per-match captures flow
+        // into the enclosing collect, exactly like `some`.
+        let v = val(r#"digit: charset "0123456789" parse "123" [collect w 3 digit] w"#);
+        assert_eq!(m(&v), "[#\"1\" #\"2\" #\"3\"]");
+    }
+
+    #[test]
+    fn parse_count_negative_error() {
+        // A negative count is a hard error, not a silent zero.
+        let res = run_capture_val(r#"parse "x" [-1 skip]"#);
+        assert!(res.is_err(), "expected an error for negative count");
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("negative"),
+            "expected 'negative' in error message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_count_range_inverted_error() {
+        // Lower bound > upper bound is a hard error per Red docs.
+        let res = run_capture_val(r#"parse "x" [3 1 skip]"#);
+        assert!(res.is_err(), "expected an error for inverted range");
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("exceeds"),
+            "expected 'exceeds' in error message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_count_no_following_rule() {
+        // A count with no rule after it fails (mirrors `any`/`some`'s
+        // no-operand handling).
+        assert_eq!(m(&val(r#"parse "" [3]"#)), "false");
+        assert_eq!(m(&val(r#"parse "" [2 3]"#)), "false");
     }
 }
