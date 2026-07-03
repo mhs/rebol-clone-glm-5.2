@@ -145,6 +145,27 @@ pub struct ModuleDef {                             // M61 — self-contained nam
     pub source: Option<Rc<str>>,                   // canonical path for caching (M62)
     pub parent: Option<Rc<Context>>,               // script user_ctx or another module (reserved v0.6+)
 }
+
+pub enum PortScheme {                              // M113 — 12 variants; only File/Http live in v0.6
+    File, Http,                                     // live (dispatched)
+    Ftp, Smtp, Pop3, Nntp, Dns, Tcp, Udp, Whois, Finger, Daytime,  // reserved → NetError::UnsupportedInV09
+}
+// API: as_str() -> &'static str, is_live_in_v09() -> bool
+
+pub struct PortState {                             // M113 — open/closed + body/cursor for streaming
+    pub open: bool,
+    pub cursor: usize,                             // read cursor for streaming reads
+    pub http_body: Option<Box<dyn std::io::Read + Send>>,  // ureq body Read, held across read port calls
+    pub http_status: u16,
+    pub file_handle: Option<std::fs::File>,        // for create/write ports
+}
+
+pub struct PortDef {                               // M113 — synchronous port! handle
+    pub scheme: PortScheme,
+    pub target: Rc<str>,                           // file path or url string
+    pub state: RefCell<PortState>,
+}
+// API: new(scheme, target) -> Rc<RefCell<PortDef>>
 ```
 
 ### Value variants (v0.5)
@@ -176,6 +197,7 @@ pub enum Value {
     Bitset(Rc<RefCell<BitsetDef>>),                      // charset "ABC" — M46 (synthetic, no span)
     Closure(Rc<ClosureDef>),                             // closure! — M60 (synthetic, no span)
     Module(Rc<RefCell<ModuleDef>>),                      // module! — M61 (synthetic, no span)
+    Port(Rc<RefCell<PortDef>>),                          // port! — M113 (synthetic, no span)
 }
 ```
 
@@ -183,9 +205,9 @@ Every source-origin variant (`Integer`/`Float`/`String`/word-family/`Block`/`Par
 `Path`/`GetPath`/`LitPath`/`SetPath`/`Refinement`/`File`/`Url`/`Char`/`String8`/
 `Pair`/`Tuple`/`Date`) carries the byte-offset `Span` of its originating token so
 eval-time errors can render `file:line:col:`. Synthetic variants (`None`/`Logic`/
-`Func`/`Error`/`Object`/`Map`/`Bitset`/`Closure`/`Module`) are produced at runtime
+`Func`/`Error`/`Object`/`Map`/`Bitset`/`Closure`/`Module`/`Port`) are produced at runtime
 and carry no span; error rendering falls back to the call-site span (the
-originating `closure`/`module` native call's span, attached to the `EvalError`).
+originating `closure`/`module`/`open` native call's span, attached to the `EvalError`).
 
 `Value`, `Context`, `Env`, `EvalError` defined as in the brief. Span flow is
 covered above — synthetic variants omit the span and fall back to `Span::new(0,0)`
@@ -482,6 +504,7 @@ pub struct Env {
     pub natives: HashMap<Symbol, Rc<FuncDef>>, // full FuncDef so infix/variadic/refinements flow
     pub out: Box<dyn Write>,                   // stdout sink; tests inject a buffer
     pub allow_shell: bool,                     // M20: gates `call`/`shell`
+    pub allow_network: bool,                   // M113: gates `open url!`/`read url!`/HTTP-port reads (default off)
     pub cwd: PathBuf,                          // M20: base dir for file I/O
     pub mode: EvalMode,                        // M29: `Vm` (default) or `Walk`
     // VM compiled-block caches (M27) + scratch Vec pools (M30.1.C/M30.3.2) —
@@ -513,6 +536,7 @@ pub enum EvalError {
     Native { message: String, span: Span },
     Raised(Rc<ErrorValue>),         // M42: structured error (cause-error / synthesized)
     Compile { kind: CompileErrorKind, span: Span },  // M31: compiler/VM invariant violation
+    ParseRecursionLimit { span: Span },  // M110: parse sub-rule recursion depth exceeded
 }
 ```
 
@@ -722,6 +746,72 @@ Live in `series.rs`, registered in `natives/registry.rs`. Each takes `&[Value]`,
 extracts its `Series` argument(s), manipulates the cursor or `RefCell`
 contents, returns a `Value`. Mutation affects shared storage (Red
 reference semantics).
+
+**`sort` + set operations (M112):** `sort` is an in-place stable native
+(default ascending; refinements `/case`/`/reverse`/`/skip size`/`/compare
+func`) over `block!`/`string!`. The total order reuses `compare.rs`'s
+numeric/string comparison; mixed-type blocks fall back to a pragmatic
+`(type_name, mold)` total order — a documented POC deviation (sort never
+errors on mixed types). `unique`/`intersect`/`union`/`difference`/`exclude`
+operate on `block!`/`string!` (first-occurrence-order-preserving). The same
+native names dispatch on `bitset!` operands to the M46 implementations in
+`bitset.rs`. `sort`/`unique`/`intersect`/`union`/`difference`/`exclude` all
+support `/case` (string case-sensitivity) and `/skip size` (record-wise).
+
+### `port!` + networking (M113)
+The `crates/red-eval/src/net/` module is a synchronous protocol facade
+layered over the existing `ureq = "2"` dep (TLS on by default in ureq 2.x —
+no new dependency; see `rust-networking-protocol-crate-recommendation.md`
+for the composed-facade rationale). Module tree:
+
+```
+net/
+├── mod.rs        # public API: open / read_port / write_port / close / port?
+├── protocol.rs   # PortScheme dispatch, scheme_of_url, ensure_supported_in_v09
+├── request.rs    # NetworkOptions (tls flag live; headers/redirect reserved v0.7+)
+├── response.rs   # NetworkStatus (success/failure); full response reserved v0.7+
+├── error.rs      # NetError (UnsupportedInV09 / Closed / NetworkDisabled / Http*)
+└── http.rs       # ureq-backed HTTP/HTTPS GET: open_http issues the request at
+                  # `open` time (fail-fast), body Read held on PortState for streaming
+```
+
+`open <file!|url!>` builds a `PortDef`; for HTTP ports the ureq GET is
+issued at `open` time (status/headers materialized, body read lazily on
+`read port` in 8 KiB chunks). `create <file!>` opens-with-truncate.
+`close port` drops the `PortState`. `read port` / `write port` are invoked
+from `io.rs::read`/`io.rs::write` when the argument is a `Value::Port`.
+`read url!` for `http://`/`https://` routes through the facade (one-shot
+ergonomics = `read open url!`). HTTP writes error
+(`NetError::HttpWriteUnsupported` — v0.6 is GET-only).
+
+All network access is gated on `env.allow_network` (default **off**, mirroring
+`env.allow_shell`); the CLI `--allow-network` flag mirrors `--allow-shell`.
+File ports are *not* gated (filesystem access has its own OS-level perms).
+
+**Reserved `PortScheme` variants** (`Ftp`/`Smtp`/`Pop3`/`Nntp`/`Dns`/`Tcp`/
+`Udp`/`Whois`/`Finger`/`Daytime`) return `NetError::UnsupportedInV09` — the
+file tree is designed so v0.7+ adds sibling `ftp.rs`/`smtp.rs`/`dns.rs`/…
+under `net/` without changing the `port!` value shape or the public
+`open`/`read`/`write`/`close` surface. All net errors map to
+`EvalError::Native { message, span }` (the existing io-error pattern).
+
+### `parse` sub-rule recursion (M110)
+In `parse.rs`'s word-resolution path, a bound `Word` is resolved to its
+value to determine how it acts as a rule. The dispatch is now:
+1. `Value::Bitset` → charset match (existing M46 behavior, unchanged).
+2. `Value::Block` → **sub-rule recursion** (new): the block is parsed
+   recursively against the *same* input cursor (not a copy) — sub-rule
+   success/failure advances/affects the parent's position exactly like an
+   inline `[...]` group. Forward references work because the lookup happens
+   at rule-invocation time (the word is re-resolved each time it's
+   encountered), not at `parse`-call setup.
+3. anything else → literal-value match (existing fallback, unchanged).
+
+A depth guard (`MAX_PARSE_DEPTH`) raises `EvalError::ParseRecursionLimit`
+on self-referential or mutually-referential rules with no base case
+(e.g. `r: [r]`), avoiding a Rust stack overflow. The active `collect`
+stack is visible to sub-rule matches (no separate collect scope per
+sub-rule call).
 
 ### Error propagation
 `?` everywhere. `EvalError::Return` is the only "non-error error" — caught

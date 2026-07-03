@@ -34,7 +34,9 @@
 >   bytecode disassembly, no run), `--disasm-func <name> <file.red>`
 >   (disassemble a named func body), `--trace` (per-instr VM trace to stderr),
 >   `--module-path <dir>` (search dir for `import %file`, repeatable),
->   `--no-stdlib` (skip stdlib auto-import).
+>   `--no-stdlib` (skip stdlib auto-import), `--allow-shell` (gates
+>   `call`/`shell`), `--allow-network` (gates `read url!`/`open url!`/
+>   HTTP-port reads — default off).
 > - **Performance:** 2–4× speedup over the walker on compute-heavy programs
 >   (deep recursion, tight loops). See `BENCHMARKS.md`.
 
@@ -334,10 +336,21 @@ binding, not just dynamic lookup.
   is a lexer delimiter — use `DD-Mon-YYYY` or `YYYY-MM-DD`). `pair!`/`tuple!`
   `same?` returns `false` (immutable value types; use `=`` for structural
   equality). `tag!`/`ref!`/`image!`/`vector!`/`hash!`/`regex!`, advanced
-  `bitset!`/`logic!` ops, `object!` `on-change` reactive slots, `routine!` FFI,
-  and the full port model remain deferred. The structured error model
+  `bitset!`/`logic!` ops, `object!` `on-change` reactive slots, `routine!` FFI
+  remain deferred. The structured error model
   (`code`/`type`/`args`/`near`/`where`/`by`) IS in v0.4 (M42). Block-integer
   SetPath (`b/2: 99`) works (M38 follow-up). See `plan6-closures-modules.md`.
+- Known gap (v0.6): the `port!`/networking surface is a **synchronous,
+  GET-only subset** — `read http://`/`read https://` (via `ureq`, TLS on by
+  default) and `open`/`close`/`create`/`read port`/`write port` for files.
+  Non-HTTP protocols (FTP/SMTP/POP3/NNTP/DNS/TCP/UDP/WHOIS/Finger/Daytime)
+  are reserved as `PortScheme` variants that error in v0.6 (they return
+  `NetError::UnsupportedInV09`); HTTP methods beyond GET, request headers/
+  cookies/auth, redirect control, `write http://` (POST/PUT), and the
+  async/`Channel`-backed port model are deferred to v0.7+. Network access
+  is gated behind `--allow-network` (default off, mirroring `--allow-shell`).
+  See `plan11-functional-gaps.md` and
+  `rust-networking-protocol-crate-recommendation.md`.
 
 ### Spans
 Each `Block`/`Paren` retains the span of its `[...]`/`(...)` delimiters;
@@ -352,7 +365,11 @@ for `bind` to report unbound words with a location.
   `head` `tail` `index?` `length?`.
 - Series access: `pick` `poke` `select` `find` (with `/case` refinement).
 - Series mutate: `append` (`/only`) `insert` `change` `remove` `clear` `take`
-  `copy` (`/part`).
+  `copy` (`/part`). `sort` (`/case`/`/reverse`/`/skip size`/`/compare func`,
+  native — shadows the stdlib version). Series set ops: `unique`
+  (`/case`/`/skip`), `intersect`/`union`/`difference`/`exclude`
+  (`/case`/`/skip`) on `block!`/`string!` (the same names dispatch on
+  `bitset!` operands to the M46 implementation).
 - Iteration: `foreach` `forall` `forskip` `while` `until` (plus `loop`/
   `repeat`/`forever`/`for`).
 - Binding: `bind` `use` `in` `value?` `get` `set`.
@@ -369,6 +386,7 @@ for `bind` to report unbound words with a location.
 - Logic / bitwise: `and` `or` `not` `xor` `complement` `shift-left`
   `shift-right` `even?` `odd?`.
 - Eval: `do` `reduce` `load` (string→block; file/url-aware override in `io.rs`).
+  `mold` (`/only`) — callable native wrapping the printer (v0.6).
 - Strings: `rejoin` `reform` `join` `suffix?` `split` (`/with`) `trim`
   (`/auto` `/with` `/lines` `/all`) `replace` (`/all`) `uppercase`
   (`/part`) `lowercase` (`/part`).
@@ -381,8 +399,13 @@ for `bind` to report unbound words with a location.
   `/lines` `/binary`) `save` `load` `exists?` `size?` `modified?` `dir?`
   `make-dir` `delete` `rename` `change-dir` `what-dir` `get-env` `set-env`
   `env` `wait` `call` `shell` (the last two gated on `--allow-shell`).
+- Ports & networking (v0.6, M113): `open` (`file!`/`url!`), `close`,
+  `create` (`file!`), `port?`, `read port` (streaming for HTTP, whole-file
+  for files), `write port`. `read url!` for `http://`/`https://` routes
+  through the `net/` facade (GET-only). All network access gated on
+  `--allow-network` (default off, mirroring `--allow-shell`).
 - Constants: `none` `true` `false` `newline` `system` (object exposing
-  `system/options/{args, allow-shell, path, module-path}`).
+  `system/options/{args, allow-shell, allow-network, path, module-path}`).
 - Closures & modules (v0.5): `closure` `closure?` `module` `module?` `export`
   `import`.
 - Implemented in v0.2 (M13–M20): refinements (`/part`, `/case`, … as a
@@ -396,10 +419,22 @@ for `bind` to report unbound words with a location.
   v0.5.1 (M120–M121): **control-flow completeness** — `unless`, `forever`,
   `for` (counted, direction-aware, int/float/char), `forskip` (record-wise
   series iteration). See `plan12-control-flow.md`.
+  v0.6 (M110–M114): **core functional gaps** — `parse` named-rule recursion
+  (a bound word resolving to a `block!` is treated as a sub-rule, with a
+  depth guard); `mold` exposed as a callable native (`/only` refinement);
+  series `sort` (native, shadowing the stdlib version) + set operations
+  `unique`/`intersect`/`union`/`difference`/`exclude` on `block!`/`string!`;
+  `port!` value type + minimal synchronous networking (`open`/`close`/
+  `create`/`read port`/`read url!` for HTTP/HTTPS GET via the existing
+  `ureq` dep — TLS on by default in ureq 2.x, no new dependency) behind a
+  `--allow-network` capability gate. See `plan11-functional-gaps.md` and
+  `rust-networking-protocol-crate-recommendation.md` (the composed-facade
+  rationale).
 - Optional/deferred: shared-cell closures, `unimport`, reactivity (v0.6);
   concurrency (v0.7); `tag!`/`ref!`/`image!`/`vector!`/`hash!`/`regex!`,
-  `routine!` FFI, named timezones, the full port model. (`parse` is in
-  scope — see "Dialects".)
+  `routine!` FFI, named timezones, the full port model. `recurse`/`recur`
+  (anonymous self-reference) is deferred to v0.6+ as a possible ergonomic
+  extension — not a Red-parity gap. (`parse` is in scope — see "Dialects".)
 
 ## Dialects
 
@@ -437,6 +472,12 @@ POC rule set (matcher subset + v0.4 completions):
  - `copy word rule` (capture sub-match), `set word rule` (single value).
  - `[...]` grouping (sub-rules).
  - `(...)` (Red code side-effect, evaluated via `eval`).
+ - **Named-rule recursion (v0.6, M110):** a bound word that resolves to a
+   `block!` is treated as a named sub-rule and parsed recursively against
+   the same input cursor (a word resolving to a `bitset!` still does
+   charset matching; anything else is a literal-value match). A depth
+   guard (`MAX_PARSE_DEPTH`) raises `ParseRecursionLimit` on
+   self/mutual-reference loops with no base case.
  - Return `logic!` (matched/not).
  - **v0.4 additions (M46):** `bitset!` as a rule (matches any char in set,
    advances 1); `/case` refinement (case-sensitive string matching);
@@ -597,7 +638,9 @@ args }`.
   parser reports `MissingClose`; `quit`/`exit` at a fresh prompt exits;
   Ctrl-C discards partial input, Ctrl-D exits. Non-tty stdin reads plain
   lines without rustyline.
-- `--help` / `-h`, `--version` / `-V`, `--allow-shell` (gates `call`/`shell`).
+- `--help` / `-h`, `--version` / `-V`, `--allow-shell` (gates `call`/`shell`),
+  `--allow-network` (gates `read url!`/`open url!`/HTTP-port reads — default
+  off, mirroring `--allow-shell`).
 - `--walk` (force tree-walker), `--disasm <file>` (disassemble, no run),
   `--disasm-func <name> <file>` (disassemble a named func), `--trace`
   (per-instr VM trace to stderr).

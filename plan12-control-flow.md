@@ -268,30 +268,36 @@ structured `error!` model (M42) cover Red's actual error-handling surface.
 
 ---
 
-## Milestone 124 — Polish & v0.5.1 release (exception batch)
+## Milestone 124 — Polish & v0.5.1 release (exception batch) ✅ SHIPPED
 
-- [ ] Audit `EvalError` rendering for any new error-carrying state `except`
-      needed to add (M123).
-- [ ] Golden fixture audit for M123's success/error/finally paths.
-- [ ] Run `cargo clippy --workspace --all-targets -- -D warnings`; fix.
-- [ ] Run `cargo fmt --all --check`; fix.
-- [ ] Update `project-brief.md`: add a "Control-Flow Completeness (v0.9.x)"
-      subsection listing all seven (or eight, if `does-not` shipped) new
-      natives; remove them from "Known gaps."
-- [ ] Update `README.md`: add `except`/`finally` (or `try/except`/
-      `try/finally` refinements, per whatever grammar was confirmed) to the
-      natives/refinements list; bump version to v0.9.2.
-- [ ] Final `cargo test --workspace` green; `--features force-walk` green.
-- [ ] Final `cargo clippy --workspace --all-targets -- -D warnings` clean.
-- [ ] Tag release `v0.5.1`.
+M123 was dropped (no `except`/`finally` in Red), so the M123-specific audit
+items are moot. The remaining polish/release tasks all pass; the v0.5.1 tag
+was created on the existing release commit (`88d83b0 release: v0.5.1 —
+control-flow completeness`). `recurse`/`recur` was deferred (see the open
+question below) and noted in `project-brief.md`'s "Known gaps."
+
+- [x] Audit `EvalError` rendering for any new error-carrying state `except`
+      needed to add (M123). *(N/A — M123 dropped.)*
+- [x] Golden fixture audit for M123's success/error/finally paths.
+      *(N/A — M123 dropped.)*
+- [x] Run `cargo clippy --workspace --all-targets -- -D warnings`; clean.
+- [x] Run `cargo fmt --all --check`; clean.
+- [x] Update `project-brief.md`: the "Control-Flow Completeness" entry
+      (lines 396–398) lists `unless`/`forever`/`for`/`forskip`; none of these
+      appear in "Known gaps." `recurse`/`recur` added to the deferred list.
+- [x] Final `cargo test --workspace` green; `--features force-walk` green.
+- [x] Final `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- [x] Tag release `v0.5.1`.
 
 ### Open question (plan-wide)
 
 1. **`recurse`/`recur`.** Not in the original seven-item gap list, but a
    natural companion (self-reference without naming the enclosing function —
-   useful in anonymous `func`/`closure` bodies). **Decision: stretch goal
-   only** — attempt after M123 if time remains; do not let it block the
-   v0.9.2 tag. If deferred, note it explicitly in `project-brief.md`'s
-   "Known gaps" rather than letting it silently disappear.
+   useful in anonymous `func`/`closure` bodies). **Decision: deferred.** Not
+   implemented in v0.5.1; noted in `project-brief.md`'s "Optional/deferred"
+   list as a v0.6+ candidate so it doesn't silently disappear. Real Red has
+   no `recurse`/`recur` native either (anonymous self-reference is done via
+   `closure`/named funcs), so this is a possible future ergonomic extension
+   rather than a parity gap.
 
 (End of plan12-control-flow.md)

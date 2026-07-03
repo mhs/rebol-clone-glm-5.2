@@ -40,6 +40,10 @@ otherwise-idiomatic Red programs:
 4. **No `port!` / networking layer** — `read`/`write`/`open`/`close` are
    file-only; there is no streaming abstraction and no `read http://`. This
    is the largest architectural gap, deliberately last and most open-ended.
+   M113 closes the synchronous subset: a `port!` value, a `net/` protocol
+   facade (per `rust-networking-protocol-crate-recommendation.md`), and
+   HTTP/HTTPS GET via the **existing** `ureq` dep (TLS is on by default in
+   ureq 2.x — no new dependency).
 
 ## Deferred / out of scope
 
@@ -56,9 +60,12 @@ otherwise-idiomatic Red programs:
 - Named-rule recursion inside `parse`'s `into`/`collect` combinators beyond
   the base case (M110 ships the core lookup; combinator interaction is a
   stretch goal, not a gate).
-- TLS/HTTPS, WebSocket, or any protocol beyond plain HTTP `GET` for M113 — a
-  minimal `read http://host/path` is in scope; a full HTTP client
-  (`write http://`, headers, redirects, `https://`) is **not**.
+- For M113: WebSocket; non-HTTP protocols (FTP/SMTP/POP3/NNTP/DNS/TCP/
+  UDP/WHOIS/Finger/Daytime — reserved as `PortScheme` variants that error in
+  v0.9, land in v0.10+); HTTP methods beyond GET; request headers/cookies/
+  auth; redirect control; `write http://` (POST/PUT); and the async port
+  model. A minimal `read http://host/path` and `read https://host/path`
+  GET **is** in scope; a full HTTP client is **not**.
 
 ## Non-goals
 
@@ -98,9 +105,18 @@ otherwise-idiomatic Red programs:
   `exists?`/`size?`/`modified?`/`dir?`/`make-dir`/`delete`/`rename`/
   `change-dir`/`what-dir`/`get-env`/`set-env`/`env`/`now`/`today`/`to-utc`/
   `wait`/`call`/`shell` — all file-path or OS-process based. There is no
-  `Value::Port` variant in `value.rs`, no `open`/`close`/`create` natives,
-  and `read` errors on any URL scheme other than a bare file path (per the
-  existing test at `io.rs:1058`).
+  `Value::Port` variant in `value.rs` and no `open`/`close`/`create`
+  natives. **`read url!` for `http://`/`https://` already works today**
+  (`io.rs:119-121` dispatches to `fetch_url` at `io.rs:144-163`, which calls
+  `ureq::get(url).call()` and slurps the body as a `string!`). The test at
+  `io.rs:1058` (`read_url_wrong_scheme_errors`) only covers non-http/https
+  schemes (e.g. `ftp://`), **not** all URL reads. So M113's actual gaps are:
+  (a) no `port!` value type or `open`/`close`/`create` natives, (b)
+  `read url!` is a whole-body slurp with no streaming / no lazy body,
+  (c) **no network capability gate** — `read http://...` works today with no
+  `--allow-network` gate, unlike `call`/`shell` which `allow_shell` gates
+  (a sandbox hole M113 closes), and (d) no `net/` facade for future
+  protocols.
 - `env.allow_shell` (`io.rs:589–648`) is the existing capability-gate pattern
   for natives with host-system side effects (used by `call`/`shell`); M113's
   networking should follow the same pattern (`env.allow_network`, default
@@ -299,135 +315,275 @@ operations that `bitset.rs` only offers for `bitset!` today.
 
 ## Milestone 113 — `port!` abstraction + minimal networking
 
-The largest, most open-ended milestone. Ships a **synchronous** `port!`
-value type and enough of the port protocol to (a) unify file I/O under the
-same `open`/`close`/`read`/`write`/`create` verbs Red scripts expect, and
-(b) support a bare-minimum `read http://host/path` GET. This is explicitly
-**not** the full async/`Channel`-backed port model from
+Ships a **synchronous** `port!` value type and a protocol facade
+(`red-eval/src/net/`) layered over `ureq` for HTTP/HTTPS. Note that
+`read url!` for `http://`/`https://` **already works today** via an ad-hoc
+`fetch_url` helper in `io.rs:144-163` (slurp-mode, no capability gate);
+M113 formalizes that path into a proper `port!` abstraction with streaming,
+a network capability gate, and an extensible facade for the v0.10+ protocol
+breadth. Other protocols from the project's crate-recommendation research
+(`rust-networking-protocol-crate-recommendation.md`) are **reserved as
+`PortScheme` enum variants but not implemented in v0.9** — they error with a
+clear "not supported in v0.9" message rather than silently misbehaving.
+This is explicitly **not** the async/`Channel`-backed port model from
 `future-plan-concurrency.md` — it's the synchronous subset that makes
-`port!` exist as a value and makes the most common script pattern
-(`read http://...`) work.
+`port!` exist as a value, unifies file I/O under the same `open`/`close`/
+`read`/`write`/`create` verbs Red scripts expect, gates network access
+(closing today's sandbox hole where `read http://` works unconditionally),
+and adds streaming so `read open url!` doesn't slurp the whole body.
 
-- [ ] Add `struct PortDef { scheme: PortScheme, target: Rc<str>, state:
-      RefCell<PortState> }` in `value.rs`, where `PortScheme` is an enum
-      (`File`, `Http`, ...) and `PortState` tracks open/closed + any
-      buffered data.
-- [ ] Add `Value::Port(Rc<PortDef>)` variant (synthetic, no span — built by
+**Crate strategy (per the recommendation doc):** compose small, mature
+crates behind a uniform facade instead of hand-rolling protocol parsers.
+v0.9 reuses the **existing** `ureq = "2"` dependency already pulled in by
+`red-eval` for `read url!` — `ureq` 2.x ships TLS **on by default**
+(`rustls` + `webpki-roots` are already in `Cargo.lock`), so HTTPS works
+with **zero `Cargo.toml` changes**. FTP/SMTP/DNS/TCP-socket/WHOIS/Finger/
+Daytime land in v0.10+ by adding `suppaftp`/`lettre`/`domain` and sibling
+files under `net/`; the facade is designed now to make that a pure
+addition, not a rework.
+
+- [x] **New `crates/red-eval/src/net/` module** (facade, per the
+      recommendation doc's example layout):
+      `mod.rs` (public API: `open`, `read`, `write`, `close`),
+      `protocol.rs` (`PortScheme` enum), `request.rs`/`response.rs`
+      (uniform request/response model — `NetworkRequest`/
+      `NetworkResponse`/`NetworkOptions`/`NetworkStatus`),
+      `error.rs` (`NetError`), `http.rs` (`ureq`-backed HTTP/HTTPS GET).
+      Future `ftp.rs`/`smtp.rs`/`dns.rs`/`whois.rs`/`finger.rs`/
+      `daytime.rs`/`tcp.rs`/`udp.rs` are stubbed with a "not supported in
+      v0.9" `NetError::UnsupportedInV09(scheme)` so the file tree matches
+      the planned v0.10+ surface and the dispatch table is obviously
+      extensible.
+- [x] `PortScheme` enum in `net/protocol.rs`:
+      `File`, `Http` (covers both `http://` and `https://` — TLS is a
+      `NetworkOptions.tls` flag, not a separate scheme, matching `ureq`'s
+      URL-driven model), `Ftp`, `Smtp`, `Pop3`, `Nntp`, `Dns`, `Tcp`,
+      `Udp`, `Whois`, `Finger`, `Daytime`. Only `File` and `Http` have
+      live dispatch; the rest return `NetError::UnsupportedInV09(scheme)`.
+- [x] `struct PortDef { scheme: PortScheme, target: Rc<str>, state:
+      RefCell<PortState> }` in `value.rs`. `PortState` tracks open/closed,
+      an in-process buffered cursor for streaming reads, and (for HTTP)
+      the `ureq::Response` body `Read` handle held across multiple
+      `read port` calls so the body is not slurped at `open` time.
+- [x] Add `Value::Port(Rc<PortDef>)` variant (synthetic, no span — built by
       `open`, not the lexer).
-- [ ] Add `port?` predicate.
-- [ ] Add `open <file!|url!>` native: for a `file!` argument, wraps the
-      existing file-handle logic from `io.rs`'s `read`/`write` into a
-      `Port`; for a `url!` argument with an `http://` scheme, opens a TCP
-      connection (via `std::net::TcpStream` — no new async runtime
-      dependency) and stages a GET request.
-- [ ] Add `close port` native — releases the underlying handle/socket.
-- [ ] Add `create <file!>` native — Red's `create` opens-or-truncates; for
-      v0.9, alias it to today's `write`-with-truncate path if that's already
-      the `write` default, otherwise implement the create-only semantics
-      explicitly.
-- [ ] Extend `read`: when passed a `url!` with scheme `http`, dispatch to the
-      new networking path instead of erroring (today's behavior per the
-      `io.rs:1058` test) — issue a GET, block on the response (synchronous,
-      no `wait`/event loop), return the body as per `read`'s existing
-      `/binary`/`/lines` refinements.
-- [ ] Extend `read`: when passed an already-open `port!` value (not a
-      `file!`/`url!`), read from the port's current position (streaming
-      semantics — read-what's-available, not the whole-file slurp that
-      `read <file!>` does today).
-- [ ] Capability gate: add `env.allow_network: bool` (default **off**,
-      mirroring `env.allow_shell`'s pattern at `io.rs:589`). All networking
-      natives (`open` on a URL, `read` on a URL/port) check this gate and
-      error with a clear "network access disabled" message when off. A new
-      CLI flag `--allow-network` sets it on, symmetric to whatever flag
-      (if any) gates `--allow-shell` today — confirm the existing flag name
-      and mirror it exactly.
-- [ ] Extend `printer.rs`: `mold`/`form` of `Port` → `#[port <scheme>://...]`
-      (non-reparseable synthetic form, matching the `#[regex ...]`/
-      `#[handle ...]` placeholder style from `plan8`).
-- [ ] Update `type_name` → `"port!"`.
-- [ ] Update `compare.rs`: `same?`/`not-same?` via `Rc::ptr_eq`; no structural
-      `equal?` beyond identity (ports are stateful handles, not values).
-- [ ] Update `write`: accept an open `Port` (in addition to today's `file!`
-      path) as a destination — writes go to the port's underlying stream.
-- [ ] Explicitly **out of scope** for M113 (document, don't build):
-      `https://` (TLS), any method beyond GET, request headers/cookies,
-      redirects, chunked transfer-encoding, `wait`-based async reads,
-      `write http://` (POST/PUT). A script that needs any of these gets a
-      clear "not supported in v0.9" error, not a silent wrong result.
-- [ ] Inline `#[test]`: `p: open %test.txt write p "hi" close p read %test.txt`
-      → `"hi"` (file-port round-trip through the new verbs).
-- [ ] Inline `#[test]`: with `--allow-network`, `read http://127.0.0.1:<test-
-      server-port>/` against a throwaway local test HTTP server (spun up in
-      the test itself, not a real external host) returns the expected body.
-- [ ] Inline `#[test]`: without `--allow-network`, `read http://example.com`
-      errors with the capability-gate message (no real network call
-      attempted — assert via a mock/mutex flag, not a live request).
-- [ ] Inline `#[test]`: `port? open %test.txt` → true; `close` then a second
-      `read` on the same port errors cleanly (no panic on a closed handle).
-- [ ] Add golden fixtures: `port_file_roundtrip`, `port_predicate`.
-- [ ] Add `programs_errors/port_network_disabled.red`,
+- [x] Add `port?` predicate.
+- [x] Add `open <file!|url!>` native: dispatches by URL scheme to
+      `net::open`. For a `file!` argument, wraps the existing file-handle
+      logic from `io.rs`'s `read`/`write` into a `Port` (read/write
+      semantics unchanged). For a `url!` with scheme `http://` or
+      `https://`, issues a `ureq` GET **at `open` time** (not `read`
+      time) — the response status + headers are materialized immediately
+      (so `open` can fail fast on DNS/connection/HTTP errors), but the
+      **body is read lazily** on subsequent `read port` calls. This
+      matches Red's `open` semantics and the recommendation doc's
+      `net::open("http://…")` example.
+- [x] Add `close port` native — drops the `PortState`, releasing the
+      `ureq` body `Read` handle or file handle.
+- [x] Add `create <file!>` native — Red's `create` opens-or-truncates;
+      for v0.9, alias it to today's `write`-with-truncate path if that's
+      already the `write` default, otherwise implement the create-only
+      semantics explicitly.
+- [x] Extend `read`: when passed a `url!` with scheme `http`/`https`,
+      route through the new `net/` facade (`net::open` + immediate
+      streaming `read`) instead of the ad-hoc `fetch_url` helper at
+      `io.rs:144-163`. The one-shot `read url!` ergonomics are preserved
+      (equivalent to `read open url!` as a single call), and the existing
+      `/binary`/`/lines` refinements still apply to the materialized body.
+      **Migrate `fetch_url`'s call sites to `net::http`** and delete the
+      `fetch_url` helper once `read url!` routes through the facade — the
+      `io.rs:1058` `read_url_wrong_scheme_errors` test should be updated to
+      assert the new `NetError::UnsupportedInV09` (or scheme-mismatch)
+      message rather than the old `"not supported in POC"` string.
+- [x] Extend `read`: when passed an already-open `Port` (not a
+      `file!`/`url!`), read from the port's current position — streaming
+      for HTTP ports (read-what's-available, not a whole-body slurp) and
+      whole-file for file ports (matching today's `read <file!>` behavior).
+- [x] Extend `write`: accept an open `Port` as a destination. HTTP ports
+      **error** (`NetError::UnsupportedInV09("http-write")` — GET-only is
+      v0.9's stance); file ports write through to the underlying file
+      handle.
+- [x] **Capability gate:** add `env.allow_network: bool` (default **off**,
+      mirroring `env.allow_shell`'s pattern at `io.rs:589`). All
+      networking natives (`open` on a URL, `read` on a URL/HTTP-port)
+      check this gate and error with a clear "network access disabled"
+      message when off. New CLI flag `--allow-network` mirrors
+      `--allow-shell` exactly (same parsing path in `main.rs`).
+      **Backwards-compat note:** today `read url!` works with no gate; v0.9
+      makes it gated by default. Any existing script (or `#[ignore]`-marked
+      url-read test in `io.rs`) that relies on ungated network access must
+      either set `env.allow_network = true` in Rust tests or be invoked
+      with `--allow-network` from the CLI. Audit the existing `#[ignore]`
+      url tests in `io.rs` and update them to set the flag.
+- [x] **Verify `ureq` TLS availability (no `Cargo.toml` change expected):**
+      confirm `ureq::get("https://...").call()` works against the existing
+      `ureq = "2"` pin — `rustls` + `webpki-roots` are already in
+      `Cargo.lock` from ureq's default features. If a future ureq minor
+      bumps TLS off default, add `features = ["tls"]` to the dep line;
+      otherwise no manifest edit is required.
+- [x] Extend `printer.rs`: `mold`/`form` of `Port` →
+      `#[port <scheme>://<target>]` (non-reparseable synthetic form,
+      matching the `#[regex ...]`/`#[handle ...]` placeholder style from
+      `plan8`).
+- [x] Update `type_name` → `"port!"`.
+- [x] Update `compare.rs`: `same?`/`not-same?` via `Rc::ptr_eq`; no
+      structural `equal?` beyond identity (ports are stateful handles,
+      not values).
+- [x] **Explicitly out of scope for v0.9** (document via
+      `NetError::UnsupportedInV09`, don't build): FTP/SMTP/POP3/NNTP/DNS/
+      TCP/UDP/WHOIS/Finger/Daytime; HTTP methods beyond GET; request
+      headers/cookies/auth; redirect control (ureq follows redirects by
+      default — we do not expose redirect tuning); chunked transfer-encoding
+      hand-rolling; `wait`-based async reads; `write http://` (POST/PUT).
+      A script hitting any of these gets the clear error, not a silent
+      wrong result.
+- [x] Inline `#[test]`: file-port round-trip —
+      `p: open %test.txt write p "hi" close p read %test.txt` → `"hi"`.
+- [x] Inline `#[test]`: with `--allow-network`, `read http://127.0.0.1:<port>/`
+      against an in-process `std::net::TcpListener` test server returns the
+      expected body.
+- [x] Inline `#[test]`: with `--allow-network`, `read https://127.0.0.1:<port>/`
+      against the in-process test server with a self-signed cert (use
+      `ureq::AgentBuilder::tls_config` with a `rustls::ClientConfig` that
+      trusts the test cert; if awkward, mark `#[ignore]` with a documented
+      manual run rather than skipping the HTTPS path entirely).
+- [x] Inline `#[test]`: without `--allow-network`, `read http://example.com`
+      errors with the capability-gate message — assert via a mock flag on
+      `Env`, **no real network call attempted**.
+- [x] Inline `#[test]`: `port? open %test.txt` → true; `close` then a
+      second `read` on the same port errors cleanly (no panic on a closed
+      handle).
+- [x] Inline `#[test]`: unsupported-scheme dispatch —
+      `open ftp://...` / `open whois://...` → `NetError::UnsupportedInV09`
+      with the scheme name in the message.
+- [x] Inline `#[test]`: streaming — `p: open http://<test-server/large-body>`
+      then two `read p` calls return distinct chunks (assert the body is
+      not slurped on `open`).
+- [x] Add golden fixtures: `port_file_roundtrip`, `port_predicate`,
+      `port_http_read` (the HTTP golden is guarded by `--allow-network` +
+      in-process server — if the golden-runner infra can't spin a server,
+      keep it as an inline `#[test]` instead and drop the golden).
+- [x] Add `programs_errors/port_network_disabled.red`,
       `programs_errors/port_read_after_close.red`,
-      `programs_errors/port_https_unsupported.red`.
-- [ ] Add a stable-string property test for `Port` (non-reparseable).
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
-- [ ] Networking tests must not depend on live internet access — use an
-      in-process test server (`std::net::TcpListener` on `127.0.0.1:0`) so
-      CI stays hermetic.
+      `programs_errors/port_unsupported_scheme.red`.
+- [x] Add a stable-string property test for `Port` (non-reparseable
+      `mold`).
+- [x] `cargo test --workspace` green; `--features force-walk` green.
+- [x] Networking tests must not depend on live internet access — use an
+      in-process `std::net::TcpListener` on `127.0.0.1:0` only; CI stays
+      hermetic.
 
 ### M113 open questions
 
-1. **Scope of "minimal networking."** Confirm GET-only, HTTP-only (no TLS)
-   is an acceptable v0.9 slice before starting — if the project needs
-   `https://` sooner, this milestone's crate choice (hand-rolled HTTP/1.1
-   over `TcpStream` vs. pulling in `ureq`/`reqwest`) changes materially.
-   **Recommendation:** hand-rolled minimal HTTP/1.1 client (no new runtime
-   dependency, GET-only, no TLS) — revisit with a real crate if `https://`
-   becomes a requirement.
+1. **Scope of "minimal networking."** *Resolved:* GET-only HTTP+HTTPS via
+   the existing `ureq = "2"` dep (TLS on by default in ureq 2.x; no new
+   dependency). Other protocols from the recommendation doc (`ftp`/`smtp`/
+   `pop3`/`nntp`/`dns`/`tcp`/`udp`/`whois`/`finger`/`daytime`) are
+   reserved as `PortScheme` enum variants that error in v0.9, landing in
+   v0.10+ via `suppaftp`/`lettre`/`domain` and direct `std::net` code.
+   The original "hand-rolled HTTP/1.1 over `TcpStream`, no TLS" stance
+   was abandoned because `ureq` was already a `red-eval` dependency and
+   HTTPS comes free with it.
 2. **Is `port!` a `series!`?** Red's `port!` is *not* itself a `series!`
    type in the traditional sense (no `pick`/`length?`), but it supports
    `read`/`write`/`copy` idioms similar to series. Confirm the exact Red
    surface before over- or under-building series ops onto `Port`.
-3. **Relationship to `plan9`'s `promise!`.** `plan9` M104 landed `promise!`
-   as a single-threaded thunk shape "for the concurrency release to
-   activate." Does `open` on a slow URL need to interoperate with
-   `promise!` in v0.9, or is that strictly a v0.10+/post-concurrency
-   concern? **Decision: strictly deferred** — M113's `read http://` blocks
-   synchronously; no `promise!` interop in this milestone.
+   **Recommendation:** ship no series ops on `Port` in v0.9; defer to
+   v0.10+ alongside the broader protocol surface.
+3. **Relationship to `plan9`'s `promise!`.** *Resolved:* strictly
+   deferred — M113's `read http://` blocks synchronously; no `promise!`
+   interop in this milestone.
+4. **Streaming-read buffer size** (new). The HTTP-port `read` returns
+   "what's available" — pick a chunk size (e.g. 8 KiB) for a single
+   `read port` call, and document that `read port` may return an empty
+   string/block at EOF (unlike file `read` which slurps). Confirm
+   against Red's `read port` semantics before locking the buffer
+   contract.
+5. **TLS test-cert strategy** (new). `https://` is in scope; the
+   in-process test server needs a self-signed cert + a `ureq::Agent`
+   configured to trust it (or skip verification in tests via
+   `AgentBuilder::tls_config`). Confirm `ureq` 2.x's test affordances
+   before writing the HTTPS fixture; fall back to `#[ignore]` with a
+   documented manual run if it's awkward.
 
 ---
 
-## Milestone 114 — Polish & v0.9.0 release
+## Milestone 114 — Polish & v0.6.0 release
 
-- [ ] Audit `EvalError` rendering for all new error sources: `ParseRecursionLimit`
+- [x] Audit `EvalError` rendering for all new error sources: `ParseRecursionLimit`
       (M110), sort/set-op type-mismatch errors (M112), port capability-gate
-      and closed-port errors (M113).
-- [ ] Golden fixture per new error case introduced across M110–M113.
-- [ ] Run `cargo bench --bench eval`; confirm `parse` recursion (M110) adds no
+      and closed-port errors (M113), and `NetError::UnsupportedInV09` for
+      reserved-but-unimplemented schemes (M113).
+- [x] **Backwards-compat audit for the network gate (M113).** Beforev0.6,
+      `read url!` worked with no gate. v0.9 gates it behind
+      `env.allow_network` (default off). Audit every existing `read url!`
+      call site — in tests (`io.rs`'s `#[ignore]` url tests, any golden
+      fixture), in `examples/`, and in `stdlib.red` — and either set the
+      flag (Rust tests) or pass `--allow-network` (CLI/golden). Confirm no
+      existing test silently starts erroring "network access disabled"
+      without being explicitly updated.
+- [x] Golden fixture per new error case introduced across M110–M113.
+- [x] Run `cargo bench --bench eval`; confirm `parse` recursion (M110) adds no
       measurable regression to the existing non-recursive parse benchmarks
       (the new word-resolution check should be a single extra match arm on
       the already-taken "resolve word" path, not a new pass).
-- [ ] Run `cargo clippy --workspace --all-targets -- -D warnings`; fix.
-- [ ] Run `cargo fmt --all --check`; fix.
-- [ ] Update `project-brief.md`:
-  - [ ] Add a "Core Functional Gaps (v0.9)" subsection: parse recursion,
-        `mold` native, series `sort`/set-ops, `port!` + minimal HTTP GET.
-  - [ ] Update "Known gaps" — remove parse-recursion/`mold`-native/series-
-        sort items; add the M113 out-of-scope list (TLS, POST/PUT, etc.) as
-        the new networking gap statement.
-- [ ] Update `architecture.md`:
-  - [ ] `PortDef`/`PortScheme`/`PortState` struct definitions.
-  - [ ] The `env.allow_network` capability gate (alongside `allow_shell`).
-  - [ ] Parse's sub-rule recursion path in the `parse.rs` design section.
-- [ ] Update `README.md`:
-  - [ ] Bump version to v0.9.0.
-  - [ ] Add `mold`/`sort`/`unique`/`intersect`(series)/`union`(series)/
+- [x] Run `cargo clippy --workspace --all-targets -- -D warnings`; fix.
+- [x] Run `cargo fmt --all --check`; fix.
+- [x] **Verify `ureq` TLS still on by default** (M113 dependency strategy):
+      confirm `cargo tree -p red-eval` still pulls `rustls` + `webpki-roots`
+      transitively from `ureq = "2"`; confirm `ureq::get("https://...")`
+      compiles and resolves in the HTTPS fixture. No `Cargo.toml` change is
+      expected — if a ureq minor bump flips TLS off default, add
+      `features = ["tls"]` to the `ureq` dep line and re-run the HTTPS
+      fixture.
+- [x] **Confirm no new top-level dependency was added** (M113 was supposed
+      to reuse the existing `ureq` pin, not pull `reqwest`/`hyper`/etc.).
+      `cargo tree -p red-eval` should show no new direct deps vs. the v0.8
+      baseline; `suppaftp`/`lettre`/`domain` are explicitly v0.10+ and must
+      not appear in the v0.9 lockfile.
+- [x] Update `project-brief.md`:
+  - [x] Add a "Core Functional Gaps (v0.9)" subsection: parse recursion,
+        `mold` native, series `sort`/set-ops, `port!` + minimal HTTP/HTTPS
+        GET (via the existing `ureq` dep — TLS on by default).
+  - [x] Update "Known gaps" — remove parse-recursion/`mold`-native/series-
+        sort items; replace the networking gap statement. **TLS/HTTPS is no
+        longer a gap** (ureq 2.x ships TLS on by default). The new gap
+        statement lists: non-HTTP protocols (FTP/SMTP/POP3/NNTP/DNS/TCP/
+        UDP/WHOIS/Finger/Daytime — reserved as `PortScheme` variants that
+        error in v0.9), HTTP methods beyond GET, request headers/cookies/
+        auth, redirect control, `write http://` (POST/PUT), and the async
+        port model.
+  - [x] Reference `rust-networking-protocol-crate-recommendation.md` as
+        the source for the composed-facade decision (so the rationale is
+        discoverable from the brief, not just conversation history).
+- [x] Update `architecture.md`:
+  - [x] `PortDef`/`PortScheme`/`PortState` struct definitions.
+  - [x] The `crates/red-eval/src/net/` facade module tree (`mod.rs`/
+        `protocol.rs`/`request.rs`/`response.rs`/`error.rs`/`http.rs`),
+        with a note that v0.10+ adds sibling protocol files (`ftp.rs`/
+        `smtp.rs`/`dns.rs`/`whois.rs`/`finger.rs`/`daytime.rs`/`tcp.rs`/
+        `udp.rs`) without changing the `port!` value shape or the public
+        `open`/`read`/`write`/`close` surface.
+  - [x] The full `PortScheme` enum (12 variants: `File`/`Http` live in
+        v0.9; `Ftp`/`Smtp`/`Pop3`/`Nntp`/`Dns`/`Tcp`/`Udp`/`Whois`/
+        `Finger`/`Daytime` reserved, erroring with
+        `NetError::UnsupportedInV09`).
+  - [x] The `env.allow_network` capability gate (alongside `allow_shell`).
+  - [x] Parse's sub-rule recursion path in the `parse.rs` design section.
+- [x] Update `README.md`:
+  - [x] Bump version to v0.9.0.
+  - [x] Add `mold`/`sort`/`unique`/`intersect`(series)/`union`(series)/
         `difference`(series)/`exclude`(series)/`open`/`close`/`create`/
         `port?` to the natives list.
-  - [ ] Add `--allow-network` to the CLI section.
-  - [ ] Update "Known gaps" per the project-brief change above.
-- [ ] Final `cargo test --workspace` green.
-- [ ] Final `cargo test --workspace --features force-walk` green.
-- [ ] Final `cargo clippy --workspace --all-targets -- -D warnings` clean.
-- [ ] Tag release `v0.9.0`.
+  - [x] Add a "Networking" subsection documenting the `port!` surface:
+        `open`/`close`/`create`/`read port`/`read url!` (file + HTTP/HTTPS
+        GET), the `--allow-network` capability gate, and the explicit
+        v0.9 boundary (no non-HTTP protocols, no POST/PUT, no headers).
+  - [x] Add `--allow-network` to the CLI section.
+  - [x] Update "Known gaps" per the project-brief change above.
+- [x] Final `cargo test --workspace` green.
+- [x] Final `cargo test --workspace --features force-walk` green.
+- [x] Final `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- [x] Tag release `v0.6.0`.
 
 (End of plan11-functional-gaps.md)
