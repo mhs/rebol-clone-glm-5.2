@@ -372,6 +372,7 @@ fn eval_prefix(
         | Value::Percent { .. }
         | Value::Money { .. }
         | Value::Issue { .. }
+        | Value::Email { .. }
         | Value::String { .. }
         | Value::String8 { .. }
         | Value::LitWord { .. }
@@ -558,7 +559,8 @@ fn eval_path_call(
         // M44: literal-headed data paths (`100x200/x`, `255.0.0/r`,
         // `[1 2 3]/1`). The head value is the data itself — no resolution
         // needed; walk the tail directly.
-        Value::Pair { .. } | Value::Tuple { .. } | Value::Block { .. } => {
+        // M80: email! is pathable (`foo@bar.com/user`, `/host`).
+        Value::Pair { .. } | Value::Tuple { .. } | Value::Block { .. } | Value::Email { .. } => {
             let result = walk_data_path(parts[0].clone(), &parts[1..], env, path_span)?;
             return Ok(result);
         }
@@ -766,6 +768,25 @@ fn select_field(current: &Value, sym: &Symbol, path_span: Span) -> Result<Value,
             _ => Err(EvalError::Native {
                 message: format!(
                     "date! has no field {} (only /year /month /day /time /weekday /yearday /week /zone)",
+                    sym.as_str()
+                ),
+                span: path_span,
+            }),
+        },
+        // M80: email! path accessors. `/user` returns the local part (before
+        // `@`); `/host` returns the host part (after `@`).
+        Value::Email { addr, .. } => match sym.as_str() {
+            "user" => {
+                let local = addr.split('@').next().unwrap_or("");
+                Ok(Value::string(std::rc::Rc::from(local)))
+            }
+            "host" => {
+                let host = addr.split('@').nth(1).unwrap_or("");
+                Ok(Value::string(std::rc::Rc::from(host)))
+            }
+            _ => Err(EvalError::Native {
+                message: format!(
+                    "email! has no field {} (only /user and /host)",
                     sym.as_str()
                 ),
                 span: path_span,
@@ -1086,9 +1107,12 @@ pub(crate) fn eval_get_path(
         // M44: literal-headed data paths (`:100x200/x`). The head value is
         // the data itself — no resolution needed.
         // M45: `date` head for `:29-Jun-2024/year`.
-        Value::Pair { .. } | Value::Tuple { .. } | Value::Block { .. } | Value::Date { .. } => {
-            parts[0].clone()
-        }
+        // M80: `email` head for `:foo@bar.com/user`.
+        Value::Pair { .. }
+        | Value::Tuple { .. }
+        | Value::Block { .. }
+        | Value::Date { .. }
+        | Value::Email { .. } => parts[0].clone(),
         other => {
             return Err(EvalError::Native {
                 message: format!(

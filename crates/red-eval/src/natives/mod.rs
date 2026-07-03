@@ -141,6 +141,7 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Percent { .. } => "percent!",
         Value::Money { .. } => "money!",
         Value::Issue { .. } => "issue!",
+        Value::Email { .. } => "email!",
         Value::String { .. } => "string!",
         Value::Char { .. } => "char!",
         Value::Pair { .. } => "pair!",

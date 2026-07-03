@@ -28,6 +28,8 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Money { amount: a, .. }, Value::Money { amount: b, .. }) => a == b,
         // M80: issue! equality by string compare.
         (Value::Issue { s: x, .. }, Value::Issue { s: y, .. }) => x == y,
+        // M80: email! equality by string compare.
+        (Value::Email { addr: x, .. }, Value::Email { addr: y, .. }) => x == y,
         (Value::Integer { n: x, .. }, Value::Float { f: y, .. }) => (*x as f64) == *y,
         (Value::Float { f: x, .. }, Value::Integer { n: y, .. }) => *x == (*y as f64),
         (Value::String { s: x, .. }, Value::String { s: y, .. }) => x == y,

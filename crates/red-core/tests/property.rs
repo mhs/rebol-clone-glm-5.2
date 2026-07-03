@@ -58,6 +58,12 @@ fn gen_value(_depth: u32) -> BoxedStrategy<Value> {
             s: s.into(),
             span: Span::new(0, 0),
         }),
+        // M80: email! literals — short `user@host.tld` forms that round-trip
+        // through the lexer's email detection.
+        "[a-z]{1,6}@[a-z]{1,6}\\.[a-z]{2,4}".prop_map(|s: String| Value::Email {
+            addr: s.into(),
+            span: Span::new(0, 0),
+        }),
         // mold form `$<dollars>.<DD>[:CCC]` round-trips. Keep cents small to
         // avoid i64 edge cases; use 3 currencies (USD default, EUR/JPY
         // non-default to exercise the suffix).

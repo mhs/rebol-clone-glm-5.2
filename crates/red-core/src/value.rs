@@ -268,6 +268,12 @@ pub enum Value {
     /// as the raw `Rc<str>` body (without the leading `#`). Hashable (a member
     /// of `any-string!` in Red). Pathable (`issue/x`).
     Issue { s: Rc<str>, span: Span },
+    /// `foo@bar.com` — an email! literal (M80). Source-origin (the lexer
+    /// detects a word run containing a single `@` with at least one dot in
+    /// the host portion); carries the byte-offset span of the whole token.
+    /// Stored as the raw address `Rc<str>`. Hashable (a member of
+    /// `any-string!` in Red). Pathable (`email/user`, `email/host`).
+    Email { addr: Rc<str>, span: Span },
     /// `"..."` / `{...}` string literal.
     String { s: Rc<str>, span: Span },
     /// `#"a"` — a char! literal. Source-origin (the lexer scans the `#"-led
@@ -618,6 +624,8 @@ impl MapKey {
             Value::String { s, .. } => MapKey::Str(s.clone()),
             // M80: issue! is hashable (a member of any-string! in Red).
             Value::Issue { s, .. } => MapKey::Str(s.clone()),
+            // M80: email! is hashable (a member of any-string! in Red).
+            Value::Email { addr, .. } => MapKey::Str(addr.clone()),
             Value::Word { sym, .. }
             | Value::SetWord { sym, .. }
             | Value::GetWord { sym, .. }
@@ -1245,6 +1253,7 @@ impl Value {
             | Value::Percent { span, .. }
             | Value::Money { span, .. }
             | Value::Issue { span, .. }
+            | Value::Email { span, .. }
             | Value::String { span, .. }
             | Value::Char { span, .. }
             | Value::Pair { span, .. }
@@ -1359,6 +1368,15 @@ impl Value {
     pub fn issue(s: impl Into<Rc<str>>) -> Self {
         Value::Issue {
             s: s.into(),
+            span: Span::default(),
+        }
+    }
+
+    /// Constructor shorthand for an email! literal with a zero span
+    /// (test/REPL use).
+    pub fn email(addr: impl Into<Rc<str>>) -> Self {
+        Value::Email {
+            addr: addr.into(),
             span: Span::default(),
         }
     }
@@ -1933,6 +1951,10 @@ mod tests {
             s: Rc::from("ABC"),
             span: s
         });
+        check!(Value::Email {
+            addr: Rc::from("foo@bar.com"),
+            span: s
+        });
         check!(Value::String {
             s: Rc::from("x"),
             span: s
@@ -2057,6 +2079,7 @@ mod tests {
                 s: issue_s,
                 span: s,
             },
+            Value::Email { addr, .. } => Value::Email { addr, span: s },
             Value::String { s: ss, .. } => Value::String { s: ss, span: s },
             Value::Char { c, .. } => Value::Char { c, span: s },
             Value::Pair { x, y, .. } => Value::Pair { x, y, span: s },

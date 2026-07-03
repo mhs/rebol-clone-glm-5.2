@@ -670,6 +670,7 @@ fn compile_prefix(
         | Value::Percent { .. }
         | Value::Money { .. }
         | Value::Issue { .. }
+        | Value::Email { .. }
         | Value::String { .. }
         | Value::Char { .. }
         | Value::Pair { .. }

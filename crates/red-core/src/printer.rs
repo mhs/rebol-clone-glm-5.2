@@ -24,6 +24,7 @@ pub fn mold(value: &Value, out: &mut String) {
             out.push('#');
             out.push_str(s);
         }
+        Value::Email { addr, .. } => out.push_str(addr),
         Value::String { s, .. } => mold_string(s, out),
         Value::Char { c, .. } => mold_char(*c, out),
         Value::Pair { x, y, .. } => {
@@ -200,6 +201,7 @@ pub fn form(value: &Value, out: &mut String) {
         Value::Percent { value, .. } => mold_percent(*value, out),
         Value::Money { amount, .. } => mold_money(amount, out),
         Value::Issue { s, .. } => out.push_str(s),
+        Value::Email { addr, .. } => out.push_str(addr),
         Value::String { s, .. } => out.push_str(s),
         Value::Char { c, .. } => out.push(*c),
         Value::Pair { x, y, .. } => {
@@ -895,6 +897,36 @@ mod tests {
                     assert_eq!(s.as_ref(), body, "round-trip mismatch: {body} → {molded}");
                 }
                 other => panic!("expected Issue token for {molded}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn mold_email() {
+        // M80: email molds as the raw address (no quoting).
+        assert_eq!(mold_to_string(&Value::email("foo@bar.com")), "foo@bar.com");
+        assert_eq!(
+            mold_to_string(&Value::email("user@host.example.org")),
+            "user@host.example.org"
+        );
+    }
+
+    #[test]
+    fn mold_email_round_trips_via_lexer() {
+        for addr in ["foo@bar.com", "user@host.example.org", "a@b.co"] {
+            let v = Value::email(addr);
+            let molded = mold_to_string(&v);
+            let toks = crate::lexer::lex(&molded).expect("lex email");
+            assert_eq!(toks.len(), 1, "{addr} molded to {molded:?}");
+            match &toks[0].kind {
+                crate::lexer::TokenKind::Email(parsed) => {
+                    assert_eq!(
+                        parsed.as_ref(),
+                        addr,
+                        "round-trip mismatch: {addr} → {molded}"
+                    );
+                }
+                other => panic!("expected Email token for {molded}, got {other:?}"),
             }
         }
     }

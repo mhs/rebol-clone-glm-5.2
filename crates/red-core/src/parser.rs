@@ -163,6 +163,15 @@ impl<'a> Parser<'a> {
                 // M80: fold adjacent refinements (`#ABC/x`) into a path.
                 self.assemble_path(head, tok.span)
             }
+            TokenKind::Email(addr) => {
+                self.advance()?;
+                let head = Value::Email {
+                    addr,
+                    span: tok.span,
+                };
+                // M80: fold adjacent refinements (`foo@bar.com/user`) into a path.
+                self.assemble_path(head, tok.span)
+            }
             TokenKind::String(s) => {
                 self.advance()?;
                 Ok(Value::String { s, span: tok.span })

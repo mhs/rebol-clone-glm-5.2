@@ -416,6 +416,7 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
         "percent!" | "percent" => make_percent(spec)?,
         "money!" | "money" => make_money(spec)?,
         "issue!" | "issue" => make_issue(spec)?,
+        "email!" | "email" => make_email(spec)?,
         "string!" | "string" => make_string(spec)?,
         "block!" | "block" => make_block(spec)?,
         "file!" | "file" => make_file(spec)?,
@@ -973,6 +974,71 @@ fn to_issue(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value,
     make_issue(&args[0])
 }
 
+/// `to-email value` — M80. Coerce to `email!`. Same as `make email!`.
+/// - `string!` → parse the string as an email address.
+/// - `email!` → identity.
+/// - `block!` → `[user host]` (two strings/words joined with `@`).
+fn to_email(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "to-email", 1, args.len()));
+    }
+    make_email(&args[0])
+}
+
+/// `make email! spec` (M80) / `to-email`:
+/// - `string!` → the string as the address.
+/// - `email!` → identity.
+/// - `block!` → `[user host]` (two strings/words joined with `@`; host must
+///   contain a dot, matching the lexer's validation).
+fn make_email(spec: &Value) -> Result<Value, EvalError> {
+    match spec {
+        Value::Email { addr, .. } => Ok(Value::email(addr.clone())),
+        Value::String { s, .. } => {
+            // Validate by lexing the string — if the lexer produces an Email
+            // token, use it; otherwise accept the raw string (the lexer may
+            // reject some forms that make email! should accept from string).
+            let toks = lexer::lex(s).map_err(|e| native_err(spec, e.to_string()))?;
+            if let Some(t) = toks.first() {
+                if let lexer::TokenKind::Email(addr) = &t.kind {
+                    return Ok(Value::email(addr.clone()));
+                }
+            }
+            // Fallback: accept the raw string as an email address.
+            Ok(Value::email(s.clone()))
+        }
+        Value::Block { series, .. } => {
+            let data = series.data.borrow();
+            if data.len() != 2 {
+                return Err(EvalError::Native {
+                    message: "make email!: block must be [user host]".into(),
+                    span: spec.span_or_default(),
+                });
+            }
+            let to_str = |v: &Value| -> Result<String, EvalError> {
+                match v {
+                    Value::String { s, .. } => Ok(s.to_string()),
+                    w if word_sym(w).is_some() => Ok(word_sym(w).unwrap().as_str().to_string()),
+                    _ => Err(EvalError::TypeError {
+                        expected: "string! or word! (email component)",
+                        found: type_name(v),
+                        span: v.span_or_default(),
+                    }),
+                }
+            };
+            let user = to_str(&data[0])?;
+            let host = to_str(&data[1])?;
+            Ok(Value::email(std::rc::Rc::from(
+                format!("{user}@{host}").as_str(),
+            )))
+        }
+        other => Err(EvalError::TypeError {
+            expected: "string!, email!, or block!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
 /// `make issue! spec` (M80) / `to-issue`:
 /// - `string!` → `#<string>`.
 /// - `integer!` → `#<decimal>`.
@@ -1116,6 +1182,7 @@ fn to_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
         "percent!" | "percent" => to_percent(one, &RefineArgs::empty(), env),
         "money!" | "money" => to_money(one, &RefineArgs::empty(), env),
         "issue!" | "issue" => to_issue(one, &RefineArgs::empty(), env),
+        "email!" | "email" => to_email(one, &RefineArgs::empty(), env),
         "string!" | "string" => to_string(one, &RefineArgs::empty(), env),
         "block!" | "block" => to_block(one, &RefineArgs::empty(), env),
         "word!" | "word" => to_word_kind(one, "to", WordKind::Word),
@@ -1209,6 +1276,7 @@ pub fn register_convert_natives(env: &mut Env) {
     reg(env, "to-percent", to_percent as NF, 1);
     reg(env, "to-money", to_money as NF, 1);
     reg(env, "to-issue", to_issue as NF, 1);
+    reg(env, "to-email", to_email as NF, 1);
     reg(env, "to-string", to_string as NF, 1);
     reg(env, "to-block", to_block as NF, 1);
     reg(env, "to-word", to_word as NF, 1);

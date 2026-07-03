@@ -29,6 +29,11 @@ pub enum TokenKind {
     /// `Rc<str>` (without the leading `#`). Produced by `scan_issue` when a
     /// `#` is followed by anything other than `"` (char!) or `{` (binary!).
     Issue(Rc<str>),
+    /// `foo@bar.com` — an email! literal (M80). Stored as the raw address
+    /// `Rc<str>`. Produced when a word run contains a single `@` with at
+    /// least one dot in the host portion. Bare `user@localhost` (no dot in
+    /// host) is NOT an email! — it lexes as a plain Word.
+    Email(Rc<str>),
     String(Rc<str>),
     Word(Symbol),
     SetWord(Symbol),
@@ -102,6 +107,12 @@ pub enum LexError {
     /// valid issue! shape; `#"` and `#{` are handled by the char!/binary!
     /// scanners before issue! is considered.
     InvalidIssue { span: Span, chars: String },
+    /// A `@`-containing word run that looks like an email! but has an empty
+    /// local part, empty host, or no dot in the host portion (e.g. `@bar.com`,
+    /// `foo@`, `foo@bar`). Bare `user@localhost` (no dot) lexes as a Word
+    /// instead — this error is reserved for runs that match the email shape
+    /// structurally but fail validation.
+    InvalidEmail { span: Span, chars: String },
     /// A word-shaped token had an empty body (e.g. `::`, `''`).
     InvalidWord { span: Span },
     /// `{...` hit EOF with braces still open. `depth` is the number of
@@ -136,6 +147,7 @@ impl LexError {
             | LexError::InvalidPercent { span, .. }
             | LexError::InvalidMoney { span, .. }
             | LexError::InvalidIssue { span, .. }
+            | LexError::InvalidEmail { span, .. }
             | LexError::InvalidWord { span }
             | LexError::UnbalancedBrace { span, .. }
             | LexError::InvalidChar { span, .. }
@@ -165,6 +177,9 @@ impl std::fmt::Display for LexError {
             }
             LexError::InvalidIssue { chars, .. } => {
                 write!(f, "invalid issue literal: {chars:?}")
+            }
+            LexError::InvalidEmail { chars, .. } => {
+                write!(f, "invalid email literal: {chars:?}")
             }
             LexError::InvalidWord { .. } => write!(f, "invalid word (empty body)"),
             LexError::UnbalancedBrace { depth, .. } => {
@@ -329,6 +344,25 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                 let (end, kind) = scan_url(src, &mut i, scheme_end);
                 out.push(Token {
                     kind,
+                    span: Span::new(start, end),
+                });
+                continue;
+            }
+        }
+
+        // M80: Email literal: a word run containing `@` with at least one dot
+        // in the host portion (`foo@bar.com`). `@` is a word character today
+        // (not a delimiter), so `foo@bar.com` currently scans as a single
+        // Word. Detect the email shape here (after URL, before the
+        // number/date checks) and route to `scan_email`. A bare
+        // `user@localhost` (no dot after `@`) is NOT an email! — it falls
+        // through to `scan_word`.
+        if c.is_ascii_alphabetic() {
+            if let Some(end) = detect_email(src, i) {
+                let addr: Rc<str> = Rc::from(&src[i..end]);
+                i = end;
+                out.push(Token {
+                    kind: TokenKind::Email(addr),
                     span: Span::new(start, end),
                 });
                 continue;
@@ -1411,6 +1445,55 @@ fn url_scheme_end(src: &str, i: usize) -> Option<usize> {
     }
 }
 
+/// M80: peek ahead from `start` to determine if the word run is an email!
+/// literal. Returns `Some(end)` if the run matches the email shape
+/// (`<word-chars>@<word-chars>.<word-chars>`); `None` otherwise (so the
+/// caller falls through to `scan_word`). `@` is a word character today
+/// (not a delimiter), so the whole `foo@bar.com` run scans as one token.
+///
+/// Rules (Red parity):
+/// - exactly one `@` in the run.
+/// - non-empty local part (before `@`).
+/// - non-empty host part (after `@`) with at least one `.` and a non-empty
+///   TLD (the segment after the last `.`).
+/// - the run ends at a delimiter or EOF.
+///
+/// `user@localhost` (no dot after `@`) is NOT an email! — returns `None`.
+fn detect_email(src: &str, start: usize) -> Option<usize> {
+    let bytes = src.as_bytes();
+    // Scan the full word run (same chars as scan_word accepts: non-delimiter).
+    let mut j = start;
+    while j < bytes.len() && !is_delimiter(bytes[j]) {
+        j += 1;
+    }
+    let run = &src[start..j];
+    // Find exactly one `@`.
+    let at_pos = run.find('@')?;
+    // Reject multiple `@`.
+    if run[at_pos + 1..].contains('@') {
+        return None;
+    }
+    let local = &run[..at_pos];
+    let host = &run[at_pos + 1..];
+    // Non-empty local, non-empty host.
+    if local.is_empty() || host.is_empty() {
+        return None;
+    }
+    // Host must contain at least one `.` with a non-empty TLD after it.
+    let last_dot = host.rfind('.')?;
+    let tld = &host[last_dot + 1..];
+    if tld.is_empty() {
+        return None;
+    }
+    // Local and host must be word-char runs (alphanumeric + common word chars).
+    // Reject if any char is not a valid email word char (allowing `.`/`-`/`_`).
+    let is_email_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+');
+    if !local.chars().all(is_email_char) || !host.chars().all(is_email_char) {
+        return None;
+    }
+    Some(j)
+}
+
 /// Scan a url! literal starting at `i`. `scheme_end` is the offset of the
 /// `:` in `://` (returned by `url_scheme_end`). Consumes the scheme, `://`,
 /// and a run of non-delimiter bytes (where `/` is allowed). Returns the end
@@ -2108,6 +2191,28 @@ mod tests {
         // `#` followed by a delimiter (space, bracket) is an InvalidIssue.
         assert!(matches!(lex("# "), Err(LexError::InvalidIssue { .. })));
         assert!(matches!(lex("#["), Err(LexError::InvalidIssue { .. })));
+    }
+
+    #[test]
+    fn email_literal() {
+        // M80: a word run containing `@` with a dot in the host lexes as Email.
+        assert_eq!(
+            one("foo@bar.com"),
+            TokenKind::Email(std::rc::Rc::from("foo@bar.com"))
+        );
+        assert_eq!(
+            one("user@host.example.org"),
+            TokenKind::Email(std::rc::Rc::from("user@host.example.org"))
+        );
+    }
+
+    #[test]
+    fn email_bare_host_not_email() {
+        // M80: `user@localhost` (no dot in host) is NOT an email! — it lexes
+        // as a Word (regression guard).
+        let toks = lex("user@localhost").expect("lex");
+        assert_eq!(toks.len(), 1);
+        assert!(matches!(toks[0].kind, TokenKind::Word(_)));
     }
 
     #[test]
