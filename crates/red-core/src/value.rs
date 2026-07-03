@@ -379,6 +379,15 @@ pub enum Value {
     /// `parse` dialect charset matching and the `charset`/`make bitset!`
     /// constructors. Synthetic — produced at runtime; carries no source span.
     Bitset(Rc<RefCell<BitsetDef>>),
+    /// A port! (M113): a synchronous I/O handle over a `File` or `Http`
+    /// scheme. Synthetic — produced by the `open`/`create` natives; carries
+    /// no source span of its own. Holds a `PortDef` with scheme, target, and
+    /// interior-mutable `PortState` (open/closed + an in-process buffered
+    /// cursor for streaming reads). For HTTP ports the `ureq::Response` body
+    /// `Read` handle is held across multiple `read port` calls so the body is
+    /// not slurped at `open` time; file ports slurp the whole file on `read`
+    /// (matching today's `read %file` behavior).
+    Port(Rc<RefCell<PortDef>>),
 }
 
 /// Payload of a `Value::Error`. M42 extends the prior message-only stub to
@@ -868,6 +877,127 @@ impl BitsetDef {
     }
 }
 
+/// Protocol scheme for a `port!` (M113). Only `File` and `Http` are live in
+/// v0.9 — the rest are reserved as `PortScheme` variants that error with
+/// `NetError::UnsupportedInV09(scheme)` so the dispatch table is obviously
+/// extensible for v0.10+ (which adds `ftp.rs`/`smtp.rs`/`dns.rs`/etc. under
+/// `red-eval/src/net/`). `Http` covers both `http://` and `https://` — TLS
+/// is a `NetworkOptions.tls` flag, not a separate scheme, matching `ureq`'s
+/// URL-driven model.
+#[derive(Clone, Debug, PartialEq, Eq, Copy)]
+pub enum PortScheme {
+    File,
+    Http,
+    Ftp,
+    Smtp,
+    Pop3,
+    Nntp,
+    Dns,
+    Tcp,
+    Udp,
+    Whois,
+    Finger,
+    Daytime,
+}
+
+impl PortScheme {
+    /// Lowercase name used in error messages and `mold` output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PortScheme::File => "file",
+            PortScheme::Http => "http",
+            PortScheme::Ftp => "ftp",
+            PortScheme::Smtp => "smtp",
+            PortScheme::Pop3 => "pop3",
+            PortScheme::Nntp => "nntp",
+            PortScheme::Dns => "dns",
+            PortScheme::Tcp => "tcp",
+            PortScheme::Udp => "udp",
+            PortScheme::Whois => "whois",
+            PortScheme::Finger => "finger",
+            PortScheme::Daytime => "daytime",
+        }
+    }
+
+    /// Is this scheme live (dispatched) in v0.9?
+    pub fn is_supported_in_v09(self) -> bool {
+        matches!(self, PortScheme::File | PortScheme::Http)
+    }
+}
+
+/// Inner state of an open `port!` (M113). Held in a `RefCell` inside
+/// `PortDef` so mutations (open/close, cursor advance) are visible to all
+/// aliases — mirrors `MapDef`/`ObjectDef` interior-mutability.
+///
+/// `HttpBody` holds the `ureq::Response` body `Read` handle across multiple
+/// `read port` calls so the body is *not* slurped at `open` time. The body
+/// is read in 8 KiB chunks per `read port` call (POC deviation — see M113
+/// open question 4); an empty chunk at EOF signals completion.
+///
+/// `FileHandle` holds an open `std::fs::File` for write/append ports; file
+/// read ports slurp the whole file on the first `read port` call (matching
+/// today's `read %file` behavior, unlike HTTP's streaming).
+pub struct PortState {
+    /// Whether the port is currently open. `false` after `close` or before
+    /// `open`; reads/writes on a closed port raise `NetError::Closed`.
+    pub open: bool,
+    /// HTTP response body reader (held across `read port` calls). `None` for
+    /// file ports or after the body has been fully consumed.
+    pub http_body: Option<Box<dyn std::io::Read + Send>>,
+    /// Open file handle for write/append file ports. `None` for read-only
+    /// file ports (which slurp via `std::fs::read` on `read port`) and for
+    /// HTTP ports.
+    pub file_handle: Option<std::fs::File>,
+    /// Buffering cursor for partial reads (unused in v0.9 — reserved for
+    /// future chunk-aware `read/part` semantics).
+    pub cursor: u64,
+}
+
+impl std::fmt::Debug for PortState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PortState")
+            .field("open", &self.open)
+            .field("http_body", &self.http_body.as_ref().map(|_| "<reader>"))
+            .field("file_handle", &self.file_handle.as_ref().map(|_| "<file>"))
+            .field("cursor", &self.cursor)
+            .finish()
+    }
+}
+
+/// A `port!` definition (M113): a synchronous I/O handle over a `File` or
+/// `Http` scheme. Synthetic — produced by the `open`/`create` natives (never
+/// by the lexer); wrapped as `Value::Port(Rc<RefCell<PortDef>>)`.
+///
+/// `target` is the scheme-specific address: a filesystem path string for
+/// `File` ports (relative paths resolved against `env.cwd`), a full URL for
+/// `Http` ports (`http://host/path` or `https://host/path`).
+///
+/// `state` is interior-mutable so `open`/`close`/`read`/`write` can mutate
+/// the handle in place without rebuilding the `Value::Port`.
+#[derive(Debug)]
+pub struct PortDef {
+    pub scheme: PortScheme,
+    pub target: Rc<str>,
+    pub state: RefCell<PortState>,
+}
+
+impl PortDef {
+    /// Construct a port definition with the port initially closed. `open`
+    /// flips `state.open` to true and populates `http_body`/`file_handle`.
+    pub fn new(scheme: PortScheme, target: Rc<str>) -> Self {
+        PortDef {
+            scheme,
+            target,
+            state: RefCell::new(PortState {
+                open: false,
+                http_body: None,
+                file_handle: None,
+                cursor: 0,
+            }),
+        }
+    }
+}
+
 /// A `date!` payload (M45): a wall-clock `NaiveDateTime` plus an optional UTC
 /// offset stored as `Option<i32>` minutes (matching Red's internal
 /// `date!/zone` shape). `None` is zone-naive (no offset emitted on mold);
@@ -1088,7 +1218,8 @@ impl Value {
             | Value::Object(_)
             | Value::Module(_)
             | Value::Map(_)
-            | Value::Bitset(_) => None,
+            | Value::Bitset(_)
+            | Value::Port(_) => None,
         }
     }
 
@@ -1331,6 +1462,11 @@ impl Value {
     /// Constructor shorthand for a bitset! value wrapping `bs_def`.
     pub fn bitset(bs_def: BitsetDef) -> Self {
         Value::Bitset(Rc::new(RefCell::new(bs_def)))
+    }
+
+    /// Constructor shorthand for a port! value wrapping `port_def`. (M113.)
+    pub fn port(port_def: PortDef) -> Self {
+        Value::Port(Rc::new(RefCell::new(port_def)))
     }
 }
 

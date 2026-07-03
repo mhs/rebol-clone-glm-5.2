@@ -22,6 +22,7 @@ pub mod map;
 pub mod math;
 pub mod module;
 pub mod natives;
+pub mod net;
 pub mod object;
 pub mod parse;
 pub mod path;

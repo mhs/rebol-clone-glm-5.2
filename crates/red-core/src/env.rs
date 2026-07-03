@@ -149,6 +149,12 @@ pub struct Env {
     /// enabled by the CLI `--allow-shell` flag. `call`/`shell` raise
     /// `EvalError::Native` when this is false (M20 sandbox policy).
     pub allow_shell: bool,
+    /// Whether `open`/`read`/`write` on a `url!` or HTTP `port!` may perform
+    /// network I/O. Off by default; enabled by the CLI `--allow-network` flag.
+    /// Networking natives raise `EvalError::Native` when this is false
+    /// (M113 sandbox policy — mirrors `allow_shell`). File ports are
+    /// unaffected (gated only by the existing filesystem permissions).
+    pub allow_network: bool,
     /// Current working directory for file! path resolution. Updated by
     /// `change-dir`; read by `what-dir`. Relative file paths in `read`/
     /// `write`/`exists?`/etc. resolve against this.
@@ -289,6 +295,7 @@ impl Env {
             natives: HashMap::new(),
             out,
             allow_shell: false,
+            allow_network: false,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             // M29: the bytecode VM is the default evaluator. The
             // `force-walk` cargo feature (re-exported by `red-eval/force-walk`)
@@ -469,6 +476,12 @@ pub enum EvalError {
     /// pool index OOB in a synthetic block); `render_error` omits the
     /// `file:line:col:` prefix in that case.
     Compile { kind: CompileErrorKind, span: Span },
+    /// M110: `parse` named-rule recursion exceeded the depth cap. Raised when
+    /// a self-referential or mutually-recursive rule set has no base case on
+    /// the current input (e.g. `a: [a] parse "x" [a]`). Prevents a Rust stack
+    /// overflow by bailing in the interpreter loop instead. The span is the
+    /// offending rule word's source position when available.
+    ParseRecursionLimit { span: Span },
 }
 
 impl fmt::Display for EvalError {
@@ -507,6 +520,9 @@ impl fmt::Display for EvalError {
             EvalError::Native { message, .. } => write!(f, "{message}"),
             EvalError::Compile { kind, .. } => write!(f, "compile error: {kind}"),
             EvalError::Raised(ev) => write!(f, "{}", ev.message),
+            EvalError::ParseRecursionLimit { .. } => {
+                write!(f, "parse recursion limit exceeded")
+            }
         }
     }
 }
@@ -522,7 +538,8 @@ impl EvalError {
             | EvalError::TypeError { span, .. }
             | EvalError::Arity { span, .. }
             | EvalError::Native { span, .. }
-            | EvalError::Compile { span, .. } => Some(*span),
+            | EvalError::Compile { span, .. }
+            | EvalError::ParseRecursionLimit { span, .. } => Some(*span),
             EvalError::Raised(ev) => ev.near.as_ref().and_then(|v| v.span()),
             EvalError::Return(_)
             | EvalError::Break(_)

@@ -19,10 +19,10 @@
 
 use std::rc::Rc;
 
-use red_core::form_to_string;
 use red_core::lexer;
 use red_core::parser::load;
 use red_core::value::{Series, Span, Symbol, Value};
+use red_core::{form_to_string, mold_to_string};
 use red_core::{Env, EvalError, RefineArgs};
 
 use crate::natives::{arity_err, expect_block, func_native, truthy, type_name};
@@ -971,6 +971,27 @@ fn form_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Val
 }
 
 // ---------------------------------------------------------------------------
+// mold (native) — M111
+// ---------------------------------------------------------------------------
+
+/// `mold value` / `mold/only value` — returns the Red source form as a
+/// `string!`. Mirrors `printer::mold_to_string` (which `probe`/REPL already
+/// use directly); this is the script-callable wrapper. `mold/only` strips
+/// the outer `[...]` when the input is a `block!` (no-op on other types).
+fn mold_native(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "mold", 1, args.len()));
+    }
+    let mut s = mold_to_string(&args[0]);
+    if refs.has(&Symbol::new("only")) && matches!(args[0], Value::Block { .. }) {
+        // `mold_to_string` of a Block always emits `[`...`]`; strip both ends.
+        s.remove(0);
+        s.pop();
+    }
+    Ok(Value::string(std::rc::Rc::from(s.as_str())))
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -1022,6 +1043,19 @@ pub fn register_convert_natives(env: &mut Env) {
 
     // form (arity 1)
     reg(env, "form", form_native as NF, 1);
+
+    // mold (arity 1, with /only refinement — M111)
+    env.natives.insert(
+        Symbol::new("mold"),
+        Rc::new(FuncDef {
+            params: vec![Symbol::new("__arg0")],
+            refinements: vec![(Symbol::new("only"), vec![])],
+            native: Some(mold_native as NF),
+            variadic: false,
+            infix: false,
+            ..Default::default()
+        }),
+    );
 
     // M42 error accessors (arity 1): return the field or `none`.
     reg(env, "error-type", error_type_native as NF, 1);
@@ -1445,6 +1479,40 @@ mod tests {
     #[test]
     fn form_integer() {
         assert_eq!(mold_to_string(&val("form 42")), "\"42\"");
+    }
+
+    // --- mold (native) — M111 ---
+
+    #[test]
+    fn mold_native_basic() {
+        // `print mold x` should produce the same text `probe x` would (minus
+        // the `== ` prefix). `mold 5` → string `"5"`; printing it → `5`.
+        assert_eq!(s(&run_capture("print mold 5")), "5\n");
+        assert_eq!(s(&run_capture("print mold \"hi\"")), "\"hi\"\n");
+        assert_eq!(s(&run_capture("print mold [1 2]")), "[1 2]\n");
+        assert_eq!(s(&run_capture("print mold 'word")), "'word\n");
+        assert_eq!(s(&run_capture("print mold none")), "none\n");
+    }
+
+    #[test]
+    fn mold_native_only() {
+        // `mold/only` strips outer brackets on block!; no-op otherwise.
+        assert_eq!(s(&run_capture("print mold/only [1 2 3]")), "1 2 3\n");
+        assert_eq!(s(&run_capture("print mold/only []")), "\n");
+        assert_eq!(s(&run_capture("print mold/only 5")), "5\n");
+        assert_eq!(s(&run_capture("print mold/only \"hi\"")), "\"hi\"\n");
+    }
+
+    #[test]
+    fn mold_native_object_matches_printer() {
+        // `mold make object! [x: 1]` must equal the direct Rust
+        // `mold_to_string` call (the native just wraps it). Both produce a
+        // string! whose contents are the object's source form; print it.
+        let obj_val = val("make object! [x: 1]");
+        let direct = mold_to_string(&obj_val);
+        let via_native = s(&run_capture("print mold make object! [x: 1]"));
+        // `print` adds a trailing newline; trim for the content comparison.
+        assert_eq!(via_native.trim_end(), direct);
     }
 
     // --- to-binary / make binary! (M41) ---

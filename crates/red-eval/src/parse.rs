@@ -26,6 +26,18 @@ use crate::interp::eval;
 use crate::natives::type_name;
 use crate::series::{series_match, word_sym};
 
+/// M110: recursion-depth cap for `parse` named-rule recursion. A bound `Word`
+/// that resolves to a `block!` is parsed recursively as a sub-rule; a self-
+/// referential rule like `a: [a]` would otherwise blow the Rust stack. The
+/// cap is generous for realistic grammars (JSON/s-expr depth rarely exceeds
+/// ~100) but small enough to fail fast on a genuine infinite loop and to
+/// stay within the default 2 MiB thread stack in debug builds (each level is
+/// ~2 Rust frames and `rule_one` has large frame in debug; 128 levels ≈ 256
+/// frames ≈ ~1 MiB). Inline `[...]` sub-block groups are syntactically
+/// bounded by source nesting and do not consume depth budget — only named
+/// sub-rule invocations do.
+const MAX_PARSE_DEPTH: usize = 128;
+
 // ---------------------------------------------------------------------------
 // Input cursor
 // ---------------------------------------------------------------------------
@@ -497,6 +509,7 @@ pub fn parse_native(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<
         env,
         case_sensitive,
         &mut collect_stack,
+        0,
     ) {
         Ok(m) => m,
         Err(EvalError::Break(Some(Value::Logic(true)))) => {
@@ -529,6 +542,7 @@ fn rule_seq(
     env: &mut Env,
     case_sensitive: bool,
     collect_stack: &mut Vec<Vec<Value>>,
+    depth: usize,
 ) -> Result<bool, EvalError> {
     let outer_saved = input.save();
     let start = *i;
@@ -538,7 +552,7 @@ fn rule_seq(
         let mut ok = true;
         while *i < rules.len() && !is_word(rules[*i].clone(), "|") {
             let before = *i;
-            let matched = rule_one(input, rules, i, env, case_sensitive, collect_stack)?;
+            let matched = rule_one(input, rules, i, env, case_sensitive, collect_stack, depth)?;
             if !matched {
                 input.restore(&alt_saved);
                 *i = before;
@@ -582,6 +596,7 @@ fn rule_one(
     env: &mut Env,
     case_sensitive: bool,
     collect_stack: &mut Vec<Vec<Value>>,
+    depth: usize,
 ) -> Result<bool, EvalError> {
     if *i >= rules.len() {
         return Ok(false);
@@ -689,6 +704,7 @@ fn rule_one(
                     env,
                     case_sensitive,
                     collect_stack,
+                    depth,
                 )?;
                 // Advance the rule cursor past the inner rule's syntactic
                 // extent (without evaluating it — avoids double-evaluating
@@ -708,7 +724,15 @@ fn rule_one(
                 }
                 let start = input.save();
                 let mut j = *i;
-                let ok = rule_one(input, rules, &mut j, env, case_sensitive, collect_stack)?;
+                let ok = rule_one(
+                    input,
+                    rules,
+                    &mut j,
+                    env,
+                    case_sensitive,
+                    collect_stack,
+                    depth,
+                )?;
                 if ok {
                     let captured = input.capture(&start);
                     write_capture(env, &target, captured)?;
@@ -735,7 +759,15 @@ fn rule_one(
                 // `skip`, etc.).
                 let start = input.save();
                 let mut j = *i;
-                let ok = rule_one(input, rules, &mut j, env, case_sensitive, collect_stack)?;
+                let ok = rule_one(
+                    input,
+                    rules,
+                    &mut j,
+                    env,
+                    case_sensitive,
+                    collect_stack,
+                    depth,
+                )?;
                 if ok {
                     let captured = input.capture_single(&start);
                     write_capture(env, &target, captured)?;
@@ -754,7 +786,15 @@ fn rule_one(
                 let saved = input.save();
                 let inner_start = *i;
                 let mut j = *i;
-                let ok = rule_one(input, rules, &mut j, env, case_sensitive, collect_stack)?;
+                let ok = rule_one(
+                    input,
+                    rules,
+                    &mut j,
+                    env,
+                    case_sensitive,
+                    collect_stack,
+                    depth,
+                )?;
                 input.restore(&saved);
                 *i = inner_start + rule_extent(rules, inner_start);
                 return Ok(ok);
@@ -793,7 +833,15 @@ fn rule_one(
                 }
                 let inner_start = *i;
                 let mut j = *i;
-                let ok = rule_one(input, rules, &mut j, env, case_sensitive, collect_stack)?;
+                let ok = rule_one(
+                    input,
+                    rules,
+                    &mut j,
+                    env,
+                    case_sensitive,
+                    collect_stack,
+                    depth,
+                )?;
                 input.restore(&saved);
                 *i = inner_start + rule_extent(rules, inner_start);
                 return Ok(ok);
@@ -809,7 +857,15 @@ fn rule_one(
                 let saved = input.save();
                 let inner_start = *i;
                 let mut j = *i;
-                let ok = rule_one(input, rules, &mut j, env, case_sensitive, collect_stack)?;
+                let ok = rule_one(
+                    input,
+                    rules,
+                    &mut j,
+                    env,
+                    case_sensitive,
+                    collect_stack,
+                    depth,
+                )?;
                 input.restore(&saved);
                 // Advance past the inner rule's extent regardless of
                 // success/failure (the inner rule was consumed syntactically).
@@ -889,7 +945,15 @@ fn rule_one(
                 collect_stack.push(initial);
                 let start = input.save();
                 let mut j = *i;
-                let ok = rule_one(input, rules, &mut j, env, case_sensitive, collect_stack)?;
+                let ok = rule_one(
+                    input,
+                    rules,
+                    &mut j,
+                    env,
+                    case_sensitive,
+                    collect_stack,
+                    depth,
+                )?;
                 let collected = collect_stack.pop().unwrap();
                 if ok {
                     let block = Value::block(Series::new(collected));
@@ -1009,6 +1073,7 @@ fn rule_one(
                     env,
                     case_sensitive,
                     collect_stack,
+                    depth,
                 )?;
                 *i += 1;
                 if ok {
@@ -1037,7 +1102,15 @@ fn rule_one(
         let child = series.data.borrow().clone();
         let saved = input.save();
         let mut j = 0;
-        let ok = rule_seq(input, &child, &mut j, env, case_sensitive, collect_stack)?;
+        let ok = rule_seq(
+            input,
+            &child,
+            &mut j,
+            env,
+            case_sensitive,
+            collect_stack,
+            depth,
+        )?;
         *i += 1;
         if !ok {
             input.restore(&saved);
@@ -1054,25 +1127,57 @@ fn rule_one(
         return Ok(!matches!(result, Value::None | Value::Logic(false)));
     }
 
-    // M46: resolve a bound `Word` to its value (e.g. a bitset variable).
-    // Keywords were handled above; a word here is either a literal match
-    // (block input) or a reference to a rule value (bitset/string). Resolve
-    // bound words to their stored value and dispatch on the resolved type.
+    // M46/M110: resolve a bound `Word` to its value (e.g. a bitset variable
+    // or a named rule block). Keywords were handled above; a word here is
+    // either a literal match (block input) or a reference to a rule value
+    // (bitset/string/named sub-rule block). Resolve bound words to their
+    // stored value and dispatch on the resolved type.
     let v_resolved = if let Some(sym) = word_sym(&v) {
         if let Some(idx) = env.user_ctx.index_of(sym) {
             let val = env.user_ctx.slot_value_unchecked(idx);
-            // If the resolved value is a bitset, use it directly.
-            if matches!(val, Value::Bitset(_)) {
-                Some(val)
-            } else {
-                None
-            }
+            // Keep the resolved value for the bitset / sub-rule dispatch
+            // below. (M46 only inspected bitsets; M110 also handles blocks.)
+            Some(val)
         } else {
             None
         }
     } else {
         None
     };
+
+    // M110: named sub-rule recursion. A word that resolves to a `block!` is
+    // treated as a named sub-rule: recurse into `rule_seq` against the *same*
+    // input cursor (so the sub-rule's advances/captures flow into the parent,
+    // exactly like an inline `[...]` group). `collect_stack` is forwarded so
+    // an enclosing `collect`/`copy`/`set`/`into` sees the sub-rule's matches.
+    // The lookup happens at rule-invocation time (re-resolved each encounter),
+    // so forward references and mutual recursion work as long as the words
+    // are bound by the time the rule actually runs.
+    if let Some(Value::Block { series, .. }) = &v_resolved {
+        if depth + 1 > MAX_PARSE_DEPTH {
+            return Err(EvalError::ParseRecursionLimit {
+                span: v.span_or_default(),
+            });
+        }
+        let child = series.data.borrow().clone();
+        let saved = input.save();
+        let mut j = 0;
+        let ok = rule_seq(
+            input,
+            &child,
+            &mut j,
+            env,
+            case_sensitive,
+            collect_stack,
+            depth + 1,
+        )?;
+        *i += 1;
+        if !ok {
+            input.restore(&saved);
+            return Ok(false);
+        }
+        return Ok(true);
+    }
 
     // M46: bitset! rule — charset match against current input char/element.
     // The bitset may be a literal `Value::Bitset` or a word resolved to one.
@@ -1202,6 +1307,7 @@ fn write_capture(env: &mut Env, target: &Value, value: Value) -> Result<(), Eval
 /// - `opt`:  zero or one match.
 /// - `while`: like `any` but stops as soon as the rule matches without
 ///   advancing the cursor (avoids infinite loops on no-progress rules).
+#[allow(clippy::too_many_arguments)]
 fn run_repetition(
     input: &mut Input,
     rules: &[Value],
@@ -1210,6 +1316,7 @@ fn run_repetition(
     env: &mut Env,
     case_sensitive: bool,
     collect_stack: &mut Vec<Vec<Value>>,
+    depth: usize,
 ) -> Result<bool, EvalError> {
     let mut count = 0usize;
     loop {
@@ -1218,7 +1325,15 @@ fn run_repetition(
         }
         let saved = input.save();
         let mut j = inner_start;
-        let ok = rule_one(input, rules, &mut j, env, case_sensitive, collect_stack)?;
+        let ok = rule_one(
+            input,
+            rules,
+            &mut j,
+            env,
+            case_sensitive,
+            collect_stack,
+            depth,
+        )?;
         if !ok {
             input.restore(&saved);
             break;
@@ -1561,5 +1676,73 @@ mod tests {
         // Case-insensitive by default; /case sensitive.
         assert_eq!(m(&val(r#"parse "ABC" [#"a" #"b" #"c"]"#)), "true");
         assert_eq!(m(&val(r#"parse/case "ABC" [#"a" #"b" #"c"]"#)), "false");
+    }
+
+    // --- M110 named-rule recursion tests ---
+
+    #[test]
+    fn parse_named_rule_basic() {
+        // A word bound to a block! is treated as a named sub-rule: parse
+        // recurses into the block against the same input cursor. `some digit`
+        // re-resolves `digit` each iteration (so forward references work too).
+        let src = r#"digit: [#"0" | #"1" | #"2" | #"3" | #"4" | #"5" | #"6" | #"7" | #"8" | #"9"]
+            parse "5" [some digit]"#;
+        assert_eq!(m(&val(src)), "true");
+        // Non-digit input fails the named rule.
+        let src2 = r#"digit: [#"0" | #"1" | #"2" | #"3" | #"4" | #"5" | #"6" | #"7" | #"8" | #"9"]
+            parse "x" [some digit]"#;
+        assert_eq!(m(&val(src2)), "false");
+    }
+
+    #[test]
+    fn parse_named_rule_mutual() {
+        // Mutual recursion: `even` references `odd` and vice versa. Words are
+        // re-resolved at each encounter, so forward references are fine as
+        // long as both are bound by the time `parse` runs.
+        let src = r#"even: [opt [#"a" odd]]
+            odd: [#"b" opt even]
+            parse "abab" [even]"#;
+        assert_eq!(m(&val(src)), "true");
+        // Mismatched input fails.
+        let src2 = r#"even: [opt [#"a" odd]]
+            odd: [#"b" opt even]
+            parse "aba" [even]"#;
+        assert_eq!(m(&val(src2)), "false");
+    }
+
+    #[test]
+    fn parse_named_rule_nested_recursion() {
+        // The canonical "why you need recursion" example: balanced nested
+        // parens. `group` matches `(` any[group|"x"] `)`.
+        let src = r#"group: [#"(" any [group | #"x"] #")"]
+            parse "((x)(x))" [group]"#;
+        assert_eq!(m(&val(src)), "true");
+        // Unbalanced fails.
+        let src2 = r#"group: [#"(" any [group | #"x"] #")"]
+            parse "((x)(x)" [group]"#;
+        assert_eq!(m(&val(src2)), "false");
+    }
+
+    #[test]
+    fn parse_named_rule_recursion_limit() {
+        // A self-referential rule with no base case on non-matching input
+        // must terminate with ParseRecursionLimit, not a Rust stack overflow.
+        let res = run_capture_val("a: [a] parse \"x\" [a]");
+        assert!(res.is_err(), "expected recursion-limit error");
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("recursion limit"),
+            "expected recursion-limit message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_named_rule_bitset_regression() {
+        // Regression guard: a word resolving to a bitset! still dispatches to
+        // the charset-match path (M46 behavior unchanged by M110).
+        let v = val(r#"letters: charset "xyz" parse "xzz" [letters letters "z"]"#);
+        assert_eq!(m(&v), "true");
+        let v2 = val(r#"cs: charset "abc" parse "aaa" [some cs]"#);
+        assert_eq!(m(&v2), "true");
     }
 }

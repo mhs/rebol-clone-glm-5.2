@@ -31,7 +31,12 @@ use red_eval::{
 /// `needs_nl` is a shared flag the interactive driver checks after each eval
 /// to decide whether to emit a `\n` before the next prompt (prevents
 /// rustyline from overwriting `prin` output that lacks a trailing newline).
-fn build_env(out: Box<dyn Write>, walk: bool, needs_nl: Rc<Cell<bool>>) -> Env {
+fn build_env(
+    out: Box<dyn Write>,
+    walk: bool,
+    allow_network: bool,
+    needs_nl: Rc<Cell<bool>>,
+) -> Env {
     let ctx = Context::new();
     install_constants(&ctx);
     let ctx_rc = Rc::new(ctx);
@@ -39,6 +44,23 @@ fn build_env(out: Box<dyn Write>, walk: bool, needs_nl: Rc<Cell<bool>>) -> Env {
     register_natives(&mut env);
     if walk {
         env.mode = EvalMode::Walk;
+    }
+    // M113: mirror the CLI `--allow-network` flag into the REPL env so
+    // `read url!`/`open http://...` work from the REPL when the user
+    // started it with `--allow-network`. Also mirror into
+    // `system/options/allow-network` so scripts reading the gate get the
+    // right value (the `allow-shell` slot is mirrored too — pre-M113 this
+    // was vestigial in the REPL; fixed as a side-fix).
+    env.allow_network = allow_network;
+    if let Some(Value::Object(sys)) = env.user_ctx.get(&red_eval::Symbol::new("system")) {
+        if let Some(Value::Object(opts_obj)) =
+            sys.borrow().ctx.get(&red_eval::Symbol::new("options"))
+        {
+            opts_obj.borrow().ctx.set(
+                red_eval::Symbol::new("allow-network"),
+                Value::Logic(allow_network),
+            );
+        }
     }
     env
 }
@@ -164,10 +186,16 @@ fn handle_line(line: &str, buffer: &mut String, env: &mut Env) -> bool {
 }
 
 /// Entry point for `red` invoked with no file argument. `walk` mirrors the
-/// CLI `--walk` flag (forces the tree-walker instead of the default VM).
-pub fn run_repl(walk: bool) -> ExitCode {
+/// CLI `--walk` flag (forces the tree-walker instead of the default VM);
+/// `allow_network` mirrors `--allow-network` (M113).
+pub fn run_repl(walk: bool, allow_network: bool) -> ExitCode {
     let needs_nl = Rc::new(Cell::new(false));
-    let mut env = build_env(Box::new(io::stdout()), walk, Rc::clone(&needs_nl));
+    let mut env = build_env(
+        Box::new(io::stdout()),
+        walk,
+        allow_network,
+        Rc::clone(&needs_nl),
+    );
     let mut buffer = String::new();
 
     if io::stdin().is_terminal() {
@@ -265,7 +293,12 @@ fn repl_session(input: &str) -> String {
     // REPL tests exercise the default evaluator (VM since M29); pass
     // `walk = false` to `build_env`.
     let needs_nl = Rc::new(Cell::new(false));
-    let mut env = build_env(Box::new(BufferSink(Rc::clone(&sink))), false, needs_nl);
+    let mut env = build_env(
+        Box::new(BufferSink(Rc::clone(&sink))),
+        false,
+        false,
+        needs_nl,
+    );
     let mut buffer = String::new();
 
     for raw in input.split('\n') {

@@ -684,7 +684,8 @@ fn compile_prefix(
         | Value::Object(_)
         | Value::Module(_)
         | Value::Map(_)
-        | Value::Bitset(_) => {
+        | Value::Bitset(_)
+        | Value::Port(_) => {
             let idx = c.push_const(cur.clone());
             c.emit(Instr::Const(idx));
         }

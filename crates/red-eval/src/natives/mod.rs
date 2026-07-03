@@ -164,6 +164,7 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Map(_) => "map!",
         Value::Date { .. } => "date!",
         Value::Bitset(_) => "bitset!",
+        Value::Port(_) => "port!",
     }
 }
 

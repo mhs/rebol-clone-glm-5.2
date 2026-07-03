@@ -1,0 +1,7 @@
+Red []
+even: [opt [#"a" odd]]
+odd: [#"b" opt even]
+print parse "abab" [even]
+print parse "ab" [even]
+print parse "abb" [even]
+print parse "a" [even]

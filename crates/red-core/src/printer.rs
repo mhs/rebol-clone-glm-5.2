@@ -3,7 +3,7 @@
 
 use chrono::{Datelike, Timelike};
 
-use crate::value::{BitsetDef, DateValue, MapDef, MapKey, ModuleDef, ObjectDef, Value};
+use crate::value::{BitsetDef, DateValue, MapDef, MapKey, ModuleDef, ObjectDef, PortDef, Value};
 
 /// Append the Red source form of `value` to `out`.
 pub fn mold(value: &Value, out: &mut String) {
@@ -158,6 +158,7 @@ pub fn mold(value: &Value, out: &mut String) {
         Value::Module(m) => mold_module(&m.borrow(), out),
         Value::Date { dt, .. } => mold_date(dt, out),
         Value::Bitset(b) => mold_bitset(&b.borrow(), out),
+        Value::Port(p) => mold_port(&p.borrow(), out),
     }
 }
 
@@ -246,6 +247,7 @@ pub fn form(value: &Value, out: &mut String) {
         Value::Module(m) => mold_module(&m.borrow(), out),
         Value::Date { dt, .. } => mold_date(dt, out),
         Value::Bitset(b) => mold_bitset(&b.borrow(), out),
+        Value::Port(p) => mold_port(&p.borrow(), out),
     }
 }
 
@@ -440,6 +442,15 @@ fn mold_bitset(bs: &BitsetDef, out: &mut String) {
         }
         out.push('}');
     }
+}
+
+/// M113: mold a `port!` value. Non-reparseable synthetic form — renders as
+/// `#[port <scheme>://<target>]` (matching the `#[function]`/`#[closure]`
+/// placeholder style). The bracketed form signals "synthetic, not a literal"
+/// so `load` of a molded port fails fast (no `port!` literal syntax exists).
+fn mold_port(p: &PortDef, out: &mut String) {
+    use std::fmt::Write;
+    let _ = write!(out, "#[port {}://{}]", p.scheme.as_str(), p.target);
 }
 
 /// M45: mold a `date!` value.

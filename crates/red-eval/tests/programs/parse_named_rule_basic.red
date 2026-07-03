@@ -1,0 +1,6 @@
+Red []
+digit: [#"0" | #"1" | #"2" | #"3" | #"4" | #"5" | #"6" | #"7" | #"8" | #"9"]
+print parse "5" [some digit]
+print parse "5x" [some digit]
+print parse "" [some digit]
+print parse "42" [digit digit]

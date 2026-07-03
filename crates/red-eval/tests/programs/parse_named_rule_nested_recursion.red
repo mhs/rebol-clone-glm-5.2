@@ -1,0 +1,7 @@
+Red []
+group: [#"(" any [group | #"x"] #")"]
+print parse "((x)(x))" [group]
+print parse "(x)" [group]
+print parse "((x)(x)" [group]
+print parse "()" [group]
+print parse "((x))" [group]

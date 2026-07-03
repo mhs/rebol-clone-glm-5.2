@@ -371,6 +371,9 @@ pub fn register_natives(env: &mut Env) {
     // File & shell I/O (M20)
     crate::io::register_io_natives(env);
 
+    // Ports + minimal synchronous networking (M113)
+    crate::net::register_net_natives(env);
+
     // M30: invalidate the VM's indexed-natives cache so the next `vm::run`
     // rebuilds it from the now-complete `natives` map. (Cheap: the rebuild
     // is O(n) on the first `vm::run`, then cached for the rest of the
@@ -412,12 +415,18 @@ pub fn install_constants(ctx: &Context) {
 fn install_system(ctx: &Context) {
     use red_core::value::ObjectDef;
     use std::rc::Rc as StdRc;
-    // options object: args, allow-shell, path.
+    // options object: args, allow-shell, allow-network, path.
     let opts = ObjectDef::new();
     opts.ctx
         .set(Symbol::new("args"), Value::block(Series::empty()));
     opts.ctx
         .set(Symbol::new("allow-shell"), Value::Logic(false));
+    // M113: `allow-network` mirrors `allow-shell` — seeded false here, then
+    // mirrored from `env.allow_network` after CLI parsing in
+    // `run_series_inner_opts` (alongside `allow-shell`, which gets the same
+    // mirror fix).
+    opts.ctx
+        .set(Symbol::new("allow-network"), Value::Logic(false));
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     opts.ctx.set(
         Symbol::new("path"),

@@ -79,10 +79,13 @@ fn io_err(from: &Value, path: &Path, ctx: &str, e: std::io::Error) -> EvalError 
 // read / write / save / load (file)
 // ---------------------------------------------------------------------------
 
-/// `read file` / `read url` → `string!`. With `/lines` returns a `block!` of
-/// lines (no trailing newlines). `/binary` returns a `binary!` of the raw
-/// file bytes (M41 — de-stubbed).
-fn read(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+/// `read file` / `read url` / `read port` → `string!`. With `/lines` returns
+/// a `block!` of lines (no trailing newlines). `/binary` returns a `binary!`
+/// of the raw file bytes (M41 — de-stubbed). M113: when passed a `port!`,
+/// dispatches to `net::read_port` (streaming for HTTP ports, slurp for file
+/// ports). The one-shot `read url!` ergonomics are preserved (equivalent to
+/// `read open url!` as a single call) but now gated by `env.allow_network`.
+fn read(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(arity_err(args, "read", 1, args.len()));
     }
@@ -97,7 +100,7 @@ fn read(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eval
     match &args[0] {
         Value::File { path, span } => {
             let _ = span;
-            let p = resolve_path(path, _env);
+            let p = resolve_path(path, env);
             if binary {
                 let bytes =
                     std::fs::read(&p).map_err(|e| io_err(&args[0], &p, "cannot read", e))?;
@@ -118,47 +121,102 @@ fn read(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eval
         }
         Value::Url { url, span } => {
             let _ = span;
-            let body = fetch_url(url).map_err(|e| native_err(&args[0], e))?;
+            // M113: gate network access (mirrors `env.allow_shell` for
+            // `call`/`shell`). Pre-M113 `read url!` worked unconditionally —
+            // a sandbox hole this milestone closes.
+            if !env.allow_network {
+                return Err(native_err(
+                    &args[0],
+                    "read: network disabled (use --allow-network to enable)",
+                ));
+            }
+            // M113: route through the `net/` facade (which dispatches by
+            // scheme and rejects unsupported ones with
+            // `NetError::UnsupportedInV09`). The one-shot `read url!`
+            // ergonomics are preserved (equivalent to `read open url!` as a
+            // single call) — the body is fully materialized here.
+            let scheme =
+                crate::net::protocol::scheme_of_url(url).map_err(|e| net_err(&args[0], e))?;
+            // `read url!` only accepts http/https in v0.9 — a `file://` URL
+            // is rejected (use `read %file` instead). Other reserved
+            // schemes (ftp/whois/…) hit `UnsupportedInV09`.
+            if scheme != red_core::value::PortScheme::Http {
+                return Err(net_err(
+                    &args[0],
+                    crate::net::error::NetError::UnsupportedInV09(scheme),
+                ));
+            }
+            let port_def = red_core::value::PortDef::new(scheme, Rc::clone(url));
+            {
+                let mut state = port_def.state.borrow_mut();
+                crate::net::http::open_http(&mut state, url).map_err(|e| net_err(&args[0], e))?;
+            }
+            // Drain the body fully (one-shot read — not the streaming
+            // `read port` path, which yields 8 KiB chunks).
+            let mut body = Vec::new();
+            {
+                let mut state = port_def.state.borrow_mut();
+                if let Some(reader) = state.http_body.as_mut() {
+                    reader.read_to_end(&mut body).map_err(|e| {
+                        net_err(
+                            &args[0],
+                            crate::net::error::NetError::HttpTransport(e.to_string()),
+                        )
+                    })?;
+                }
+            }
             if binary {
                 return Ok(Value::String8 {
-                    bytes: body.into_bytes(),
+                    bytes: body,
                     span: *span,
                 });
             }
+            let body_str = String::from_utf8_lossy(&body).into_owned();
             if lines {
                 Ok(Value::block(Series::new(
-                    body.lines().map(|l| Value::string(Rc::from(l))).collect(),
+                    body_str
+                        .lines()
+                        .map(|l| Value::string(Rc::from(l)))
+                        .collect(),
                 )))
             } else {
-                Ok(Value::string(Rc::from(body.as_str())))
+                Ok(Value::string(Rc::from(body_str.as_str())))
+            }
+        }
+        Value::Port(p) => {
+            // M113: `read port` — streaming for HTTP ports (8 KiB chunks;
+            // empty `string!` at EOF), whole-file slurp for file ports.
+            let bytes = crate::net::read_port(p, &args[0])?;
+            if binary {
+                let span = args[0].span_or_default();
+                return Ok(Value::String8 { bytes, span });
+            }
+            let body_str = String::from_utf8_lossy(&bytes).into_owned();
+            if lines {
+                Ok(Value::block(Series::new(
+                    body_str
+                        .lines()
+                        .map(|l| Value::string(Rc::from(l)))
+                        .collect(),
+                )))
+            } else {
+                Ok(Value::string(Rc::from(body_str.as_str())))
             }
         }
         other => Err(EvalError::TypeError {
-            expected: "file! or url!",
+            expected: "file!, url!, or port!",
             found: type_name(other),
             span: other.span_or_default(),
         }),
     }
 }
 
-/// Fetch a url! via `ureq`. Only http/https supported; other schemes error.
-fn fetch_url(url: &str) -> Result<String, String> {
-    let scheme = url.split("://").next().unwrap_or("");
-    if scheme != "http" && scheme != "https" {
-        return Err(format!(
-            "read: url scheme {scheme:?} not supported in POC (only http/https)"
-        ));
-    }
-    match ureq::get(url).call() {
-        Ok(resp) => {
-            let mut body = String::new();
-            resp.into_reader()
-                .read_to_string(&mut body)
-                .map_err(|e| format!("read: error reading url body: {e}"))?;
-            Ok(body)
-        }
-        Err(ureq::Error::Status(code, _resp)) => Err(format!("read: url returned HTTP {code}")),
-        Err(e) => Err(format!("read: url request failed: {e}")),
+/// M113: wrap a `NetError` into an `EvalError::Native` with the offending
+/// value's span (mirrors `native_err`).
+fn net_err(from: &Value, e: crate::net::error::NetError) -> EvalError {
+    EvalError::Native {
+        message: e.render(),
+        span: from.span_or_default(),
     }
 }
 
@@ -172,6 +230,49 @@ fn write(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<Value, Eval
     if args.len() != 2 {
         return Err(arity_err(args, "write", 2, args.len()));
     }
+    // M113: `write port value` — dispatch to the port writer (file ports
+    // write through to the file handle; HTTP ports error: v0.9 is GET-only).
+    if let Value::Port(p) = &args[0] {
+        let content_bytes: Vec<u8> = if refs.has(&Symbol::new("binary")) {
+            match &args[1] {
+                Value::String8 { bytes, .. } => bytes.clone(),
+                Value::String { s, .. } => s.as_bytes().to_vec(),
+                other => {
+                    return Err(EvalError::TypeError {
+                        expected: "binary! or string!",
+                        found: type_name(other),
+                        span: other.span_or_default(),
+                    });
+                }
+            }
+        } else if refs.has(&Symbol::new("lines")) {
+            match &args[1] {
+                Value::Block { series, .. } | Value::Paren { series, .. } => {
+                    let data = series.data.borrow();
+                    let mut out = String::new();
+                    for (i, v) in data.iter().enumerate() {
+                        if i > 0 {
+                            out.push('\n');
+                        }
+                        out.push_str(&string_for_write(v, &args[1])?);
+                    }
+                    out.into_bytes()
+                }
+                other => {
+                    return Err(EvalError::TypeError {
+                        expected: "block!",
+                        found: type_name(other),
+                        span: other.span_or_default(),
+                    });
+                }
+            }
+        } else {
+            string_for_write(&args[1], &args[1])?.into_bytes()
+        };
+        crate::net::write_port(p, &content_bytes, &args[0])?;
+        return Ok(Value::None);
+    }
+
     let (path, _span) = expect_file(&args[0])?;
     let p = resolve_path(path, env);
 
@@ -1056,8 +1157,36 @@ mod tests {
 
     #[test]
     fn read_url_wrong_scheme_errors() {
+        // M113: `read url!` is now gated by `env.allow_network`. The scheme
+        // check (UnsupportedInV09) is only reached when the gate is open;
+        // with the gate closed, the gate message fires first. This test
+        // exercises the gate-closed path (no real network call attempted).
         let err = run_capture_val("read file://localhost/x").unwrap_err();
-        assert!(err.contains("not supported"), "got: {err}");
+        assert!(
+            err.contains("network disabled") || err.contains("not supported"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn read_url_wrong_scheme_errors_when_network_allowed() {
+        // M113: with `allow_network = true`, the scheme check fires and
+        // surfaces the `UnsupportedInV09` message for a `file://` URL.
+        let body = load_source("read file://localhost/x").unwrap();
+        let ctx = Context::new();
+        install_constants(&ctx);
+        let ctx_rc = bind_pass(&body, ctx);
+        let buf = Rc::new(RefCell::new(Vec::<u8>::new()));
+        let mut env = Env::new_with_output(ctx_rc, Box::new(BufferWriter(Rc::clone(&buf))));
+        register_natives(&mut env);
+        env.allow_network = true;
+        let block = Value::block(body);
+        let err = eval(&block, &mut env).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not supported") || msg.contains("bad or unrecognized"),
+            "got: {msg}"
+        );
     }
 
     // --- M41: read/binary + write/binary ---

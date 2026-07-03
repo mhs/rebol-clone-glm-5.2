@@ -370,7 +370,8 @@ fn eval_prefix(
         | Value::Module(_)
         | Value::Map(_)
         | Value::Date { .. }
-        | Value::Bitset(_) => Ok(cur),
+        | Value::Bitset(_)
+        | Value::Port(_) => Ok(cur),
 
         // Path: a function-headed path is a refined call (`copy/part`,
         // `find/case`); anything else is a data-path select (`block/2`,

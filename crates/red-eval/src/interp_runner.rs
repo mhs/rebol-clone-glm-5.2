@@ -69,6 +69,10 @@ pub fn run_source_with_exit_output(
 #[derive(Clone, Debug, Default)]
 pub struct RunOptions {
     pub allow_shell: bool,
+    /// M113: mirror of `Env::allow_network` — off by default per the
+    /// sandbox policy (network access is gated, like `call`/`shell`). The
+    /// CLI `--allow-network` flag sets this to true.
+    pub allow_network: bool,
     pub args: Vec<String>,
     pub walk: bool,
     pub trace: bool,
@@ -147,6 +151,7 @@ fn run_series_inner_opts(
     let mut env = Env::new_with_output(ctx_rc, out);
     crate::natives::register_natives(&mut env);
     env.allow_shell = opts.allow_shell;
+    env.allow_network = opts.allow_network;
     // M29: `--walk` forces the tree-walker regardless of the build default.
     // (Under `--features force-walk` the default is already `Walk`, so this
     // is a no-op; without the feature it overrides the `Vm` default.)
@@ -171,6 +176,27 @@ fn run_series_inner_opts(
                     .borrow()
                     .ctx
                     .set(Symbol::new("args"), Value::block(args_block));
+            }
+        }
+    }
+    // M113: mirror `allow_shell`/`allow_network` into `system/options/` so
+    // scripts can read the gate state. (`install_system` seeds both as
+    // `false`; this overwrites them with the actual CLI-flag values. The
+    // pre-M113 `allow-shell` slot was vestigial — never updated after init —
+    // this fixes that gap as a side-fix while adding `allow-network`.)
+    {
+        let allow_shell = opts.allow_shell;
+        let allow_network = opts.allow_network;
+        if let Some(Value::Object(sys)) = env.user_ctx.get(&Symbol::new("system")) {
+            if let Some(Value::Object(opts_obj)) = sys.borrow().ctx.get(&Symbol::new("options")) {
+                opts_obj
+                    .borrow()
+                    .ctx
+                    .set(Symbol::new("allow-shell"), Value::Logic(allow_shell));
+                opts_obj
+                    .borrow()
+                    .ctx
+                    .set(Symbol::new("allow-network"), Value::Logic(allow_network));
             }
         }
     }

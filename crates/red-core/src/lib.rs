@@ -19,7 +19,7 @@ pub use printer::{form, form_to_string, mold, mold_to_string};
 pub use source::LineMap;
 pub use value::{
     Binding, BitsetDef, ClosureDef, DateValue, ErrorValue, FuncDef, MapDef, MapKey, ModuleDef,
-    ObjectDef, Series, Span, Symbol, Value,
+    ObjectDef, PortDef, PortScheme, PortState, Series, Span, Symbol, Value,
 };
 // M45: re-export the chrono types used in `DateValue` so downstream crates
 // (red-eval) can construct/inspect dates without a direct chrono dependency.
