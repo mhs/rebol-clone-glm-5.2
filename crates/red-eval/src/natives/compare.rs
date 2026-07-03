@@ -18,6 +18,10 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Integer { n: x, .. }, Value::Integer { n: y, .. }) => x == y,
         (Value::Float { f: x, .. }, Value::Float { f: y, .. }) => x == y,
+        // M80: percent! strict equality — distinct from Float (cross-type `=` is
+        // false). `50% = 0.5` ⇒ false (different types). Ordering (`<`/`>`)
+        // promotes via `as_number` below.
+        (Value::Percent { value: x, .. }, Value::Percent { value: y, .. }) => x == y,
         (Value::Integer { n: x, .. }, Value::Float { f: y, .. }) => (*x as f64) == *y,
         (Value::Float { f: x, .. }, Value::Integer { n: y, .. }) => *x == (*y as f64),
         (Value::String { s: x, .. }, Value::String { s: y, .. }) => x == y,
@@ -173,6 +177,9 @@ fn as_number(v: &Value) -> Option<Num> {
     match v {
         Value::Integer { n, .. } => Some(Num::Int(*n)),
         Value::Float { f, .. } => Some(Num::Float(*f)),
+        // M80: percent! promotes to its fractional float value for ordering
+        // (`<`/`>`/`<=`/`>=`). Equality stays strict (above).
+        Value::Percent { value, .. } => Some(Num::Float(*value)),
         // M38: char! ordered by codepoint for `<`/`>`/`<=`/`>=`.
         Value::Char { c, .. } => Some(Num::Int(*c as i64)),
         _ => None,

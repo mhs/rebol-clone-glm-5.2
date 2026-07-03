@@ -667,6 +667,7 @@ fn compile_prefix(
             c.emit(Instr::ConstInt(*n));
         }
         Value::Float { .. }
+        | Value::Percent { .. }
         | Value::String { .. }
         | Value::Char { .. }
         | Value::Pair { .. }

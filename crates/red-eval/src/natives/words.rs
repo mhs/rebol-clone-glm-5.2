@@ -281,6 +281,16 @@ pub(crate) fn float_predicate(
     pred1(args, "float?", |v| matches!(v, Value::Float { .. }))
 }
 
+/// `percent?` — true for `percent!` (`Value::Percent`). M80. Red parity: a
+/// distinct scalar type; NOT a member of `number!` (per Red's `types-of`).
+pub(crate) fn percent_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "percent?", |v| matches!(v, Value::Percent { .. }))
+}
+
 /// `number?` — true for `integer!` or `float!`.
 pub(crate) fn number_predicate(
     args: &[Value],
@@ -603,6 +613,7 @@ pub(crate) fn register_word_predicate_natives(env: &mut Env) {
     // Scalar type predicates.
     reg(env, "integer?", integer_predicate);
     reg(env, "float?", float_predicate);
+    reg(env, "percent?", percent_predicate);
     reg(env, "number?", number_predicate);
     reg(env, "string?", string_predicate);
     reg(env, "logic?", logic_predicate);

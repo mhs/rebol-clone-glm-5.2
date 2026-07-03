@@ -42,6 +42,11 @@ fn as_number(v: &Value) -> Option<Num> {
     match v {
         Value::Integer { n, .. } => Some(Num::Int(*n)),
         Value::Float { f, .. } => Some(Num::Float(*f)),
+        // M80: percent! promotes to its fractional float value for arithmetic
+        // (`percent + float → float`, `percent * scalar → float`). The
+        // percent-preserving case (`percent + percent → percent`) is handled
+        // up-front by `percent_binop` before `num_binop` runs.
+        Value::Percent { value, .. } => Some(Num::Float(*value)),
         _ => None,
     }
 }
@@ -524,6 +529,43 @@ fn num_binop(
     }
 }
 
+/// M80 percent arithmetic dispatcher. Returns `Some(Value)` for the
+/// percent-preserving cases (`percent + percent → percent`,
+/// `percent - percent → percent`); returns `None` otherwise so the caller
+/// falls through to `num_binop`, which promotes percent → float via
+/// `as_number` (`percent + float → float`, `percent * scalar → float`).
+///
+/// Per `plan8-missing-types.md` M80: `50% + 25%` ⇒ `75%` (stays percent);
+/// `50% * 2` ⇒ `1.0` (float). Percent-scalar and percent-percent multiply/
+/// divide all promote to float.
+fn percent_binop(
+    args: &[Value],
+    op: &str,
+    f_float: fn(f64, f64) -> f64,
+) -> Result<Option<Value>, EvalError> {
+    let a = &args[0];
+    let b = &args[1];
+    let a_pct = matches!(a, Value::Percent { .. });
+    let b_pct = matches!(b, Value::Percent { .. });
+    if a_pct && b_pct {
+        // Both percent — preserve the percent wrapper only for add/subtract.
+        // (Multiply/divide promote to float even when both operands are
+        // percent, matching `percent * scalar → float`.)
+        if op == "add" || op == "subtract" || op == "subtraction" {
+            let x = match a {
+                Value::Percent { value, .. } => *value,
+                _ => unreachable!(),
+            };
+            let y = match b {
+                Value::Percent { value, .. } => *value,
+                _ => unreachable!(),
+            };
+            return Ok(Some(Value::percent(f_float(x, y))));
+        }
+    }
+    Ok(None)
+}
+
 /// `+` infix — numeric addition, with string concatenation when both operands
 /// are strings (M15), and char arithmetic (M38: `char + int → char`,
 /// `char + char → int`). M44: pair/tuple arithmetic. Falls through to numeric
@@ -546,6 +588,11 @@ pub(crate) fn add(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<
     }
     // M45: date arithmetic.
     if let Some(r) = date_add(args)? {
+        return Ok(r);
+    }
+    // M80: percent + percent → percent (everything else promotes to float
+    // via num_binop).
+    if let Some(r) = percent_binop(args, "add", |a, b| a + b)? {
         return Ok(r);
     }
     num_binop(args, "add", |a, b| Some(a + b), |a, b| a + b)
@@ -582,6 +629,10 @@ pub(crate) fn subtract(
     }
     // M45: date subtraction (`date - date → integer`).
     if let Some(r) = date_subtract(args)? {
+        return Ok(r);
+    }
+    // M80: percent - percent → percent (everything else promotes to float).
+    if let Some(r) = percent_binop(args, "subtraction", |a, b| a - b)? {
         return Ok(r);
     }
     num_binop(args, "subtraction", |a, b| Some(a - b), |a, b| a - b)
@@ -700,6 +751,8 @@ fn abs_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Valu
     match &args[0] {
         Value::Integer { n, .. } => Ok(Value::integer(n.wrapping_abs())),
         Value::Float { f, .. } => Ok(Value::float(f.abs())),
+        // M80: abs on a percent preserves the percent wrapper.
+        Value::Percent { value, .. } => Ok(Value::percent(value.abs())),
         // M44: abs on a pair → componentwise abs.
         Value::Pair { x, y, .. } => {
             let nx = abs_one(x)?;
@@ -731,6 +784,8 @@ fn negate_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<V
     match &args[0] {
         Value::Integer { n, .. } => Ok(Value::integer(n.wrapping_neg())),
         Value::Float { f, .. } => Ok(Value::float(-f)),
+        // M80: negate on a percent preserves the percent wrapper.
+        Value::Percent { value, .. } => Ok(Value::percent(-value)),
         // M44: negate on a pair → componentwise negate.
         Value::Pair { x, y, .. } => {
             let nx = negate_one(x)?;

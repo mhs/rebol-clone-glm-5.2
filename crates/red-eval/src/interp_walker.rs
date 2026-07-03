@@ -353,6 +353,7 @@ fn eval_prefix(
         | Value::Logic(_)
         | Value::Integer { .. }
         | Value::Float { .. }
+        | Value::Percent { .. }
         | Value::String { .. }
         | Value::String8 { .. }
         | Value::LitWord { .. }

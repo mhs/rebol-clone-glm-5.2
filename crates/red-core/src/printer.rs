@@ -16,6 +16,7 @@ pub fn mold(value: &Value, out: &mut String) {
             let _ = write!(out, "{}", n);
         }
         Value::Float { f, .. } => mold_float(*f, out),
+        Value::Percent { value, .. } => mold_percent(*value, out),
         Value::String { s, .. } => mold_string(s, out),
         Value::Char { c, .. } => mold_char(*c, out),
         Value::Pair { x, y, .. } => {
@@ -189,6 +190,7 @@ pub fn form(value: &Value, out: &mut String) {
             let _ = write!(out, "{}", n);
         }
         Value::Float { f, .. } => mold_float(*f, out),
+        Value::Percent { value, .. } => mold_percent(*value, out),
         Value::String { s, .. } => out.push_str(s),
         Value::Char { c, .. } => out.push(*c),
         Value::Pair { x, y, .. } => {
@@ -267,6 +269,20 @@ fn mold_float(f: f64, out: &mut String) {
     if !s.contains('.') && !s.contains('e') && !s.contains("inf") && !s.contains("NaN") {
         out.push_str(".0");
     }
+}
+
+/// M80: mold a percent! value. Stored as a fractional float (`0.5` ⇒ `50%`);
+/// rendered as `value * 100` with trailing zeros/dot trimmed, then `%`. Round-
+/// trips through the lexer (`50%` ⇒ `0.5` ⇒ `50%`). `0%` molds as `0%` (not
+/// `0.0%`) for Red parity.
+fn mold_percent(value: f64, out: &mut String) {
+    use std::fmt::Write;
+    // Render with 6 sig figs of fractional precision then trim, mirroring
+    // Red's default printing. Integer-valued percents mold without a decimal.
+    let pct = value * 100.0;
+    let s = format!("{:.6}", pct);
+    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+    let _ = write!(out, "{}%", trimmed);
 }
 
 fn mold_object(obj: &ObjectDef, out: &mut String) {
@@ -728,6 +744,33 @@ mod tests {
         let _ = mold_to_string(&Value::float(f64::NAN));
         let _ = mold_to_string(&Value::float(f64::INFINITY));
         let _ = mold_to_string(&Value::float(f64::NEG_INFINITY));
+    }
+
+    #[test]
+    fn mold_percent() {
+        // M80: percent molds as `NN%` (the fractional value × 100).
+        assert_eq!(mold_to_string(&Value::percent(0.0)), "0%");
+        assert_eq!(mold_to_string(&Value::percent(0.5)), "50%");
+        assert_eq!(mold_to_string(&Value::percent(1.0)), "100%");
+        assert_eq!(mold_to_string(&Value::percent(-0.5)), "-50%");
+        assert_eq!(mold_to_string(&Value::percent(0.005)), "0.5%");
+        assert_eq!(mold_to_string(&Value::percent(0.015)), "1.5%");
+    }
+
+    #[test]
+    fn mold_percent_round_trips_via_lexer() {
+        // Every percent value we mold must re-parse to the same value.
+        for value in [0.0, 0.5, 1.0, -0.5, 0.005, 0.015, 0.333333, 2.5] {
+            let molded = mold_to_string(&Value::percent(value));
+            let toks = crate::lexer::lex(&molded).expect("lex percent");
+            assert_eq!(toks.len(), 1, "{value} molded to {molded:?}");
+            match &toks[0].kind {
+                crate::lexer::TokenKind::Percent(parsed) => {
+                    assert_eq!(*parsed, value, "round-trip mismatch: {value} → {molded}");
+                }
+                other => panic!("expected Percent token for {molded}, got {other:?}"),
+            }
+        }
     }
 
     #[test]

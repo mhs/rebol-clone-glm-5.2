@@ -15,6 +15,11 @@ use crate::value::{DateValue, Span, Symbol};
 pub enum TokenKind {
     Integer(i64),
     Float(f64),
+    /// `50%` — a percent! literal (M80). Stored as the fractional float
+    /// (`50%` ⇒ 0.5). Produced by `scan_number` when a digit run is
+    /// immediately followed by `%` (the `%` does not collide with file!
+    /// literals because `%`-files don't follow digits).
+    Percent(f64),
     String(Rc<str>),
     Word(Symbol),
     SetWord(Symbol),
@@ -75,6 +80,10 @@ pub enum LexError {
     UnterminatedString { span: Span },
     /// A numeric run didn't parse as a valid integer/float (e.g. `1.2.3`).
     InvalidNumber { span: Span, chars: String },
+    /// A `NN%` percent! literal where the value overflowed `f64` (e.g. a
+    /// huge exponent run producing infinity). The digits parsed but the
+    /// resulting `f64 / 100.0` is not finite.
+    InvalidPercent { span: Span, chars: String },
     /// A word-shaped token had an empty body (e.g. `::`, `''`).
     InvalidWord { span: Span },
     /// `{...` hit EOF with braces still open. `depth` is the number of
@@ -106,6 +115,7 @@ impl LexError {
         match self {
             LexError::UnterminatedString { span }
             | LexError::InvalidNumber { span, .. }
+            | LexError::InvalidPercent { span, .. }
             | LexError::InvalidWord { span }
             | LexError::UnbalancedBrace { span, .. }
             | LexError::InvalidChar { span, .. }
@@ -126,6 +136,9 @@ impl std::fmt::Display for LexError {
             LexError::UnterminatedString { .. } => write!(f, "unterminated string"),
             LexError::InvalidNumber { chars, .. } => {
                 write!(f, "invalid number: {chars:?}")
+            }
+            LexError::InvalidPercent { chars, .. } => {
+                write!(f, "invalid percent literal: {chars:?}")
             }
             LexError::InvalidWord { .. } => write!(f, "invalid word (empty body)"),
             LexError::UnbalancedBrace { depth, .. } => {
@@ -675,6 +688,34 @@ fn scan_number(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError>
 
     let end = *i;
     let text = &src[start..end];
+
+    // M80: a digit run immediately followed by `%` is a percent! literal
+    // (`50%` ⇒ 0.5). The `%`-file dispatch arm in the main scan loop never
+    // sees this case because the digit branch routes here first; a bare `%`
+    // (not preceded by a digit) still starts a file! literal.
+    if *i < bytes.len() && bytes[*i] == b'%' {
+        let pct_end = *i + 1;
+        // Parse the digit run as f64 (treat as float regardless of `is_float`,
+        // since percent is always fractional). An integer-shaped run like
+        // `50` parses as 50.0 then divides by 100.0 → 0.5.
+        let raw = match text.parse::<f64>() {
+            Ok(f) => f / 100.0,
+            Err(_) => {
+                return Err(LexError::InvalidNumber {
+                    span: Span::new(start, pct_end),
+                    chars: src[start..pct_end].to_string(),
+                });
+            }
+        };
+        if !raw.is_finite() {
+            return Err(LexError::InvalidPercent {
+                span: Span::new(start, pct_end),
+                chars: src[start..pct_end].to_string(),
+            });
+        }
+        *i = pct_end;
+        return Ok((pct_end, TokenKind::Percent(raw)));
+    }
 
     let kind = if is_float {
         match text.parse::<f64>() {
@@ -1694,6 +1735,47 @@ mod tests {
         assert_eq!(one("1.5e2"), TokenKind::Float(150.0));
         assert_eq!(one("1E-2"), TokenKind::Float(0.01));
         assert_eq!(one("2.0e+3"), TokenKind::Float(2000.0));
+    }
+
+    #[test]
+    fn percent_literal() {
+        // M80: digit-run-then-`%` lexes as Percent (stored fractional).
+        assert_eq!(one("0%"), TokenKind::Percent(0.0));
+        assert_eq!(one("50%"), TokenKind::Percent(0.5));
+        assert_eq!(one("100%"), TokenKind::Percent(1.0));
+        // Negative and fractional.
+        assert_eq!(one("-50%"), TokenKind::Percent(-0.5));
+        assert_eq!(one("0.5%"), TokenKind::Percent(0.005));
+        assert_eq!(one("1.5%"), TokenKind::Percent(0.015));
+        // Exponent run works (the `%` is consumed after the full number).
+        assert_eq!(one("1e2%"), TokenKind::Percent(1.0));
+    }
+
+    #[test]
+    fn percent_followed_by_more() {
+        // `50% 25%` lexes as two percent tokens.
+        let toks = lex("50% 25%").expect("lex");
+        assert_eq!(toks.len(), 2);
+        assert_eq!(toks[0].kind, TokenKind::Percent(0.5));
+        assert_eq!(toks[1].kind, TokenKind::Percent(0.25));
+        // `5%foo` — `%` consumed as part of percent; `foo` is a word.
+        let toks = lex("5%foo").expect("lex");
+        assert_eq!(toks.len(), 2);
+        assert_eq!(toks[0].kind, TokenKind::Percent(0.05));
+        assert!(matches!(toks[1].kind, TokenKind::Word(_)));
+    }
+
+    #[test]
+    fn percent_does_not_collide_with_file_literal() {
+        // A bare `%` (not preceded by a digit) still starts a file! literal.
+        let toks = lex("%foo/bar.txt").expect("lex");
+        assert_eq!(toks.len(), 1);
+        assert!(matches!(toks[0].kind, TokenKind::File(_)));
+        // A digit followed by a `%`-file is a percent + a file.
+        let toks = lex("50% %foo").expect("lex");
+        assert_eq!(toks.len(), 2);
+        assert_eq!(toks[0].kind, TokenKind::Percent(0.5));
+        assert!(matches!(toks[1].kind, TokenKind::File(_)));
     }
 
     #[test]

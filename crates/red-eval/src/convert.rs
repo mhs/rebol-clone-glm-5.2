@@ -186,6 +186,8 @@ fn to_float(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value,
     Ok(match v {
         Value::Integer { n, .. } => Value::float(*n as f64),
         Value::Float { f, .. } => Value::float(*f),
+        // M80: percent promotes to its fractional float value.
+        Value::Percent { value, .. } => Value::float(*value),
         Value::String { s, .. } => Value::float(parse_f64(s, v)?),
         other => {
             return Err(EvalError::TypeError {
@@ -409,6 +411,7 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
     Ok(match t {
         "integer!" | "integer" => make_integer(spec)?,
         "float!" | "float" => make_float(spec)?,
+        "percent!" | "percent" => make_percent(spec)?,
         "string!" | "string" => make_string(spec)?,
         "block!" | "block" => make_block(spec)?,
         "file!" | "file" => make_file(spec)?,
@@ -499,6 +502,39 @@ fn make_float(spec: &Value) -> Result<Value, EvalError> {
             })
         }
     })
+}
+
+/// `make percent! spec` (M80) / `to-percent`:
+/// - `integer!` → `n` as the fractional value (`50` ⇒ 5000%, mirroring Red's
+///   `to-percent` which treats the input as the fraction).
+/// - `float!` → `f` as the fractional value (`0.5` ⇒ 50%).
+/// - `percent!` → identity.
+/// - `string!` → parse `"NN%"` (the lexer divides by 100; `"50%"` ⇒ 0.5).
+fn make_percent(spec: &Value) -> Result<Value, EvalError> {
+    match spec {
+        Value::Percent { value, .. } => Ok(Value::percent(*value)),
+        Value::Integer { n, .. } => Ok(Value::percent(*n as f64)),
+        Value::Float { f, .. } => Ok(Value::percent(*f)),
+        Value::String { s, .. } => {
+            // Lex the string; the first token should be a Percent (or a number
+            // we treat as a fractional value).
+            let toks = lexer::lex(s).map_err(|e| native_err(spec, e.to_string()))?;
+            match toks.first() {
+                Some(t) => match &t.kind {
+                    lexer::TokenKind::Percent(p) => Ok(Value::percent(*p)),
+                    lexer::TokenKind::Integer(n) => Ok(Value::percent(*n as f64)),
+                    lexer::TokenKind::Float(f) => Ok(Value::percent(*f)),
+                    _ => Err(native_err(spec, format!("cannot parse {s:?} as percent"))),
+                },
+                None => Err(native_err(spec, "empty string for percent")),
+            }
+        }
+        other => Err(EvalError::TypeError {
+            expected: "integer!, float!, percent!, or string!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
 }
 
 /// `make string!`:
@@ -833,6 +869,14 @@ fn to_date(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, 
     make_date(&args[0])
 }
 
+/// `to-percent value` — M80. Coerce to `percent!`. Same as `make percent!`.
+fn to_percent(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "to-percent", 1, args.len()));
+    }
+    make_percent(&args[0])
+}
+
 /// `make date! spec` — M45. Construct a `date!` from:
 /// - `string!` → parse via the lexer's date scanner (e.g. `"29-Jun-2024"`).
 /// - `date!` → identity (clone).
@@ -931,6 +975,7 @@ fn to_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
     match t {
         "integer!" | "integer" => to_integer(one, &RefineArgs::empty(), env),
         "float!" | "float" => to_float(one, &RefineArgs::empty(), env),
+        "percent!" | "percent" => to_percent(one, &RefineArgs::empty(), env),
         "string!" | "string" => to_string(one, &RefineArgs::empty(), env),
         "block!" | "block" => to_block(one, &RefineArgs::empty(), env),
         "word!" | "word" => to_word_kind(one, "to", WordKind::Word),
@@ -1021,6 +1066,7 @@ pub fn register_convert_natives(env: &mut Env) {
     // to-* family (arity 1)
     reg(env, "to-integer", to_integer as NF, 1);
     reg(env, "to-float", to_float as NF, 1);
+    reg(env, "to-percent", to_percent as NF, 1);
     reg(env, "to-string", to_string as NF, 1);
     reg(env, "to-block", to_block as NF, 1);
     reg(env, "to-word", to_word as NF, 1);

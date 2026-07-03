@@ -138,6 +138,7 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Logic(_) => "logic!",
         Value::Integer { .. } => "integer!",
         Value::Float { .. } => "float!",
+        Value::Percent { .. } => "percent!",
         Value::String { .. } => "string!",
         Value::Char { .. } => "char!",
         Value::Pair { .. } => "pair!",

@@ -250,6 +250,12 @@ pub enum Value {
     Integer { n: i64, span: Span },
     /// `3.14`, `1e3` — float literal.
     Float { f: f64, span: Span },
+    /// `50%` — a percent! literal (M80). Source-origin (the lexer scans a
+    /// digit run immediately followed by `%`); carries the byte-offset span of
+    /// the whole token. Stored as the *fractional* float (`50%` ⇒ 0.5); molds
+    /// back as `50%`. Strict-typed: distinct from `Float` for `=`, but
+    /// promotes to `Float` for cross-type arithmetic and ordering.
+    Percent { value: f64, span: Span },
     /// `"..."` / `{...}` string literal.
     String { s: Rc<str>, span: Span },
     /// `#"a"` — a char! literal. Source-origin (the lexer scans the `#"-led
@@ -1191,6 +1197,7 @@ impl Value {
         match self {
             Value::Integer { span, .. }
             | Value::Float { span, .. }
+            | Value::Percent { span, .. }
             | Value::String { span, .. }
             | Value::Char { span, .. }
             | Value::Pair { span, .. }
@@ -1278,6 +1285,15 @@ impl Value {
     pub fn float(f: f64) -> Self {
         Value::Float {
             f,
+            span: Span::default(),
+        }
+    }
+
+    /// Constructor shorthand for a percent! literal (zero span). `value` is the
+    /// fractional float (`50%` ⇒ 0.5).
+    pub fn percent(value: f64) -> Self {
+        Value::Percent {
+            value,
             span: Span::default(),
         }
     }
@@ -1840,6 +1856,10 @@ mod tests {
         }
         check!(Value::Integer { n: 1, span: s });
         check!(Value::Float { f: 1.0, span: s });
+        check!(Value::Percent {
+            value: 0.5,
+            span: s
+        });
         check!(Value::String {
             s: Rc::from("x"),
             span: s
@@ -1958,6 +1978,7 @@ mod tests {
         match v {
             Value::Integer { n, .. } => Value::Integer { n, span: s },
             Value::Float { f, .. } => Value::Float { f, span: s },
+            Value::Percent { value, .. } => Value::Percent { value, span: s },
             Value::String { s: ss, .. } => Value::String { s: ss, span: s },
             Value::Char { c, .. } => Value::Char { c, span: s },
             Value::Pair { x, y, .. } => Value::Pair { x, y, span: s },

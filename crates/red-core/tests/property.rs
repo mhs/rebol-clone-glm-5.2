@@ -42,6 +42,15 @@ fn gen_value(_depth: u32) -> BoxedStrategy<Value> {
             f,
             span: Span::new(0, 0),
         }),
+        // M80: percent! literals — integer-valued percentages (0..=1000 ⇒
+        // `0%`..`1000%`) so the mold form `NN%` round-trips exactly through
+        // the lexer. Fractional percentages are covered by inline unit tests
+        // (the `{:.6}` mold format loses precision below 1e-6, so the property
+        // test sticks to the integer case).
+        (-1000i64..=1000).prop_map(|n| Value::Percent {
+            value: n as f64 / 100.0,
+            span: Span::new(0, 0),
+        }),
         // Printable ASCII strings (mold escapes as needed).
         "[a-z0-9 \\\"\\n\\t]{0,20}".prop_map(|s: String| Value::String {
             s: s.into(),
