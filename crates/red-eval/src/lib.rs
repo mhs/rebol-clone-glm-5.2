@@ -15,6 +15,7 @@ pub mod binding;
 pub mod bitset;
 pub mod convert;
 pub mod hash;
+pub mod image;
 pub mod interp;
 pub mod interp_runner;
 pub mod interp_walker;

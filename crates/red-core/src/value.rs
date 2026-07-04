@@ -421,6 +421,15 @@ pub enum Value {
     /// Full `series!` semantics: cursor-backed `next`/`back`/`at`/`skip`/
     /// `head`/`tail`/`index?` work via `extract_series`.
     Vector(Rc<RefCell<VectorDef>>),
+    /// An image! (M85): a fixed-size 2D RGBA8 pixel buffer. Pure data —
+    /// no GUI/draw surface. Synthetic — produced by `make image!`/`to-image`;
+    /// carries no source span. Pixels are stored as row-major `[u8; 4]` RGBA
+    /// tuples. Path accessors: `image/width`, `image/height`, `image/size`
+    /// (a `pair!`), `image/<n>` (1-based flat pixel pick → 4-byte `tuple!`),
+    /// `image/<x>x<y>` (1-based pixel coords → 4-byte `tuple!`). Limited
+    /// `series!`-shaped ops: `length?`, `pick`, `poke` (image! is NOT a
+    /// `series!` — `append`/`insert`/etc. error since the size is fixed).
+    Image(Rc<RefCell<ImageDef>>),
     /// `29-Jun-2024` / `2024-06-29T12:30:00Z` — a `date!` literal (M45).
     /// Source-origin (the lexer scans the date/time/zone form); carries the
     /// byte-offset span of the whole token. A single variant covers date-only,
@@ -1144,6 +1153,227 @@ impl VectorDef {
     }
 }
 
+/// An `image!` value's payload (M85). A fixed `width × height` grid of RGBA8
+/// pixels stored row-major as `Vec<[u8; 4]>`. The buffer is interior-mutable
+/// (`RefCell`) so `poke`/`image/x y:` writes propagate via shared `Rc`
+/// (matches Red's reference semantics for image! mutation).
+#[derive(Clone, Debug)]
+pub struct ImageDef {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: RefCell<Vec<[u8; 4]>>,
+}
+
+impl ImageDef {
+    /// Construct from already-validated dimensions + pixel buffer. Caller is
+    /// responsible for ensuring `pixels.len() == width * height`; unvalidated
+    /// input should go through [`ImageDef::from_bytes`] or
+    /// [`ImageDef::from_pixel_values`].
+    pub fn new(width: usize, height: usize, pixels: Vec<[u8; 4]>) -> Self {
+        ImageDef {
+            width,
+            height,
+            pixels: RefCell::new(pixels),
+        }
+    }
+
+    /// Construct an all-transparent-black image of the given dimensions.
+    pub fn empty(width: usize, height: usize) -> Self {
+        Self::new(width, height, vec![[0, 0, 0, 0]; width * height])
+    }
+
+    /// Pixel count (`width * height`). This is what `length?` reports.
+    pub fn len(&self) -> usize {
+        self.width * self.height
+    }
+
+    /// Returns `true` if the pixel buffer is empty (`width * height == 0`).
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Validate the buffer length matches the declared dimensions. Returns
+    /// the buffer's element count on success.
+    pub fn validate(&self) -> Result<usize, String> {
+        let p = self.pixels.borrow();
+        let expected = self.width * self.height;
+        if p.len() != expected {
+            return Err(format!(
+                "image: pixel buffer length {} does not match width × height ({} × {} = {})",
+                p.len(),
+                self.width,
+                self.height,
+                expected
+            ));
+        }
+        Ok(p.len())
+    }
+
+    /// Flatten the pixel buffer to a contiguous `Vec<u8>` (row-major RGBA8).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let p = self.pixels.borrow();
+        let mut out = Vec::with_capacity(p.len() * 4);
+        for px in p.iter() {
+            out.extend_from_slice(px);
+        }
+        out
+    }
+
+    /// Build from a flat byte stream (4 bytes per pixel, row-major). Errors if
+    /// the byte count doesn't equal `width * height * 4`.
+    pub fn from_bytes(width: usize, height: usize, bytes: &[u8]) -> Result<Self, String> {
+        let need = width * height * 4;
+        if bytes.len() != need {
+            return Err(format!(
+                "image: byte buffer length {} does not match width × height × 4 ({} × {} × 4 = {})",
+                bytes.len(),
+                width,
+                height,
+                need
+            ));
+        }
+        let mut pixels = Vec::with_capacity(width * height);
+        let mut i = 0;
+        while i < bytes.len() {
+            pixels.push([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+            i += 4;
+        }
+        Ok(Self::new(width, height, pixels))
+    }
+
+    /// Convert a 1-based flat pixel index to a 0-based buffer offset. Negative
+    /// indices count from the tail (matching the `pick` convention). Returns
+    /// `None` when out of range or when `n == 0` (1-based, so 0 is invalid).
+    fn flat_index(&self, n: i64) -> Option<usize> {
+        let len = self.len() as i64;
+        let idx = if n > 0 {
+            n - 1
+        } else if n < 0 {
+            len + n
+        } else {
+            return None;
+        };
+        if idx < 0 || idx >= len {
+            return None;
+        }
+        Some(idx as usize)
+    }
+
+    /// Convert a 1-based `(x, y)` pixel coordinate to a 0-based buffer offset.
+    /// Negative coordinates count from the right/bottom edge. Returns `None`
+    /// when out of range. `x == 0` or `y == 0` is invalid (1-based).
+    fn xy_index(&self, x: i64, y: i64) -> Option<usize> {
+        let w = self.width as i64;
+        let h = self.height as i64;
+        let xi = if x > 0 {
+            x - 1
+        } else if x < 0 {
+            w + x
+        } else {
+            return None;
+        };
+        let yi = if y > 0 {
+            y - 1
+        } else if y < 0 {
+            h + y
+        } else {
+            return None;
+        };
+        if xi < 0 || xi >= w || yi < 0 || yi >= h {
+            return None;
+        }
+        Some((yi as usize) * self.width + (xi as usize))
+    }
+
+    /// `pick`-style flat-index read: returns the pixel at 1-based index `n`
+    /// (negative from tail) as a 4-byte `tuple!`. Out-of-range → `None`.
+    pub fn pick(&self, n: i64) -> Option<Value> {
+        let idx = self.flat_index(n)?;
+        let p = self.pixels.borrow();
+        Some(Value::tuple(vec![
+            p[idx][0], p[idx][1], p[idx][2], p[idx][3],
+        ]))
+    }
+
+    /// `poke`-style flat-index write: stores the pixel at 1-based index `n`.
+    /// Accepts a 4-byte (RGBA) or 3-byte (RGB, alpha forced to 255) `tuple!`
+    /// or a `block!` of 3-4 integers. Returns `None` if out of range.
+    pub fn poke(&self, n: i64, val: &Value) -> Result<Option<()>, String> {
+        let idx = match self.flat_index(n) {
+            Some(i) => i,
+            None => return Ok(None),
+        };
+        let px = pixel_from_value(val)?;
+        let mut p = self.pixels.borrow_mut();
+        p[idx] = px;
+        Ok(Some(()))
+    }
+
+    /// `(x, y)` coordinate read: 1-based, negative from right/bottom. Returns
+    /// the pixel as a 4-byte `tuple!`, or `None` when out of range.
+    pub fn pick_xy(&self, x: i64, y: i64) -> Option<Value> {
+        let idx = self.xy_index(x, y)?;
+        let p = self.pixels.borrow();
+        Some(Value::tuple(vec![
+            p[idx][0], p[idx][1], p[idx][2], p[idx][3],
+        ]))
+    }
+
+    /// `(x, y)` coordinate write: 1-based, negative from right/bottom. Accepts
+    /// the same `tuple!`/`block!` shapes as [`Self::poke`]. Returns `None` if
+    /// out of range.
+    pub fn poke_xy(&self, x: i64, y: i64, val: &Value) -> Result<Option<()>, String> {
+        let idx = match self.xy_index(x, y) {
+            Some(i) => i,
+            None => return Ok(None),
+        };
+        let px = pixel_from_value(val)?;
+        let mut p = self.pixels.borrow_mut();
+        p[idx] = px;
+        Ok(Some(()))
+    }
+}
+
+/// Decode a pixel from a `tuple!` (3 or 4 bytes — RGB forced to alpha 255, RGBA
+/// used verbatim) or a `block!` of 3-4 integers. Each channel is clamped to
+/// 0–255. Errors with a descriptive message on type/shape mismatch.
+fn pixel_from_value(val: &Value) -> Result<[u8; 4], String> {
+    let bytes: Vec<u8> = match val {
+        Value::Tuple { bytes, .. } => bytes.iter().copied().collect(),
+        Value::Block { series, .. } => {
+            let data = series.data.borrow();
+            if data.is_empty() || data.len() > 4 {
+                return Err(format!(
+                    "image: pixel block must have 3 or 4 integers, got {}",
+                    data.len()
+                ));
+            }
+            let mut out = Vec::with_capacity(data.len());
+            for v in data.iter() {
+                match v {
+                    Value::Integer { n, .. } => out.push((*n).clamp(0, 255) as u8),
+                    _ => return Err("image: pixel block must contain only integers".into()),
+                }
+            }
+            out
+        }
+        _ => {
+            return Err(format!(
+                "image: pixel must be a tuple! or block! of integers, got {}",
+                type_name_for(val)
+            ))
+        }
+    };
+    match bytes.len() {
+        3 => Ok([bytes[0], bytes[1], bytes[2], 255]),
+        4 => Ok([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        n => Err(format!(
+            "image: pixel must have 3 or 4 components, got {}",
+            n
+        )),
+    }
+}
+
 /// Build a `VectorDef` from a list of values by inferring the kind.
 /// Promotes: all-int → `integer!`; all-float (or percent) → `float!`;
 /// mixed → `float!` (ints promoted to f64). Rejects non-numeric with
@@ -1223,6 +1453,7 @@ fn type_name_for(v: &Value) -> &'static str {
         Value::Map(_) => "map!",
         Value::Hash(_) => "hash!",
         Value::Vector(_) => "vector!",
+        Value::Image(_) => "image!",
         Value::Bitset(_) => "bitset!",
         Value::Port(_) => "port!",
     }
@@ -1795,6 +2026,7 @@ impl Value {
             | Value::Map(_)
             | Value::Hash(_)
             | Value::Vector(_)
+            | Value::Image(_)
             | Value::Bitset(_)
             | Value::Port(_) => None,
         }
@@ -2080,6 +2312,11 @@ impl Value {
     /// Constructor shorthand for a vector! wrapping `vec_def`. (M84.)
     pub fn vector(vec_def: VectorDef) -> Self {
         Value::Vector(Rc::new(RefCell::new(vec_def)))
+    }
+
+    /// Constructor shorthand for an image! wrapping `img_def`. (M85.)
+    pub fn image(img_def: ImageDef) -> Self {
+        Value::Image(Rc::new(RefCell::new(img_def)))
     }
 
     /// Constructor shorthand for a `date!` value with a zero span (test/REPL

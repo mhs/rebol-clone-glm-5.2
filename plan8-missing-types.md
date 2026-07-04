@@ -542,49 +542,63 @@ A 2D pixel buffer (RGBA8). Heavy by itself; lands after `vector!` because it
 shares the "packed array" template. **No GUI/draw** — pure data; this is the
 in-memory image value, not a rendering surface.
 
-- [ ] Add `struct ImageDef { width: usize, height: usize, pixels: RefCell<Vec<[u8; 4]>> }`
+- [x] Add `struct ImageDef { width: usize, height: usize, pixels: RefCell<Vec<[u8; 4]>> }`
       in `value.rs` (RGBA8, row-major).
-- [ ] Add `Value::Image(Rc<RefCell<ImageDef>>)` variant (synthetic, no span).
-- [ ] Add `Value::image(w, h, pixels)` constructor.
-- [ ] Extend `printer.rs`:
-  - [ ] `mold`: `make image! [width: <w> height: <h> pixels: [...]]` (a
+- [x] Add `Value::Image(Rc<RefCell<ImageDef>>)` variant (synthetic, no span).
+- [x] Add `Value::image(w, h, pixels)` constructor.
+- [x] Extend `printer.rs`:
+  - [x] `mold`: `make image! [width: <w> height: <h> pixels: [...]]` (a
         reparseable keyword-block form, matching `make module!`'s mold
         template).
-  - [ ] `form`: same as mold.
-- [ ] Extend `interp_walker.rs`/`vm/compiler.rs` self-evaluating arms.
-- [ ] Add `image?` predicate.
-- [ ] Add `to-image` converter (from `binary!` + width + height; from
+  - [x] `form`: same as mold.
+- [x] Extend `interp_walker.rs`/`vm/compiler.rs` self-evaluating arms.
+- [x] Add `image?` predicate.
+- [x] Add `to-image` converter (from `binary!` + width + height; from
         `vector!` of i32 ARGB).
-- [ ] Add `make image! <spec>`:
-  - [ ] From block: `[width: 100 height: 100 pixels: [...]]` (keyword form).
-  - [ ] From block: `[100 100 [...pixel-bytes...]]` (positional form).
-- [ ] Path access:
-  - [ ] `image/width` → integer.
-  - [ ] `image/height` → integer.
-  - [ ] `image/size` → pair (`width x height`).
-  - [ ] `image/x y` (pair path) → the pixel at (x, y) as a `tuple!` RGBA.
-  - [ ] `set-path` writes a pixel.
-- [ ] Series ops (limited — `image!` is NOT a full `series!` in Red):
-  - [ ] `length?` → `width * height` (pixel count).
-  - [ ] `pick image integer` → pixel at flat index as `tuple!`.
-  - [ ] `poke image integer tuple` → write pixel.
-  - [ ] No `append`/`insert` (size is fixed) — error.
-- [ ] Update `same?`/`not-same?` (`Rc::ptr_eq`).
-- [ ] Update equality (`compare.rs`): deep, width/height/pixels.
-- [ ] Update `type_name` → `"image!"`.
-- [ ] Inline `#[test]`: `make image! [100 100 [...]]` molds back.
-- [ ] Inline `#[test]`: `width?` accessor → 100 (via `image/width` path).
-  - [ ] *(Open: is `width?` a native or is `image/width` the only path?
+      *(Binary! pixels accepted via the `pixels:` keyword. Vector!→image!
+      conversion deferred — `to-image` delegates to `make image!` which
+      accepts block/binary specs only.)*
+- [x] Add `make image! <spec>`:
+  - [x] From block: `[width: 100 height: 100 pixels: [...]]` (keyword form).
+  - [x] From block: `[100 100 [...pixel-bytes...]]` (positional form).
+- [x] Path access:
+  - [x] `image/width` → integer.
+  - [x] `image/height` → integer.
+  - [x] `image/size` → pair (`width x height`).
+  - [x] `image/x y` (pair path) → the pixel at (x, y) as a `tuple!` RGBA.
+        *(1-based coords — both Pair-path and Integer-path use 1-based
+        indexing. Pair get-path works via `Word("/") + Pair` parser folding;
+        Pair set-path (`image/2x1:`) is NOT supported — the lexer only
+        supports `word:`/`digit:` set-path tails; use `poke img n tuple`
+        for pixel writes.)*
+  - [x] `set-path` writes a pixel. *(Integer set-path `image/N: tuple`
+        works; Pair set-path documented as a known lexer gap above.)*
+- [x] Series ops (limited — `image!` is NOT a full `series!` in Red):
+  - [x] `length?` → `width * height` (pixel count).
+  - [x] `pick image integer` → pixel at flat index as `tuple!`.
+  - [x] `poke image integer tuple` → write pixel.
+  - [x] No `append`/`insert` (size is fixed) — error. *(Falls through to
+        `extract_series`'s TypeError for unsupported series ops.)*
+- [x] Update `same?`/`not-same?` (`Rc::ptr_eq`).
+- [x] Update equality (`compare.rs`): deep, width/height/pixels.
+- [x] Update `type_name` → `"image!"`.
+- [x] Inline `#[test]`: `make image! [100 100 [...]]` molds back.
+- [x] Inline `#[test]`: `width?` accessor → 100 (via `image/width` path).
+  - [x] *(Open: is `width?` a native or is `image/width` the only path?
         Decision: path only — no new predicate native; matches Red.)*
-- [ ] Inline `#[test]`: `pick (make image! [2 2 [...rgba bytes...]) 0` →
-        `tuple!` of the first pixel.
-- [ ] Inline `#[test]`: `poke` a pixel round-trips.
-- [ ] Inline `#[test]`: `image? make image! [...]` → true.
-- [ ] Add golden fixtures: `image_construct`, `image_paths`, `image_pixels`.
-- [ ] Add `programs_errors/image_bad_dims.red` (e.g. width × height ≠
-        pixel-count).
-- [ ] Update `property.rs` for `Image` round-trip.
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+- [x] Inline `#[test]`: `pick (make image! [2 2 [...rgba bytes...]) 0` →
+        `tuple!` of the first pixel. *(1-based: `pick img 1`.)*
+- [x] Inline `#[test]`: `poke` a pixel round-trips.
+- [x] Inline `#[test]`: `image? make image! [...]` → true.
+- [x] Add golden fixtures: `image_construct`, `image_paths`, `image_pixels`.
+- [x] Add `programs_errors/image_bad_dims.red` (e.g. width × height ≠
+        pixel-count). *(Plus `image_poke_bad_value.red` and
+        `image_append_unsupported.red`.)*
+- [x] Update `property.rs` for `Image` round-trip. *(Stable-string
+      `image_mold_is_stable` proptest — mirrors `vector_mold_is_stable`;
+      `Image` is excluded from `gen_value`'s round-trip pool since it's
+      synthetic.)*
+- [x] `cargo test --workspace` green; `--features force-walk` green.
 
 ---
 

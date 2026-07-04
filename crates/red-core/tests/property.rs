@@ -23,8 +23,8 @@
 
 use proptest::prelude::*;
 use red_core::{
-    form_to_string, load_source, mold_to_string, printer::mold, Context, DateValue, HashDef, MapDef,
-    MapKey, ModuleDef, Series, Span, Symbol, Value, VectorDef,
+    form_to_string, load_source, mold_to_string, printer::mold, Context, DateValue, HashDef,
+    ImageDef, MapDef, MapKey, ModuleDef, Series, Span, Symbol, Value, VectorDef,
 };
 use std::rc::Rc;
 
@@ -521,4 +521,39 @@ fn closure_mold_is_stable_placeholder() {
 fn unset_mold_is_empty_string() {
     assert_eq!(mold_to_string(&Value::Unset), "");
     assert_eq!(form_to_string(&Value::Unset), "");
+}
+
+// M85: `image!` mold stability. Like `vector!`/`hash!`, `image!` is synthetic
+// (mold as `make image! [...]` which parses to a block, not an Image value),
+// so it's excluded from `gen_value`. This focused test builds an `ImageDef`
+// directly with random dimensions + pixel bytes and asserts that molding it
+// twice yields the same string, and that the form starts with `make image! [`.
+proptest! {
+    #[test]
+    fn image_mold_is_stable(
+        w in 0u16..4,
+        h in 0u16..4,
+        bytes in prop::collection::vec(any::<u8>(), 0..32),
+    ) {
+        let pixel_count = (w as usize) * (h as usize);
+        let needed = pixel_count * 4;
+        // Pad or truncate to exactly the required byte count so ImageDef
+        // construction always succeeds.
+        let buf: Vec<u8> = if bytes.len() >= needed {
+            bytes[..needed].to_vec()
+        } else {
+            let mut v = bytes.clone();
+            v.resize(needed, 0);
+            v
+        };
+        let img = Value::image(ImageDef::from_bytes(w as usize, h as usize, &buf).unwrap());
+        let molded1 = mold_to_string(&img);
+        let molded2 = mold_to_string(&img);
+        prop_assert_eq!(&molded1, &molded2, "mold not deterministic");
+        prop_assert!(
+            molded1.starts_with("make image! [width:"),
+            "expected `make image! [width: ...]` form, got: {molded1}"
+        );
+        prop_assert!(molded1.ends_with(']'), "expected closing ]: {molded1}");
+    }
 }

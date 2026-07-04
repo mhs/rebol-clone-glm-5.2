@@ -1,0 +1,8 @@
+make image! [width: 2 height: 1 pixels: [255 0 0 255 0 255 0 255]]
+true
+false
+false
+2
+make image! [width: 1 height: 1 pixels: [10 20 30 40]]
+make image! [width: 1 height: 1 pixels: [0 0 0 0]]
+make image! [width: 2 height: 1 pixels: [0 0 0 0 0 0 0 0]]

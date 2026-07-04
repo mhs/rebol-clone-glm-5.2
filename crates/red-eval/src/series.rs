@@ -457,6 +457,12 @@ fn length_q(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value,
     if let Value::Vector(v) = &args[0] {
         return Ok(Value::integer(v.borrow().len() as i64));
     }
+    // M85: image! length is the pixel count (`width * height`).
+    if let Value::Image(im) = &args[0] {
+        return Ok(Value::integer(
+            (im.borrow().width * im.borrow().height) as i64,
+        ));
+    }
     // M44: pair! always 2; tuple! is its byte count (3 or 4).
     match &args[0] {
         Value::Pair { .. } => return Ok(Value::integer(2)),
@@ -525,6 +531,12 @@ fn pick(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eva
     if let Value::Vector(v) = &args[0] {
         let n = as_int(&args[1], "pick")?;
         return Ok(v.borrow().pick(n).unwrap_or(Value::None));
+    }
+    // M85: image! pick — 1-based flat pixel index (negative from tail).
+    // Returns a 4-byte `tuple!` (RGBA) or `none` when out of range.
+    if let Value::Image(im) = &args[0] {
+        let n = as_int(&args[1], "pick")?;
+        return Ok(im.borrow().pick(n).unwrap_or(Value::None));
     }
     let (series, _, _) = extract_series(&args[0])?;
     let n = as_int(&args[1], "pick")?;
@@ -681,6 +693,28 @@ fn poke(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eva
             None => Err(EvalError::Native {
                 message: format!("poke: index {n} out of range"),
                 span: args[0].span_or_default(),
+            }),
+        }
+    } else if let Value::Image(im) = &args[0] {
+        // M85: image! poke — pixel write at 1-based flat index. Accepts a
+        // 3-or-4 byte `tuple!` or a `block!` of 3-4 integers. Returns the
+        // written value (a 4-byte `tuple!` normalized to RGBA — matches
+        // Red's poke contract).
+        let n = as_int(&args[1], "poke")?;
+        let val = args[2].clone();
+        match im.borrow().poke(n, &val) {
+            Ok(Some(_)) => {
+                // Re-read the stored pixel so the returned value reflects
+                // the normalized RGBA form (RGB forced opaque → A=255).
+                Ok(im.borrow().pick(n).unwrap_or(val))
+            }
+            Ok(None) => Err(EvalError::Native {
+                message: format!("poke: index {n} out of range"),
+                span: args[0].span_or_default(),
+            }),
+            Err(m) => Err(EvalError::Native {
+                message: m,
+                span: val.span_or_default(),
             }),
         }
     } else {

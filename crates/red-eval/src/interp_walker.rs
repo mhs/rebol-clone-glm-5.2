@@ -393,6 +393,7 @@ fn eval_prefix(
         | Value::Map(_)
         | Value::Hash(_)
         | Value::Vector(_)
+        | Value::Image(_)
         | Value::Date { .. }
         | Value::Bitset(_)
         | Value::Port(_) => Ok(cur),
@@ -715,6 +716,42 @@ fn step_path(
             // the paren to `2`, then picks index 2 from `b`.
             step_path(current, &v, env, part_span)
         }
+        // M85: image!/x×y → 1-based (x, y) pixel coordinate pick (negative
+        // from right/bottom edge; out-of-range → none). Only image! is
+        // pathable by a pair! part; other types fall through to the TypeError
+        // below (matches the prior behavior — Pair was not a valid path part
+        // before M85).
+        Value::Pair { x, y, .. } => {
+            if let Value::Image(im) = current {
+                let xi = match **x {
+                    Value::Integer { n, .. } => n,
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "integer! pair component for image! x",
+                            found: crate::natives::type_name(x),
+                            span: part_span,
+                        })
+                    }
+                };
+                let yi = match **y {
+                    Value::Integer { n, .. } => n,
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "integer! pair component for image! y",
+                            found: crate::natives::type_name(y),
+                            span: part_span,
+                        })
+                    }
+                };
+                Ok(im.borrow().pick_xy(xi, yi).unwrap_or(Value::None))
+            } else {
+                Err(EvalError::TypeError {
+                    expected: "word!, integer!, or paren! in path",
+                    found: crate::natives::type_name(part),
+                    span: part_span,
+                })
+            }
+        }
         other => Err(EvalError::TypeError {
             expected: "word!, integer!, or paren! in path",
             found: crate::natives::type_name(other),
@@ -827,6 +864,27 @@ fn select_field(current: &Value, sym: &Symbol, path_span: Span) -> Result<Value,
                 })
             }
         },
+        // M85: image! field accessors. `/width` and `/height` → integer;
+        // `/size` → pair! of (width × height). All read-only (set-path
+        // errors — image dimensions are fixed).
+        Value::Image(im) => {
+            let b = im.borrow();
+            match sym.as_str() {
+                "width" => Ok(Value::integer(b.width as i64)),
+                "height" => Ok(Value::integer(b.height as i64)),
+                "size" => Ok(Value::pair(
+                    Value::integer(b.width as i64),
+                    Value::integer(b.height as i64),
+                )),
+                _ => Err(EvalError::Native {
+                    message: format!(
+                        "image! has no field {} (only /width /height /size)",
+                        sym.as_str()
+                    ),
+                    span: path_span,
+                }),
+            }
+        },
         other => Err(EvalError::Native {
             message: format!(
                 "cannot select field {} from {}",
@@ -893,6 +951,10 @@ fn pick_path_index(current: &Value, n: i64, path_span: Span) -> Result<Value, Ev
         // M84: vector!/n → 1-based element pick (negative from tail).
         // Out-of-range returns `none`. Ignores the cursor (positional access).
         Value::Vector(v) => Ok(v.borrow().pick(n).unwrap_or(Value::None)),
+        // M85: image!/n → 1-based flat pixel pick as 4-byte `tuple!` (negative
+        // from tail; out-of-range → none). `length?` is `width * height`, so
+        // flat indices cover every pixel.
+        Value::Image(im) => Ok(im.borrow().pick(n).unwrap_or(Value::None)),
         // M44: pair/2 → y, tuple/3 → blue byte (1-based). Out of range → none.
         Value::Pair { x, y, .. } => match n {
             1 => Ok((**x).clone()),
@@ -1370,6 +1432,26 @@ fn write_path_slot(
                         })
                     }
                 }
+                // M85: image! field set-paths are all read-only (dimensions
+                // are fixed; `image/width:`, `image/height:`, `image/size:`
+                // all error — use `poke`/`image/N:`/`image/x y:` for pixel
+                // writes).
+                Value::Image(_) => match sym.as_str() {
+                    "width" | "height" | "size" => Err(EvalError::Native {
+                        message: format!(
+                            "image! field {} is read-only (dimensions are fixed)",
+                            sym.as_str()
+                        ),
+                        span: path_span,
+                    }),
+                    _ => Err(EvalError::Native {
+                        message: format!(
+                            "image! has no field {} (only /width /height /size)",
+                            sym.as_str()
+                        ),
+                        span: path_span,
+                    }),
+                },
                 other => Err(EvalError::Native {
                     message: format!(
                         "cannot set field {} on {}",
@@ -1449,6 +1531,20 @@ fn write_path_slot(
                     }),
                 }
             }
+            // M85: image! `image/N: tuple` — pixel poke at 1-based flat
+            // index (negative from tail). Accepts a 3-or-4 byte `tuple!` or
+            // a `block!` of 3-4 integers (RGB forced to alpha 255).
+            Value::Image(im) => match im.borrow().poke(*n, &rhs) {
+                Ok(Some(_)) => Ok(()),
+                Ok(None) => Err(EvalError::Native {
+                    message: format!("poke index {n} out of range"),
+                    span: path_span,
+                }),
+                Err(m) => Err(EvalError::Native {
+                    message: m,
+                    span: rhs.span_or_default(),
+                }),
+            },
             other => Err(EvalError::TypeError {
                 expected: "block! or paren! for integer set-path index",
                 found: crate::natives::type_name(other),
@@ -1465,6 +1561,51 @@ fn write_path_slot(
                 env,
             )?;
             write_path_slot(&v, part, rhs, env, path_span)
+        }
+        // M85: image! `image/x y: tuple` — pixel poke at 1-based (x, y)
+        // coordinates (negative from right/bottom edge). Accepts the same
+        // tuple!/block! shapes as `poke`. Only image! supports a pair! set-
+        // path part; other types fall through to the catch-all TypeError.
+        Value::Pair { x, y, .. } => {
+            if let Value::Image(im) = current {
+                let xi = match **x {
+                    Value::Integer { n, .. } => n,
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "integer! pair component for image! x",
+                            found: crate::natives::type_name(x),
+                            span: path_span,
+                        })
+                    }
+                };
+                let yi = match **y {
+                    Value::Integer { n, .. } => n,
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "integer! pair component for image! y",
+                            found: crate::natives::type_name(y),
+                            span: path_span,
+                        })
+                    }
+                };
+                match im.borrow().poke_xy(xi, yi, &rhs) {
+                    Ok(Some(_)) => Ok(()),
+                    Ok(None) => Err(EvalError::Native {
+                        message: format!("poke coordinate {xi}x{yi} out of range"),
+                        span: path_span,
+                    }),
+                    Err(m) => Err(EvalError::Native {
+                        message: m,
+                        span: rhs.span_or_default(),
+                    }),
+                }
+            } else {
+                Err(EvalError::TypeError {
+                    expected: "word!, integer!, or paren! in set-path",
+                    found: "pair!",
+                    span: path_span,
+                })
+            }
         }
         other => {
             // M43: map! set-path with a non-word/non-integer key part

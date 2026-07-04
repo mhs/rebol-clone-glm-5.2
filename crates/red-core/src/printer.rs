@@ -4,8 +4,8 @@
 use chrono::{Datelike, Timelike};
 
 use crate::value::{
-    BitsetDef, DateValue, HashDef, MapDef, MapKey, ModuleDef, MoneyValue, ObjectDef, PortDef,
-    Value, VectorDef,
+    BitsetDef, DateValue, HashDef, ImageDef, MapDef, MapKey, ModuleDef, MoneyValue, ObjectDef,
+    PortDef, Value, VectorDef,
 };
 
 /// Append the Red source form of `value` to `out`.
@@ -170,6 +170,7 @@ pub fn mold(value: &Value, out: &mut String) {
         Value::Map(m) => mold_map(&m.borrow(), out),
         Value::Hash(h) => mold_hash(&h.borrow(), out),
         Value::Vector(v) => mold_vector(&v.borrow(), out),
+        Value::Image(im) => mold_image(&im.borrow(), out),
         Value::Module(m) => mold_module(&m.borrow(), out),
         Value::Date { dt, .. } => mold_date(dt, out),
         Value::Bitset(b) => mold_bitset(&b.borrow(), out),
@@ -268,6 +269,7 @@ pub fn form(value: &Value, out: &mut String) {
         Value::Map(m) => form_map(&m.borrow(), out),
         Value::Hash(h) => form_hash(&h.borrow(), out),
         Value::Vector(v) => mold_vector(&v.borrow(), out),
+        Value::Image(im) => mold_image(&im.borrow(), out),
         Value::Module(m) => mold_module(&m.borrow(), out),
         Value::Date { dt, .. } => mold_date(dt, out),
         Value::Bitset(b) => mold_bitset(&b.borrow(), out),
@@ -486,6 +488,32 @@ fn mold_vector(v: &VectorDef, out: &mut String) {
         mold(e, out);
     }
     out.push(']');
+}
+
+/// M85: mold an image! as `make image! [width: <w> height: <h> pixels: [<byte...>]]`.
+/// Pixels render as a flat row-major RGBA8 byte stream (4 integers per pixel),
+/// space-separated. The form is reparseable via `make image!`. The mold is
+/// cursor-agnostic (image! has no cursor — size is fixed).
+fn mold_image(im: &ImageDef, out: &mut String) {
+    out.push_str("make image! [width: ");
+    out.push_str(&im.width.to_string());
+    out.push_str(" height: ");
+    out.push_str(&im.height.to_string());
+    out.push_str(" pixels: [");
+    let p = im.pixels.borrow();
+    for (i, px) in p.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(&px[0].to_string());
+        out.push(' ');
+        out.push_str(&px[1].to_string());
+        out.push(' ');
+        out.push_str(&px[2].to_string());
+        out.push(' ');
+        out.push_str(&px[3].to_string());
+    }
+    out.push_str("]]");
 }
 
 /// M61: mold a module as `make module! [name: <name> exports: [words] word: val ...]`.
@@ -1445,6 +1473,38 @@ mod tests {
         assert!(molded1.starts_with("make vector! [integer!"));
         assert!(molded1.ends_with(']'));
         // Sanity: the parsed body has at least one value (the `make` path).
+        assert!(!parsed.data.borrow().is_empty());
+    }
+
+    // -- M85: image! mold ------------------------------------------------
+
+    fn img(w: usize, h: usize, bytes: &[u8]) -> Value {
+        Value::image(crate::value::ImageDef::from_bytes(w, h, bytes).unwrap())
+    }
+
+    #[test]
+    fn mold_image_basic() {
+        assert_eq!(
+            mold_to_string(&img(2, 1, &[255, 0, 0, 255, 0, 255, 0, 255])),
+            "make image! [width: 2 height: 1 pixels: [255 0 0 255 0 255 0 255]]"
+        );
+    }
+
+    #[test]
+    fn mold_image_empty() {
+        assert_eq!(
+            mold_to_string(&img(0, 0, &[])),
+            "make image! [width: 0 height: 0 pixels: []]"
+        );
+    }
+
+    #[test]
+    fn mold_image_round_trips_via_make() {
+        let v = img(1, 1, &[10, 20, 30, 40]);
+        let molded1 = mold_to_string(&v);
+        let parsed = crate::parser::load_source(&molded1).expect("parse");
+        assert!(molded1.starts_with("make image! [width:"));
+        assert!(molded1.ends_with(']'));
         assert!(!parsed.data.borrow().is_empty());
     }
 }

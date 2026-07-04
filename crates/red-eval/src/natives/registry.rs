@@ -365,6 +365,9 @@ pub fn register_natives(env: &mut Env) {
     // Vectors (M84)
     crate::vector::register_vector_natives(env);
 
+    // Images (M85)
+    crate::image::register_image_natives(env);
+
     // Bitsets (M46)
     crate::bitset::register_bitset_natives(env);
 

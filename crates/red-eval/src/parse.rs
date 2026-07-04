@@ -623,9 +623,7 @@ fn rule_one(
             Some(n2) => {
                 if n2 < n1 {
                     return Err(EvalError::Native {
-                        message: format!(
-                            "parse range lower bound {n1} exceeds upper bound {n2}"
-                        ),
+                        message: format!("parse range lower bound {n1} exceeds upper bound {n2}"),
                         span: v.span_or_default(),
                     });
                 }
@@ -1605,10 +1603,7 @@ fn extent_keyword(rules: &[Value], i: usize, env: &Env) -> usize {
 fn resolve_count(v: &Value, env: &Env) -> Result<Option<usize>, EvalError> {
     let n = match v {
         Value::Integer { n, .. } => *n,
-        Value::Word { sym, .. } | Value::LitWord { sym, .. } => match env
-            .user_ctx
-            .index_of(sym)
-        {
+        Value::Word { sym, .. } | Value::LitWord { sym, .. } => match env.user_ctx.index_of(sym) {
             Some(idx) => match env.user_ctx.slot_value_unchecked(idx) {
                 Value::Integer { n, .. } => n,
                 _ => return Ok(None),
@@ -1961,9 +1956,15 @@ mod tests {
         assert_eq!(m(&val(&format!("{pre}parse \"1\" [2 5 digit]"))), "false");
         // Above max: "123456" has 6 digits, max is 5 → the count stops at
         // 5 but trailing "6" remains → false.
-        assert_eq!(m(&val(&format!("{pre}parse \"123456\" [2 5 digit]"))), "false");
+        assert_eq!(
+            m(&val(&format!("{pre}parse \"123456\" [2 5 digit]"))),
+            "false"
+        );
         // Exact upper bound: 5 digits, max 5 → true.
-        assert_eq!(m(&val(&format!("{pre}parse \"12345\" [2 5 digit]"))), "true");
+        assert_eq!(
+            m(&val(&format!("{pre}parse \"12345\" [2 5 digit]"))),
+            "true"
+        );
     }
 
     #[test]
@@ -1984,7 +1985,10 @@ mod tests {
         assert_eq!(m(&val(&format!("{pre}parse \"2026\" [n digit]"))), "true");
         // Word-resolved range: `lo hi rule`.
         let pre2 = r#"digit: charset "0123456789" lo: 2 hi: 5 "#;
-        assert_eq!(m(&val(&format!("{pre2}parse \"123\" [lo hi digit]"))), "true");
+        assert_eq!(
+            m(&val(&format!("{pre2}parse \"123\" [lo hi digit]"))),
+            "true"
+        );
     }
 
     #[test]
@@ -1994,7 +1998,10 @@ mod tests {
         assert_eq!(m(&val(r#"parse "abab" [2 [#"a" #"b"]]"#)), "true");
         assert_eq!(m(&val(r#"parse "aba" [2 [#"a" #"b"]]"#)), "false");
         // Count applied to a sub-rule, then a literal tail.
-        assert_eq!(m(&val(r#"parse "aabbcc" [2 [#"a"] 2 [#"b"] "cc"]"#)), "true");
+        assert_eq!(
+            m(&val(r#"parse "aabbcc" [2 [#"a"] 2 [#"b"] "cc"]"#)),
+            "true"
+        );
     }
 
     #[test]

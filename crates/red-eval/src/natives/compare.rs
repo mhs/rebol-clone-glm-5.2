@@ -115,6 +115,16 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
                     .zip(b.elements().iter())
                     .all(|(x, y)| values_equal(x, y))
         }
+        // M85: image! equality — same dimensions, byte-identical pixel
+        // buffers (RGBA8 row-major). Pixel values are raw bytes; no further
+        // `values_equal` recursion is needed.
+        (Value::Image(a), Value::Image(b)) => {
+            let a = a.borrow();
+            let b = b.borrow();
+            a.width == b.width
+                && a.height == b.height
+                && a.pixels.borrow().as_slice() == b.pixels.borrow().as_slice()
+        }
         // M45: date! equality. Normalize `None` zone → `Some(0)` (UTC) for
         // comparison, so a zone-naive date equals the same UTC date. Two
         // dates are equal iff their `dt` matches AND normalized zones match.

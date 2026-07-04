@@ -141,6 +141,26 @@ pub struct VectorDef {                          // M84 — typed-element numeric
 //      Block view via `extract_series` (documented deviation from Red, where
 //      these return a positioned series over the vector's storage).
 
+pub struct ImageDef {                           // M85 — fixed-size 2D RGBA8 pixel buffer
+    pub width: usize,
+    pub height: usize,
+    pub pixels: RefCell<Vec<[u8; 4]>>,          // row-major RGBA8
+}
+// API: new(w, h, pixels), empty(w, h), len() (== w*h), validate(),
+//      from_bytes(w, h, &[u8]) -> Result<Self, String>, to_bytes() -> Vec<u8>,
+//      pick(n)/poke(n, &Value) — 1-based flat index, returns/accepts a
+//      4-byte tuple! (3-byte tuple! forced opaque, alpha=255),
+//      pick_xy(x, y)/poke_xy(x, y, &Value) — 1-based coords (negative from
+//      right/bottom edge). image! is NOT a series! — only `length?`/`pick`/
+//      `poke` apply; `append`/`insert`/etc. error (size is fixed).
+//      Path access: `image/width`/`image/height` → integer; `image/size` →
+//      pair!; `image/<n>` → flat pixel pick; `image/<x>x<y>` → coord pick
+//      (via `Word("/") + Pair` parser folding — the lexer emits `Word("/")`
+//      when `/` is followed by a digit, and the parser folds `Word / Pair`
+//      into a path part). Pair set-path (`image/2x1:`) is NOT supported
+//      (the lexer only supports `word:`/`digit:` set-path tails); use
+//      `poke img n tuple` for pixel writes.
+
 pub struct DateValue {                          // M45 — single variant covers date-only / date+time / date+time+zone
     pub dt: chrono::NaiveDateTime,
     pub zone: Option<i32>,                      // minutes east of UTC; None = zone-naive (matches Red's date!/zone)
@@ -216,6 +236,7 @@ pub enum Value {
     Port(Rc<RefCell<PortDef>>),                          // port! — M113 (synthetic, no span)
     Hash(Rc<RefCell<HashDef>>),                         // hash! — M83 (synthetic, no span)
     Vector(Rc<RefCell<VectorDef>>),                      // vector! — M84 (synthetic, no span)
+    Image(Rc<RefCell<ImageDef>>),                        // image! — M85 (synthetic, no span)
 }
 ```
 
@@ -223,9 +244,10 @@ Every source-origin variant (`Integer`/`Float`/`String`/word-family/`Block`/`Par
 `Path`/`GetPath`/`LitPath`/`SetPath`/`Refinement`/`File`/`Url`/`Char`/`String8`/
 `Pair`/`Tuple`/`Date`) carries the byte-offset `Span` of its originating token so
 eval-time errors can render `file:line:col:`. Synthetic variants (`None`/`Logic`/
-`Func`/`Error`/`Object`/`Map`/`Bitset`/`Closure`/`Module`/`Port`/`Hash`/`Vector`) are produced at runtime
-and carry no span; error rendering falls back to the call-site span (the
-originating `closure`/`module`/`open` native call's span, attached to the `EvalError`).
+`Func`/`Error`/`Object`/`Map`/`Bitset`/`Closure`/`Module`/`Port`/`Hash`/`Vector`/`Image`)
+are produced at runtime and carry no span; error rendering falls back to the
+call-site span (the originating `closure`/`module`/`open`/`make` native call's
+span, attached to the `EvalError`).
 
 `Value`, `Context`, `Env`, `EvalError` defined as in the brief. Span flow is
 covered above — synthetic variants omit the span and fall back to `Span::new(0,0)`

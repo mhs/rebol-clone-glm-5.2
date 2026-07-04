@@ -194,6 +194,7 @@ fn same_predicate(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<
         (Value::Map(a), Value::Map(b)) => Rc::ptr_eq(a, b),
         (Value::Hash(a), Value::Hash(b)) => Rc::ptr_eq(a, b),
         (Value::Vector(a), Value::Vector(b)) => Rc::ptr_eq(a, b),
+        (Value::Image(a), Value::Image(b)) => Rc::ptr_eq(a, b),
         (Value::Bitset(a), Value::Bitset(b)) => Rc::ptr_eq(a, b),
         (Value::Port(a), Value::Port(b)) => Rc::ptr_eq(a, b),
         _ => false,
@@ -228,6 +229,12 @@ fn words_of_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result
         Value::Hash(h) => Ok(Value::block(Series::new(h.borrow().keys()))),
         // M84: vector! has no word keys — return an empty block.
         Value::Vector(_) => Ok(Value::block(Series::new(Vec::new()))),
+        // M85: image! word keys are the fixed accessor set (width/height/size).
+        Value::Image(_) => Ok(Value::block(Series::new(vec![
+            Value::word("width"),
+            Value::word("height"),
+            Value::word("size"),
+        ]))),
         // M61: module exports only, in ctx insertion order.
         Value::Module(m) => {
             let md = m.borrow();
@@ -298,6 +305,19 @@ fn values_of_native(
         Value::Hash(h) => Ok(Value::block(Series::new(h.borrow().values()))),
         // M84: vector! elements as a block.
         Value::Vector(v) => Ok(Value::block(Series::new(v.borrow().elements()))),
+        // M85: image! values are the width/height/size triple (matching
+        // `words-of` order: width height size).
+        Value::Image(im) => {
+            let b = im.borrow();
+            Ok(Value::block(Series::new(vec![
+                Value::integer(b.width as i64),
+                Value::integer(b.height as i64),
+                Value::pair(
+                    Value::integer(b.width as i64),
+                    Value::integer(b.height as i64),
+                ),
+            ])))
+        }
         // M61: module exports' values, in ctx insertion order.
         Value::Module(m) => {
             let md = m.borrow();

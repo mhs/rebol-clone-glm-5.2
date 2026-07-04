@@ -433,6 +433,7 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
         "map!" | "map" => return crate::map::make_map(spec, env),
         "hash!" | "hash" => return crate::hash::make_hash(spec, env),
         "vector!" | "vector" => return crate::vector::make_vector(spec, env),
+        "image!" | "image" => return crate::image::make_image(spec, env),
         "bitset!" | "bitset" => return crate::bitset::make_bitset(spec, env),
         "function!" | "function" => {
             // Original behavior: spec is a packed `[[spec][body]]` block.
@@ -1264,6 +1265,7 @@ fn to_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
         "map!" | "map" => crate::map::to_map(one, &RefineArgs::empty(), env),
         "hash!" | "hash" => crate::hash::to_hash(one, &RefineArgs::empty(), env),
         "vector!" | "vector" => crate::vector::to_vector(one, &RefineArgs::empty(), env),
+        "image!" | "image" => crate::image::to_image(one, &RefineArgs::empty(), env),
         "bitset!" | "bitset" => crate::bitset::to_bitset(one, &RefineArgs::empty(), env),
         other => Err(EvalError::Native {
             message: format!("to: {other:?} type not supported in POC"),
