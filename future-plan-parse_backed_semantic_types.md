@@ -2,100 +2,95 @@
 
 ## Overview
 
-This document describes an approach for adding **semantic subtypes** to a Rebol/Red-style language while preserving the language’s core strengths: compact literal syntax, dialects, dynamic values, and `parse` as a general-purpose grammar engine.
+This document describes an approach for adding **semantic subtypes** to a Rebol/Red-style language while preserving the language's core strengths: compact literal syntax, dialects, dynamic values, and `parse` as a general-purpose grammar engine.
 
 The central idea is simple:
 
-> Keep primitive datatypes like `tuple!`, `pair!`, `string!`, and `block!` broad and flexible, but allow semantic types to be defined as schemas backed by parse rules.
+> Keep primitive datatypes broad and flexible, but allow semantic types to be defined as schemas backed by parse rules. Any base datatype that can expose a **component view** of its structure can host semantic subtypes.
 
-For example, both of these values are raw `tuple!` values:
+A raw value says what the representation is. A semantic type says what the value *means*.
 
-```rebol
-255.0.0
-192.168.1.10
-```
+| Literal | Raw Type | Possible Semantic Type |
+|---|---|---|
+| `255.0.0` | `tuple!` | `rgb!` (color) |
+| `192.168.1.10` | `tuple!` | `ipv4!` (network address) |
+| `100x50` | `pair!` | `size2d!` (dimensions) |
+| `"user-42"` | `string!` | `slug!` (URL-safe identifier) |
+| `8080` | `integer!` | `port!` (TCP/UDP port) |
+| `[a b c]` | `block!` | `path!` (segmented lookup key) |
+| `make object! [name: "Ada"]` | `object!` | `person!` (record with required fields) |
+| `http://example.com` | `url!` | `http-url!` (scheme-restricted URL) |
+| `3-7-2026` | `date!` | `iso-date!` (calendar date with constraints) |
 
-But in different contexts they mean different things:
+Each of these is the same value at runtime as its base datatype. But in different contexts they mean different things:
 
 ```rebol
 paint 255.0.0          ; RGB color
 connect 192.168.1.10   ; IPv4 address
+open-port 8080         ; TCP port
+navigate "user-42"     ; slug
 ```
 
 A parse-backed semantic type system lets us define and validate those meanings explicitly:
 
 ```rebol
-type rgb!: tuple! [
-    r: byte
-    g: byte
-    b: byte
-]
-
-type ipv4!: tuple! [
-    a: byte
-    b: byte
-    c: byte
-    d: byte
-]
+type rgb!: tuple! [r: byte  g: byte  b: byte]
+type ipv4!: tuple! [a: byte  b: byte  c: byte  d: byte]
+type port!: integer! [range 1 65535]
+type slug!: string! [some slug-char]
+type path!: block! [some segment]
 ```
 
-The values remain ordinary tuples at runtime, but functions, dialects, and APIs can require more specific semantic shapes.
+The values remain ordinary base values at runtime, but functions, dialects, and APIs can require more specific semantic shapes.
 
 ---
 
 ## Motivation
 
-Rebol and Red already provide compact domain-oriented literals:
+Rebol and Red already provide compact domain-oriented literals. The challenge is that a raw datatype often does not fully express the intended meaning.
 
-| Literal | Raw Type | Common Meaning |
-|---|---|---|
-| `255.0.0` | `tuple!` | RGB color |
-| `192.168.1.10` | `tuple!` | IPv4 address |
-| `1.2.3` | `tuple!` | Version |
-| `100x50` | `pair!` | Size, coordinate, or offset |
-| `user@example.com` | `email!` in Rebol-style systems | Email address |
-
-The challenge is that a raw datatype often does not fully express the intended meaning.
-
-For instance:
-
-```rebol
-255.0.0
-```
-
-could be:
+For instance, `255.0.0` could be:
 
 - an RGB color
 - a semantic version
 - a protocol version
 - a compact numeric identifier
 
-Likewise:
+Likewise, `"user-42"` could be:
 
-```rebol
-192.168.1.10
-```
+- a URL slug
+- a username
+- a freeform tag
+- a CSV field
 
-is structurally similar to a four-component tuple, but semantically it is often an IPv4 address.
+And `8080` could be:
+
+- a TCP port
+- an HTTP status code
+- a memory offset
+- a generic integer
 
 A raw type check can answer this:
 
 ```rebol
-tuple? 255.0.0
-; true
+tuple? 255.0.0      ; true
+string? "user-42"   ; true
+integer? 8080       ; true
 ```
 
-But it cannot answer this directly:
+But it cannot answer these directly:
 
 ```rebol
-rgb? 255.0.0
-; true
+rgb? 255.0.0        ; true
+slug? "user-42"     ; true
+port? 8080          ; true
 
-ipv4? 255.0.0
-; false
+ipv4? 255.0.0       ; false
+slug? "Ada Lovelace"; false (contains space)
+port? 99999         ; false (out of range)
 ```
 
-Parse-backed semantic types provide that second layer.
+Parse-backed semantic types provide that second layer, uniformly across every base datatype that can expose a component view.
 
 ---
 
@@ -103,18 +98,18 @@ Parse-backed semantic types provide that second layer.
 
 The design should:
 
-1. Preserve Rebol’s compact literal syntax.
+1. Preserve Rebol's compact literal syntax.
 2. Avoid turning every domain concept into a heavyweight object.
-3. Allow semantic constraints such as arity, ranges, component names, and optional parts.
+3. Allow semantic constraints over **any** base datatype's component view — positional (tuple/pair), streamed (string/block), named (object), or scalar (integer/number).
 4. Work naturally inside dialects.
 5. Use `parse` or a parse-compatible schema dialect as the underlying validation engine.
 6. Provide readable error messages.
 7. Allow both dynamic validation and optional static/tooling analysis.
-8. Remain simple enough to fit Rebol’s philosophy.
+8. Remain simple enough to fit Rebol's philosophy.
 
-The goal is not to replace `tuple!` with a rigid type hierarchy. The goal is to let specific contexts say:
+The goal is not to replace any base datatype with a rigid type hierarchy. The goal is to let specific contexts say:
 
-> I accept a tuple, but only one that conforms to this semantic schema.
+> I accept a value of this base type, but only one that conforms to this semantic schema.
 
 ---
 
@@ -123,80 +118,99 @@ The goal is not to replace `tuple!` with a rigid type hierarchy. The goal is to 
 A semantic type has three parts:
 
 ```rebol
-type rgb!: tuple! [
-    r: byte
-    g: byte
-    b: byte
+type <name>!: <base>! [
+    <schema>
 ]
 ```
 
-This defines:
-
 | Part | Meaning |
 |---|---|
-| `rgb!` | Name of the semantic type |
-| `tuple!` | Underlying base datatype |
-| schema block | Shape and constraints over the value |
+| `<name>!` | Name of the semantic type |
+| `<base>!` | Underlying base datatype |
+| schema block | Shape and constraints over the value's component view |
 
-The raw value is still a tuple:
+The raw value is still its base type:
 
 ```rebol
 red: 255.0.0
-
 type? red
 ; tuple!
+
+slug: "user-42"
+type? slug
+; string!
+
+p: 8080
+type? p
+; integer!
 ```
 
 But semantic predicates can be generated:
 
 ```rebol
-rgb? red
-; true
+rgb? red            ; true
+slug? slug          ; true
+port? p             ; true
 
-ipv4? red
-; false
+ipv4? red           ; false
+port? "8080"        ; false (string, not integer)
 ```
 
 Function specs can then use semantic types:
 
 ```rebol
-paint: func [
-    color [rgb!]
-] [
-    ; ...
-]
+paint: func [color [rgb!]] [...]
+connect: func [address [ipv4!] port [port!]] [...]
+navigate: func [s [slug!]] [...]
 ```
 
 Now this is valid:
 
 ```rebol
 paint 255.0.0
+connect 192.168.1.10 443
+navigate "user-42"
 ```
 
-but this is rejected:
+but these are rejected:
 
 ```rebol
 paint 192.168.1.10
 ; error: expected rgb!, got tuple! with 4 components
+
+connect 999.1.2.3 443
+; error: component a must be byte, got 999
+
+navigate "Ada Lovelace"
+; error: expected slug!, got string! with disallowed character at index 3
 ```
 
 ---
 
 ## Why Use `parse`?
 
-Rebol’s `parse` dialect is already a grammar system for recognizing structure in values. It can parse strings, blocks, and in a modern clone could be generalized or layered to parse the component representation of other values.
+Rebol's `parse` dialect is already a grammar system for recognizing structure in values. It can parse strings, blocks, and in a modern clone can be generalized or layered to parse the component representation of any value.
 
-A tuple can be viewed as a sequence of components:
+The key abstraction is the **component view**: every base datatype provides a way to turn a value into something `parse` can consume. For positional types that is a block of components; for strings it is a character stream; for blocks it is the block itself; for objects it is a field/value map; for scalars it is a single-element block.
 
 ```rebol
-to-block 255.0.0
+to-components 255.0.0
 ; [255 0 0]
 
-to-block 192.168.1.10
-; [192 168 1 10]
+to-components "user-42"
+; "user-42"   ; parsed as a char stream
+
+to-components 8080
+; [8080]
+
+to-components [a b c]
+; [a b c]     ; parsed as a token stream
+
+to-components make object! [name: "Ada" age: 36]
+; [name "Ada" age 36]   ; parsed as field/value pairs
 ```
 
-Once exposed as a block, standard parse-style rules can validate it:
+Once exposed, standard parse-style rules can validate it:
 
 ```rebol
 byte-rule: [
@@ -205,77 +219,94 @@ byte-rule: [
     )
 ]
 
-rgb-rule: [
-    byte-rule byte-rule byte-rule end
-]
-
-ipv4-rule: [
-    byte-rule byte-rule byte-rule byte-rule end
-]
+rgb-rule:   [byte-rule byte-rule byte-rule end]
+ipv4-rule:  [byte-rule byte-rule byte-rule byte-rule end]
+port-rule:  [set n integer! (unless all [n >= 1 n <= 65535] [fail]) end]
+slug-rule:  [some slug-char-rule end]
+path-rule:  [some segment-rule end]
 ```
 
 Then predicates can be implemented conceptually as:
 
 ```rebol
 rgb?: func [value] [
-    all [
-        tuple? value
-        parse to-block value rgb-rule
-    ]
+    all [tuple? value  parse to-components value rgb-rule]
 ]
 
-ipv4?: func [value] [
-    all [
-        tuple? value
-        parse to-block value ipv4-rule
-    ]
+port?: func [value] [
+    all [integer? value  parse to-components value port-rule]
+]
+
+slug?: func [value] [
+    all [string? value  parse to-components value slug-rule]
 ]
 ```
 
-This makes `parse` the validation engine underneath semantic types.
+This makes `parse` the validation engine underneath semantic types, **uniformly across all base types**.
 
 ---
 
-## Public Syntax vs Internal Parse Rules
+## The Component-Extraction Protocol
 
-Although raw parse rules are powerful, they may not be ideal as the public type-definition syntax.
+Each supported base datatype registers an extraction strategy. This is the bridge between raw values and the parse engine.
 
-A nicer public schema dialect could be used:
+| Base Type | Component Representation | Schema Shape |
+|---|---|---|
+| `tuple!` | block of tuple components | positional |
+| `pair!` | block of `[x y]` | positional |
+| `integer!` / `number!` | single-element block `[n]` | scalar |
+| `string!` | character stream | streamed |
+| `binary!` | byte stream | streamed |
+| `block!` | original block (token stream) | streamed |
+| `object!` | field/value pairs | named |
+| `url!` | string of the URL | streamed |
+| `date!` | block of `[year month day]` | positional |
+| `time!` | block of `[hours minutes seconds]` | positional |
 
-```rebol
-type rgb!: tuple! [
-    r: byte
-    g: byte
-    b: byte
-]
-```
-
-Internally, that could compile to a parse rule like:
-
-```rebol
-[
-    set r byte-rule
-    set g byte-rule
-    set b byte-rule
-    end
-]
-```
-
-This keeps the user-facing syntax clean while still using `parse` internally.
-
-In other words:
+This gives the parse engine a consistent model:
 
 ```text
-schema dialect → parse rule → runtime validator
+base value → component view → parse rule
 ```
 
-This gives the language a Rebol-native type mechanism without requiring a completely separate type-checking language.
+A base type is "semantic-type-ready" if it supplies a `to-components` rule. Adding support for a new base type is therefore a matter of registering a new extractor, not changing the schema compiler.
+
+### Positional vs Streamed vs Named vs Scalar
+
+Schemas take one of four shapes depending on the extractor:
+
+- **Positional** (tuple, pair, date, time): a fixed-arity sequence of named fields.
+  ```rebol
+  type rgb!: tuple! [r: byte  g: byte  b: byte]
+  ```
+- **Scalar** (integer, number): a single value with a constraint.
+  ```rebol
+  type port!: integer! [range 1 65535]
+  type percent!: number! [range 0 100]
+  ```
+- **Streamed** (string, binary, block, url): a sequence of tokens or characters, possibly open-ended.
+  ```rebol
+  type slug!: string! [some slug-char]
+  type path!: block! [some segment]
+  ```
+- **Named** (object): a set of required/optional fields with per-field constraints.
+  ```rebol
+  type person!: object! [
+      name: string
+      age:  optional [range 0 150]
+      email: optional email!
+  ]
+  ```
+
+The schema dialect uses the same surface syntax in all four cases; the extractor determines how the schema is compiled.
 
 ---
 
-## Example: RGB and RGBA
+## Semantic Types by Base Datatype
 
-RGB and RGBA are good examples because they share the same base type but differ in arity.
+The following subsections illustrate each family. Together they show that the system is generic, not specific to tuples and pairs.
+
+### `tuple!`-backed examples
 
 ```rebol
 type rgb!: tuple! [
@@ -284,11 +315,24 @@ type rgb!: tuple! [
     b: byte
 ]
 
- type rgba!: tuple! [
+type rgba!: tuple! [
     r: byte
     g: byte
     b: byte
     a: byte
+]
+
+type ipv4!: tuple! [
+    a: byte
+    b: byte
+    c: byte
+    d: byte
+]
+
+type semver!: tuple! [
+    major: non-negative-integer
+    minor: non-negative-integer
+    patch: non-negative-integer
 ]
 ```
 
@@ -297,161 +341,24 @@ Usage:
 ```rebol
 red: 255.0.0
 transparent-red: 255.0.0.128
-
-rgb? red
-; true
-
-rgba? red
-; false
-
-rgba? transparent-red
-; true
-```
-
-A drawing dialect can require these semantic types:
-
-```rebol
-draw [
-    fill rgb! 255.0.0
-    stroke rgba! 0.0.0.128
-]
-```
-
-Or the expectation can be implied by keywords:
-
-```rebol
-draw [
-    fill 255.0.0
-    stroke 0.0.0.128
-]
-```
-
-The dialect evaluator knows:
-
-```text
-fill   expects rgb!
-stroke accepts rgb! or rgba!
-```
-
----
-
-## Example: IPv4
-
-IPv4 can also be represented as a four-component tuple:
-
-```rebol
-type ipv4!: tuple! [
-    a: byte
-    b: byte
-    c: byte
-    d: byte
-]
-```
-
-Usage:
-
-```rebol
 server: 192.168.1.10
-
-ipv4? server
-; true
-
-rgb? server
-; false
-```
-
-A networking API could use it directly:
-
-```rebol
-connect: func [
-    address [ipv4!]
-    port [integer!]
-] [
-    ; ...
-]
-
-connect 192.168.1.10 443
-```
-
-Invalid examples:
-
-```rebol
-connect 255.0.0 443
-; error: expected ipv4!, got tuple! with 3 components
-
-connect 999.1.2.3 443
-; error: component a must be byte, got 999
-```
-
-Depending on the base `tuple!` rules, a value like `999.1.2.3` may not even be representable. But the schema should still define the intended range so the semantic type remains explicit and portable.
-
----
-
-## Example: Semantic Version
-
-Semantic versions also look like three-component tuples, but their meaning is different from RGB.
-
-```rebol
-type semver!: tuple! [
-    major: integer
-    minor: integer
-    patch: integer
-]
-```
-
-Usage:
-
-```rebol
 version: 1.4.2
 
-semver? version
-; true
-
-rgb? version
-; true, structurally, if rgb! only checks byte byte byte
+rgb? red               ; true
+rgba? red              ; false
+rgba? transparent-red  ; true
+ipv4? server           ; true
+rgb? server            ; false
+semver? version        ; true
 ```
 
-This exposes an important design issue: some semantic types may overlap structurally.
+Note that `1.4.2` is also structurally a valid `rgb!` (three byte-sized values). Semantic type validity does not always imply semantic intent; intent is supplied by the context (function spec or dialect keyword) that requires a specific semantic type.
 
-The value `1.4.2` can be both a valid `semver!` and a valid `rgb!` if `rgb!` simply means “three byte-sized values.”
-
-That is not necessarily a problem. It reflects a deeper principle:
-
-> Semantic type validity does not always imply semantic intent.
-
-In function arguments and dialects, the expected type provides the intent:
-
-```rebol
-paint 1.4.2      ; accepted if rgb!, but perhaps suspicious
-require 1.4.2    ; accepted as semver!
-```
-
-Optional tooling could warn about ambiguous uses, but the runtime should usually validate against the expected semantic type.
-
----
-
-## Example: Pair Subtypes
-
-The same approach works for `pair!`.
-
-A raw pair:
-
-```rebol
-100x50
-```
-
-could mean:
-
-- a size
-- a point
-- an offset
-- a grid coordinate
-
-Define semantic pair types:
+### `pair!`-backed examples
 
 ```rebol
 type size2d!: pair! [
-    width: positive-integer
+    width:  positive-integer
     height: positive-integer
 ]
 
@@ -473,31 +380,256 @@ button-size: 100x50
 position: 20x30
 movement: -5x10
 
-size2d? button-size
-; true
-
-point2d? position
-; true
-
-offset2d? movement
-; true
+size2d?  button-size   ; true
+point2d? position      ; true
+offset2d? movement     ; true
+size2d?  movement      ; false (negative)
 ```
 
-In a UI dialect:
+### `integer!` / `number!`-backed examples
+
+Scalar schemas constrain a single value.
 
 ```rebol
-view [
-    at 20x30
-    button "Save" size 100x50
+type port!: integer! [
+    range 1 65535
+]
+
+type percent!: number! [
+    range 0 100
+]
+
+type nonzero!: integer! [
+    where [value <> 0]
+]
+
+type unix-timestamp!: integer! [
+    range 0 4102444800   ; year 2100
 ]
 ```
 
-The evaluator can interpret pairs semantically by keyword:
+Usage:
+
+```rebol
+port? 443              ; true
+port? 99999            ; false
+port? "443"            ; false (string, not integer)
+
+percent? 50            ; true
+percent? 50.5          ; true
+percent? 150           ; false
+```
+
+These are single-component schemas. They compile to a one-element positional rule.
+
+### `string!`-backed examples
+
+Streamed schemas parse over the character stream of the string.
+
+```rebol
+type slug!: string! [
+    some slug-char
+]
+
+type email!: string! [
+    some alpha-or-digit
+    "@"
+    some slug-char
+    "."
+    some alpha
+]
+
+type uuid!: string! [
+    8 hex-char "-" 4 hex-char "-" 4 hex-char
+    "-" 4 hex-char "-" 12 hex-char
+]
+
+type hex-color!: string! [
+    "#" some hex-char
+]
+```
+
+Usage:
+
+```rebol
+slug? "user-42"              ; true
+slug? "Ada Lovelace"         ; false (space)
+
+email? "ada@example.com"     ; true
+email? "not-an-email"        ; false
+
+uuid? "550e8400-e29b-41d4-a716-446655440000"  ; true
+```
+
+### `block!`-backed examples
+
+Streamed schemas parse over the tokens of the block itself.
+
+```rebol
+type path!: block! [
+    some segment
+]
+
+type csv-row!: block! [
+    field some ["," field]
+]
+
+type config!: block! [
+    some [set name word! set value [string! | integer! | block!]]
+]
+```
+
+Usage:
+
+```rebol
+path? [a b c]                        ; true
+path? [1 2 3]                        ; depends on segment rule
+csv-row? ["a" "b" "c"]               ; true
+
+config? [host "localhost" port 8080] ; true
+```
+
+### `object!`-backed examples
+
+Named schemas validate the field/value map of an object.
+
+```rebol
+type person!: object! [
+    name:  string
+    age:   optional [range 0 150]
+    email: optional email!
+]
+
+type matrix!: object! [
+    rows:    positive-integer
+    cols:    positive-integer
+    data:    block
+    where    [length? data = rows * cols]
+]
+
+type rect!: object! [
+    origin: point2d!
+    size:   size2d!
+]
+```
+
+Usage:
+
+```rebol
+ada: make object! [name: "Ada" age: 36]
+person? ada     ; true
+
+bad: make object! [name: 123]
+person? bad     ; false (name must be string)
+```
+
+Object-backed semantic types overlap conceptually with regular object prototypes. The distinction is that a semantic type is a *validator over* an object's fields rather than a constructor; the object itself remains an ordinary `object!` value.
+
+### `url!`-backed examples
+
+```rebol
+type http-url!: url! [
+    "http" "s" "://" some url-char
+]
+
+type ws-url!: url! [
+    "ws" "s" "://" some url-char
+]
+```
+
+Usage:
+
+```rebol
+http-url? http://example.com      ; true
+http-url? ftp://example.com       ; false
+```
+
+### `date!` / `time!`-backed examples
+
+```rebol
+type iso-date!: date! [
+    year:  integer
+    month: range 1 12
+    day:   range 1 days-in-month year month
+]
+
+type business-time!: time! [
+    hours:   range 9 17
+    minutes: range 0 59
+    seconds: range 0 59
+]
+```
+
+Dependent constraints (such as `days-in-month year month`) are an advanced feature and need not ship in the first version, but the component view makes them expressible.
+
+---
+
+## Public Syntax vs Internal Parse Rules
+
+Although raw parse rules are powerful, they may not be ideal as the public type-definition syntax. A nicer public schema dialect is used at the surface:
+
+```rebol
+type rgb!: tuple! [
+    r: byte
+    g: byte
+    b: byte
+]
+```
+
+Internally, that compiles to a parse rule like:
+
+```rebol
+[
+    set r byte-rule
+    set g byte-rule
+    set b byte-rule
+    end
+]
+```
+
+A scalar schema compiles to a single-element rule:
+
+```rebol
+type port!: integer! [range 1 65535]
+; compiles to:
+[
+    set n integer! (
+        unless all [n >= 1 n <= 65535] [fail]
+    )
+    end
+]
+```
+
+A streamed schema compiles to a stream rule:
+
+```rebol
+type slug!: string! [some slug-char]
+; compiles to:
+[
+    some slug-char-rule
+    end
+]
+```
+
+A named schema compiles to an alternating field/value rule:
+
+```rebol
+type person!: object! [name: string  age: optional [range 0 150]]
+; compiles to:
+[
+    'name set name string!
+    opt ['age set age [integer! (unless all [age >= 0 age <= 150] [fail])]]
+    end
+]
+```
+
+This keeps the user-facing syntax clean while still using `parse` internally.
 
 ```text
-at   expects point2d!
-size expects size2d!
+schema dialect → parse rule → runtime validator
 ```
+
+This gives the language a Rebol-native type mechanism without requiring a completely separate type-checking language, and it works identically across positional, scalar, streamed, and named schemas.
 
 ---
 
@@ -506,38 +638,34 @@ size expects size2d!
 A key use case is function argument validation.
 
 ```rebol
-paint: func [
-    color [rgb!]
-] [
-    ; ...
-]
-
-connect: func [
-    address [ipv4!]
-    port [integer!]
-] [
-    ; ...
-]
-
-resize: func [
-    target [object!]
-    size [size2d!]
-] [
-    ; ...
-]
+paint:   func [color [rgb!]]                          [...]
+connect: func [address [ipv4!] port [port!]]          [...]
+resize:  func [target [object!] size [size2d!]]       [...]
+navigate:func [s [slug!]]                             [...]
+open:    func [p [port!]]                             [...]
+render:  func [m [matrix!]]                           [...]
+fetch:   func [u [http-url!]]                         [...]
 ```
 
 These specs are more expressive than raw base types:
 
 ```rebol
-paint: func [color [tuple!]] [...]
-connect: func [address [tuple!]] [...]
-resize: func [size [pair!]] [...]
+paint:    func [color [tuple!]]    [...]   ; says only "representation"
+connect:  func [address [tuple!]]  [...]
+resize:   func [size [pair!]]      [...]
+navigate: func [s [string!]]       [...]
+open:     func [p [integer!]]      [...]
 ```
 
-The raw specs say only what the representation is.
+The raw specs say only what the representation is. The semantic specs say what the value means.
 
-The semantic specs say what the value means.
+The function machinery checks:
+
+1. Is `<name>!` a built-in datatype?
+2. If not, is it a registered semantic type?
+3. If yes, validate the value against the semantic type's base and parse rule.
+
+This allows semantic types to coexist with built-in types.
 
 ---
 
@@ -553,11 +681,12 @@ view [
         at 20x20
         button "Save" size 100x32
         box 200x100 color 255.0.0
+        link "Docs" href http://example.com
     ]
 ]
 ```
 
-The dialect grammar could declare expectations:
+The dialect grammar can declare expectations spanning multiple base types:
 
 ```rebol
 ui-schema: [
@@ -565,25 +694,27 @@ ui-schema: [
     at point2d!
     button string! 'size size2d!
     box size2d! 'color rgb!
+    link string! 'href http-url!
 ]
 ```
 
-Or internally, a parser could use semantic validators:
+Or internally, a parser can use semantic validators:
 
 ```rebol
 parse-ui: func [tokens] [
     parse tokens [
         some [
-            'at set p pair! (validate point2d! p)
-          | 'size set s pair! (validate size2d! s)
-          | 'color set c tuple! (validate rgb! c)
+            'at   set p pair!   (validate point2d! p)
+          | 'size set s pair!   (validate size2d!  s)
+          | 'color set c tuple! (validate rgb!     c)
+          | 'href set u url!    (validate http-url! u)
           | skip
         ]
     ]
 ]
 ```
 
-This keeps dialects readable while adding meaningful validation.
+This keeps dialects readable while adding meaningful validation, and it gives dialect authors a shared validation framework instead of forcing every dialect to hand-roll checks.
 
 ---
 
@@ -593,25 +724,27 @@ A semantic type definition can be represented as metadata:
 
 ```rebol
 make semantic-type! [
-    name: 'rgb!
-    base: tuple!
-    schema: [
-        r: byte
-        g: byte
-        b: byte
-    ]
+    name: 'port!
+    base: integer!
+    shape: 'scalar
+    schema: [range 1 65535]
     parse-rule: [...compiled...]
 ]
 ```
+
+The `shape` field records whether the schema is positional, scalar, streamed, or named; it is derived from the base type's registered extractor.
 
 The runtime registry might contain:
 
 ```rebol
 semantic-types: make map! [
-    rgb!   make semantic-type! [...]
-    rgba!  make semantic-type! [...]
-    ipv4!  make semantic-type! [...]
-    size2d! make semantic-type! [...]
+    rgb!       make semantic-type! [...]
+    ipv4!      make semantic-type! [...]
+    port!      make semantic-type! [...]
+    slug!      make semantic-type! [...]
+    path!      make semantic-type! [...]
+    person!    make semantic-type! [...]
+    http-url!  make semantic-type! [...]
 ]
 ```
 
@@ -620,74 +753,57 @@ A generic validator can then work like this:
 ```rebol
 valid?: func [type value] [
     spec: select semantic-types type
-
     all [
+        spec
         spec/base = type? value
-        parse components-of value spec/parse-rule
+        parse to-components value spec/parse-rule
     ]
 ]
 ```
 
-Where `components-of` converts base values into parseable sequences:
+Where `to-components` dispatches on the base type's registered extractor:
 
 ```rebol
-components-of 255.0.0
-; [255 0 0]
-
-components-of 100x50
-; [100 50]
+to-components: func [value] [
+    case [
+        tuple?  value [to-block value]
+        pair?   value [reduce [value/x value/y]]
+        integer? value [reduce [value]]
+        number? value [reduce [value]]
+        string? value [value]
+        binary? value [value]
+        block?  value [value]
+        url?    value [form value]
+        object? value [mold-object-pairs value]
+        date?   value [reduce [value/year value/month value/day]]
+        time?   value [reduce [value/hour value/minute value/second]]
+        true [reduce [value]]
+    ]
+]
 ```
 
----
-
-## Component Extraction
-
-Each base datatype needs a component extraction strategy.
-
-| Base Type | Component Representation |
-|---|---|
-| `tuple!` | block of tuple components |
-| `pair!` | block of `[x y]` |
-| `string!` | character stream or original string |
-| `block!` | original block |
-| `object!` | field/value map or object accessor view |
-
-Examples:
-
-```rebol
-components-of 255.0.0
-; [255 0 0]
-
-components-of 192.168.1.10
-; [192 168 1 10]
-
-components-of 100x50
-; [100 50]
-```
-
-This gives the parse engine a consistent model:
-
-```text
-base value → component view → parse rule
-```
+Adding a new base type means adding a new case here and registering it; the schema compiler and validator are unchanged.
 
 ---
 
 ## Primitive Constraint Types
 
-Semantic schemas need a small vocabulary of primitive constraints.
-
-Examples:
+Semantic schemas need a small vocabulary of primitive constraints. These are independent of base type — they apply to whatever component the schema is currently validating.
 
 ```rebol
-byte              ; integer from 0 to 255
-integer           ; any integer
-positive-integer  ; integer greater than 0
-nonzero-integer   ; integer except 0
-number            ; integer or decimal
-percent           ; number from 0 to 100
-alpha             ; alphabetic character
-slug-char         ; letter, digit, or hyphen
+byte                ; integer from 0 to 255
+integer             ; any integer
+non-negative-integer
+positive-integer
+nonzero-integer
+number              ; integer or decimal
+percent             ; number from 0 to 100
+alpha               ; alphabetic character
+digit
+hex-char
+slug-char           ; letter, digit, or hyphen
+url-char
+segment             ; a valid path segment (word or string)
 ```
 
 These can themselves be parse rules or semantic predicates.
@@ -711,7 +827,13 @@ byte-rule: [
 ]
 ```
 
-The schema dialect can hide this detail.
+A scalar semantic type is simply a single-component schema whose constraint is one of these primitives or a `range`/`where` clause:
+
+```rebol
+type port!: integer! [range 1 65535]
+```
+
+The schema dialect can hide the distinction between positional, scalar, streamed, and named compilation.
 
 ---
 
@@ -730,7 +852,7 @@ type ipv4!: tuple! [
 ]
 ```
 
-The validator can report:
+the validator can report:
 
 ```text
 Invalid ipv4!: expected 4 components, got 3
@@ -742,15 +864,27 @@ or:
 Invalid ipv4!: component c must be byte, got 300
 ```
 
-or:
+For streamed schemas:
 
 ```text
-Invalid rgb!: expected component b to be byte, got "green"
+Invalid slug!: disallowed character ' ' at index 3
 ```
 
-The named fields in the schema are valuable even if the runtime representation is positional.
+For named schemas:
 
-They allow the language to explain failures in domain terms.
+```text
+Invalid person!: field age must be in range 0..150, got 200
+Invalid person!: missing required field name
+```
+
+For scalar schemas:
+
+```text
+Invalid port!: expected integer in range 1..65535, got 99999
+Invalid port!: expected integer!, got string!
+```
+
+The named fields in positional and named schemas are valuable even when the runtime representation is positional or field-map-based. They allow the language to explain failures in domain terms.
 
 ---
 
@@ -759,27 +893,31 @@ They allow the language to explain failures in domain terms.
 Semantic types can generate constructors.
 
 ```rebol
-rgb: func [r [byte!] g [byte!] b [byte!]] [
-    make rgb! reduce [r g b]
-]
-
-ipv4: func [a [byte!] b [byte!] c [byte!] d [byte!]] [
-    make ipv4! reduce [a b c d]
-]
+rgb:    func [r [byte!] g [byte!] b [byte!]]                [make rgb!      reduce [r g b]]
+ipv4:   func [a [byte!] b [byte!] c [byte!] d [byte!]]      [make ipv4!     reduce [a b c d]]
+port:   func [p [port!]]                                    [make port!     p]
+slug:   func [s [slug!]]                                    [make slug!     s]
+person: func [name [string!] . age [optional integer!]]     [make person!   reduce [name age]]
 ```
 
 Usage:
 
 ```rebol
-red: rgb 255 0 0
+red:    rgb 255 0 0
 server: ipv4 192 168 1 10
+p:      port 443
+s:      slug "user-42"
+ada:    person "Ada" 36
 ```
 
-The return values could still be raw tuples:
+The return values could still be raw base values:
 
 ```rebol
 type? red
 ; tuple!
+
+type? p
+; integer!
 ```
 
 Or the implementation could optionally tag them with semantic metadata:
@@ -787,9 +925,12 @@ Or the implementation could optionally tag them with semantic metadata:
 ```rebol
 semantic-type? red
 ; rgb!
+
+semantic-type? p
+; port!
 ```
 
-This is an important design choice.
+This is an important design choice (see below).
 
 ---
 
@@ -803,11 +944,15 @@ In the untagged model, semantic types are validation rules only.
 
 ```rebol
 red: 255.0.0
-
 type? red
 ; tuple!
-
 rgb? red
+; true
+
+p: 443
+type? p
+; integer!
+port? p
 ; true
 ```
 
@@ -831,12 +976,16 @@ In the tagged model, a value can carry an explicit semantic type tag.
 
 ```rebol
 red: make rgb! 255.0.0
-
 type? red
 ; tuple!
-
 semantic-type? red
 ; rgb!
+
+p: make port! 443
+type? p
+; integer!
+semantic-type? p
+; port!
 ```
 
 Advantages:
@@ -882,15 +1031,17 @@ The function dispatcher validates `255.0.0` against `rgb!` before entering the b
 ```rebol
 view [
     box 100x50 color 255.0.0
+    link "Docs" href http://example.com
 ]
 ```
 
-The dialect interpreter validates that `100x50` is a `size2d!` and `255.0.0` is an `rgb!`.
+The dialect interpreter validates that `100x50` is a `size2d!`, `255.0.0` is an `rgb!`, and the URL is an `http-url!`.
 
 ### 3. Constructor Time
 
 ```rebol
 red: rgb 255 0 0
+p:   port 443
 ```
 
 The constructor validates components before producing the value.
@@ -901,12 +1052,14 @@ A stricter language could allow typed bindings:
 
 ```rebol
 red [rgb!]: 255.0.0
+p   [port!]: 443
 ```
 
 or:
 
 ```rebol
 red: rgb! 255.0.0
+p:   port! 443
 ```
 
 This is more static-feeling and should probably be optional.
@@ -915,28 +1068,59 @@ This is more static-feeling and should probably be optional.
 
 ## Parse Rule Compilation
 
-A schema block:
+A positional schema block:
 
 ```rebol
-[
-    r: byte
-    g: byte
-    b: byte
-]
+[r: byte  g: byte  b: byte]
 ```
 
-can compile to a parse rule:
+compiles to:
+
+```rebol
+[set r byte-rule  set g byte-rule  set b byte-rule  end]
+```
+
+A scalar schema:
+
+```rebol
+[range 1 65535]
+```
+
+compiles to:
+
+```rebol
+[set n integer! (unless all [n >= 1 n <= 65535] [fail]) end]
+```
+
+A streamed schema:
+
+```rebol
+[some slug-char]
+```
+
+compiles to:
+
+```rebol
+[some slug-char-rule  end]
+```
+
+A named schema:
+
+```rebol
+[name: string  age: optional [range 0 150]]
+```
+
+compiles to:
 
 ```rebol
 [
-    set r byte-rule
-    set g byte-rule
-    set b byte-rule
+    'name set name string!
+    opt ['age set age [integer! (unless all [age >= 0 age <= 150] [fail])]]
     end
 ]
 ```
 
-A schema with optional elements:
+A schema with optional positional elements:
 
 ```rebol
 type version!: tuple! [
@@ -946,15 +1130,10 @@ type version!: tuple! [
 ]
 ```
 
-could compile to:
+compiles to:
 
 ```rebol
-[
-    set major integer!
-    set minor integer!
-    opt [set patch integer!]
-    end
-]
+[set major integer!  set minor integer!  opt [set patch integer!]  end]
 ```
 
 A schema with repetition:
@@ -965,16 +1144,13 @@ type path!: block! [
 ]
 ```
 
-could compile to:
+compiles to:
 
 ```rebol
-[
-    some segment-rule
-    end
-]
+[some segment-rule  end]
 ```
 
-The schema dialect does not need to expose every feature of `parse` immediately. It can start small and grow.
+The schema dialect does not need to expose every feature of `parse` immediately. It can start small and grow, but it should support all four shapes (positional, scalar, streamed, named) from the start so the system is genuinely generic.
 
 ---
 
@@ -1011,18 +1187,32 @@ type port!: integer! [
     range 1 65535
 ]
 
+type percent!: number! [
+    range 0 100
+]
+
 type slug!: string! [
     some slug-char
+]
+
+type path!: block! [
+    some segment
+]
+
+type person!: object! [
+    name:  string
+    age:   optional [range 0 150]
+    email: optional email!
 ]
 ```
 
 A later version could support dependent validation:
 
 ```rebol
-type date!: tuple! [
-    year: integer
+type iso-date!: date! [
+    year:  integer
     month: range 1 12
-    day: range 1 days-in-month year month
+    day:   range 1 days-in-month year month
 ]
 ```
 
@@ -1035,30 +1225,22 @@ But that should not be required for the first design.
 Traditional function specs might look like this:
 
 ```rebol
-connect: func [
-    address [tuple!]
-    port [integer!]
-] [
-    ; ...
-]
+connect: func [address [tuple!] port [integer!]] [...]
+navigate: func [s [string!]] [...]
 ```
 
 The proposed model extends this naturally:
 
 ```rebol
-connect: func [
-    address [ipv4!]
-    port [port!]
-] [
-    ; ...
-]
+connect: func [address [ipv4!] port [port!]] [...]
+navigate: func [s [slug!]] [...]
 ```
 
 The function machinery checks:
 
 1. Is `ipv4!` a built-in datatype?
 2. If not, is it a registered semantic type?
-3. If yes, validate the value against the semantic type’s base and parse rule.
+3. If yes, validate the value against the semantic type's base and parse rule.
 
 This allows semantic types to coexist with built-in types.
 
@@ -1075,6 +1257,7 @@ layout [
     text "Hello"
     size 200x40
     color 255.0.0
+    href http://example.com
 ]
 ```
 
@@ -1084,13 +1267,15 @@ Without semantic types, the dialect sees:
 string!
 pair!
 tuple!
+url!
 ```
 
 With semantic types, the dialect can say:
 
 ```text
-size expects size2d!
+size  expects size2d!
 color expects rgb!
+href  expects http-url!
 ```
 
 This gives dialect authors a shared validation framework instead of forcing every dialect to hand-roll checks.
@@ -1104,6 +1289,8 @@ Because semantic values are often represented as ordinary base values, serializa
 ```rebol
 red: 255.0.0
 server: 192.168.1.10
+p: 443
+s: "user-42"
 ```
 
 Serialized as data:
@@ -1111,7 +1298,9 @@ Serialized as data:
 ```rebol
 [
     color 255.0.0
-    host 192.168.1.10
+    host  192.168.1.10
+    port  443
+    slug  "user-42"
 ]
 ```
 
@@ -1122,6 +1311,8 @@ For tagged semantic values, serialization may need optional annotations:
 ```rebol
 make rgb! 255.0.0
 make ipv4! 192.168.1.10
+make port! 443
+make slug! "user-42"
 ```
 
 or:
@@ -1129,6 +1320,8 @@ or:
 ```rebol
 #rgb 255.0.0
 #ipv4 192.168.1.10
+#port 443
+#slug "user-42"
 ```
 
 The untagged model should remain the default for compatibility and readability.
@@ -1147,29 +1340,44 @@ Possible tooling features:
 - Generate constructors and predicates.
 - Generate test cases.
 - Provide editor hints for expected semantic values.
-- Warn about ambiguous tuple usage.
+- Warn about ambiguous value usage (e.g. a tuple that satisfies both `rgb!` and `semver!`).
 
 Example generated docs:
 
 ```text
+port!
+Base: integer!
+Shape: scalar
+Constraint: range 1..65535
+
 rgb!
 Base: tuple!
+Shape: positional
 Components:
   r byte 0..255
   g byte 0..255
   b byte 0..255
+
+slug!
+Base: string!
+Shape: streamed
+Constraint: some slug-char
 ```
 
 Example generated predicate:
 
 ```rebol
-rgb?: func [value] [valid? rgb! value]
+port?: func [value] [valid? 'port! value]
+rgb?:  func [value] [valid? 'rgb!  value]
+slug?: func [value] [valid? 'slug! value]
 ```
 
 Example generated constructor:
 
 ```rebol
-rgb: func [r g b] [make rgb! reduce [r g b]]
+port: func [p] [make port! p]
+rgb:  func [r g b] [make rgb! reduce [r g b]]
+slug: func [s] [make slug! s]
 ```
 
 ---
@@ -1179,8 +1387,8 @@ rgb: func [r g b] [make rgb! reduce [r g b]]
 A minimal implementation needs:
 
 1. A semantic type registry.
-2. A schema compiler.
-3. A component extraction function.
+2. A component-extraction protocol (one extractor per supported base type).
+3. A schema compiler that handles positional, scalar, streamed, and named shapes.
 4. A validator.
 5. Integration with function specs and dialect evaluators.
 
@@ -1190,31 +1398,55 @@ A minimal implementation needs:
 semantic-types: make map! []
 ```
 
-### Type Definition
+### Component Extractors
 
 ```rebol
-define-type: func [name base schema] [
-    rule: compile-schema schema
+extractors: make map! [
+    tuple!   func [v] [to-block v]
+    pair!    func [v] [reduce [v/x v/y]]
+    integer! func [v] [reduce [v]]
+    number!  func [v] [reduce [v]]
+    string!  func [v] [v]
+    binary!  func [v] [v]
+    block!   func [v] [v]
+    url!     func [v] [form v]
+    object!  func [v] [mold-object-pairs v]
+    date!    func [v] [reduce [v/year v/month v/day]]
+    time!    func [v] [reduce [v/hour v/minute v/second]]
+]
 
-    put semantic-types name make object! [
-        name: name
-        base: base
-        schema: schema
-        parse-rule: rule
+to-components: func [value] [
+    f: select extractors type? value
+    either f [f value] [reduce [value]]
+]
+```
+
+### Shape Detection
+
+```rebol
+shape-of: func [base] [
+    case [
+        find [tuple! pair! date! time!] base ['positional]
+        find [integer! number!]         base ['scalar]
+        find [string! binary! block! url!] base ['streamed]
+        base = object!                     ['named]
+        true                               ['scalar]
     ]
 ]
 ```
 
-### Component Extraction
+### Type Definition
 
 ```rebol
-components-of: func [value] [
-    case [
-        tuple? value [to-block value]
-        pair? value  [reduce [value/x value/y]]
-        block? value [value]
-        string? value [value]
-        true [reduce [value]]
+define-type: func [name base schema] [
+    rule:  compile-schema schema shape-of base
+    shape: shape-of base
+    put semantic-types name make object! [
+        name:       name
+        base:       base
+        shape:      shape
+        schema:     schema
+        parse-rule: rule
     ]
 ]
 ```
@@ -1225,12 +1457,12 @@ components-of: func [value] [
 valid?: func [type value] [
     either builtin-type? type [
         type = type? value
-    ] [
+    ][
         spec: select semantic-types type
         all [
             spec
             spec/base = type? value
-            parse components-of value spec/parse-rule
+            parse to-components value spec/parse-rule
         ]
     ]
 ]
@@ -1239,10 +1471,12 @@ valid?: func [type value] [
 ### Generated Predicate
 
 ```rebol
-rgb?: func [value] [valid? 'rgb! value]
+port?: func [value] [valid? 'port! value]
+rgb?:  func [value] [valid? 'rgb!  value]
+slug?: func [value] [valid? 'slug! value]
 ```
 
-This is only conceptual pseudocode, but it shows the basic architecture.
+This is only conceptual pseudocode, but it shows the basic architecture: extractors are pluggable, the schema compiler dispatches on shape, and the validator is uniform.
 
 ---
 
@@ -1300,59 +1534,62 @@ Yes. The same raw value may satisfy multiple semantic schemas.
 
 This is natural in a dynamic, context-driven language.
 
+### How do object-backed semantic types differ from plain object prototypes?
+
+A prototype defines structure and behavior. A semantic type over `object!` defines a *validation rule* over an object's fields, without requiring the object to have been constructed by any particular prototype. This lets semantic types validate objects produced by foreign code, serializers, or DSLs.
+
+The two mechanisms can coexist: a prototype can satisfy a semantic type, and a semantic type can be used to validate arbitrary objects. The relationship is worth pinning down before shipping.
+
 ### Should parse failures expose captures?
 
-For better errors, the schema compiler should preserve component names and expected constraints.
+For better errors, the schema compiler should preserve component names and expected constraints. Raw parse failure is not enough.
 
-Raw parse failure is not enough.
+### How are streamed schemas indexed for error reporting?
+
+Positional and named schemas have natural component names. Streamed schemas (string/block) do not. Error reporting for streamed schemas should use indices (`at index 3`) or token positions rather than field names.
 
 ---
 
 ## Recommended Initial Scope
 
-A practical first version should support:
+A practical first version should be **generic in its foundation**, not specific to any base datatype. It should support:
 
-- `tuple!` semantic types
-- `pair!` semantic types
-- named positional components
-- primitive constraints like `integer`, `byte`, `positive-integer`, `number`
-- generated predicates
-- function spec validation
-- simple error messages
+- A **pluggable component-extraction protocol** with extractors for a starter set of base datatypes.
+- Starter extractors for: `tuple!`, `pair!`, `integer!`, `number!`, `string!`, `block!`.
+- All four schema shapes: positional, scalar, streamed, named (named is optional in v1 — see below).
+- Named positional components (for tuple/pair).
+- Single-component scalar schemas (for integer/number) with `range` and `where`.
+- Streamed schemas with `some`, `any`, `optional`, and primitive character/token constraints.
+- Primitive constraints: `integer`, `byte`, `positive-integer`, `non-negative-integer`, `number`, `slug-char`, `alpha`, `digit`, `hex-char`, `segment`.
+- Generated predicates and constructors.
+- Function spec validation.
+- Simple, named error messages.
 
 Example initial syntax:
 
 ```rebol
-type rgb!: tuple! [
-    r: byte
-    g: byte
-    b: byte
-]
-
-type ipv4!: tuple! [
-    a: byte
-    b: byte
-    c: byte
-    d: byte
-]
-
-type size2d!: pair! [
-    width: positive-integer
-    height: positive-integer
-]
+type rgb!:    tuple!   [r: byte  g: byte  b: byte]
+type ipv4!:   tuple!   [a: byte  b: byte  c: byte  d: byte]
+type size2d!: pair!    [width: positive-integer  height: positive-integer]
+type port!:   integer! [range 1 65535]
+type percent!: number! [range 0 100]
+type slug!:   string!  [some slug-char]
+type path!:   block!   [some segment]
 ```
 
 Then expand later to:
 
-- strings
-- blocks
-- objects
-- optional components
-- repetitions
-- dependent constraints
-- tagged semantic values
-- documentation generation
-- editor tooling
+- `object!` extractor and named schemas.
+- `url!`, `date!`, `time!`, `binary!` extractors.
+- Optional positional components.
+- Repetition counts (e.g. `3 segment`).
+- Dependent constraints (`range 1 days-in-month year month`).
+- Tagged semantic values.
+- Documentation generation.
+- Editor tooling.
+- Cross-field validation for object-backed types.
+
+The principle is: **the extraction protocol is the MVP**. Once a base type has an extractor, every schema feature works for it automatically.
 
 ---
 
@@ -1363,7 +1600,7 @@ The main design principle is:
 ```text
 A raw datatype describes representation.
 A semantic type describes intent.
-A parse-backed schema connects the two.
+A parse-backed schema connects the two — over any base type's component view.
 ```
 
 So:
@@ -1372,68 +1609,71 @@ So:
 255.0.0
 ```
 
-is represented as:
-
-```text
-tuple!
-```
-
-but may be accepted as:
-
-```text
-rgb!
-```
-
-And:
+is represented as `tuple!` but may be accepted as `rgb!`.
 
 ```rebol
 192.168.1.10
 ```
 
-is represented as:
+is represented as `tuple!` but may be accepted as `ipv4!`.
 
-```text
-tuple!
+```rebol
+8080
 ```
 
-but may be accepted as:
+is represented as `integer!` but may be accepted as `port!`.
 
-```text
-ipv4!
+```rebol
+"user-42"
 ```
 
-This approach fits a modern Rebol clone because it treats types as dialect-driven validators rather than only as compiler-level declarations.
+is represented as `string!` but may be accepted as `slug!`.
+
+```rebol
+[a b c]
+```
+
+is represented as `block!` but may be accepted as `path!`.
+
+This approach fits a modern Rebol clone because it treats types as dialect-driven validators over any value's structure, rather than only as compiler-level declarations or only as tuple/pair special cases.
 
 ---
 
 ## Summary
 
-Parse-backed semantic types provide a lightweight, Rebol-native way to add domain meaning to compact literal values.
+Parse-backed semantic types provide a lightweight, Rebol-native way to add domain meaning to compact literal values, across **every** base datatype that can expose a component view.
 
 They allow code like this:
 
 ```rebol
-paint 255.0.0
+paint   255.0.0
 connect 192.168.1.10 443
-resize window 800x600
+resize  window 800x600
+navigate "user-42"
+open    443
+fetch   http://example.com
 ```
 
 while still giving APIs and dialects the ability to enforce:
 
 ```rebol
-paint: func [color [rgb!]] [...]
-connect: func [address [ipv4!] port [port!]] [...]
-resize: func [target [object!] size [size2d!]] [...]
+paint:    func [color [rgb!]]                       [...]
+connect:  func [address [ipv4!] port [port!]]       [...]
+resize:   func [target [object!] size [size2d!]]    [...]
+navigate: func [s [slug!]]                          [...]
+open:     func [p [port!]]                          [...]
+fetch:    func [u [http-url!]]                      [...]
 ```
 
-The result is a type system that stays close to Rebol’s philosophy:
+The result is a type system that stays close to Rebol's philosophy:
 
 - values are simple
 - syntax is compact
 - meaning comes from context
 - dialects are central
 - `parse` is the engine of structure
+- any base datatype can host semantic subtypes via a pluggable extractor
 
 In short:
 
-> Semantic types are schemas over values, and schemas are dialects that compile to parse rules.
+> Semantic types are schemas over values, schemas are dialects that compile to parse rules, and every base datatype participates through its component view.
