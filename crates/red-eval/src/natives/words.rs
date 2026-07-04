@@ -595,6 +595,9 @@ pub(crate) fn types_of(args: &[Value], _r: &RefineArgs, _e: &mut Env) -> Result<
             | Value::SetPath { .. }
     );
     let is_any_object = matches!(v, Value::Object(_));
+    // M87: `any-function!` umbrella covers `function!`/`native!`/`op!`/
+    // `closure!` (and any future `routine!`).
+    let is_any_function = matches!(v, Value::Func(_) | Value::Closure(_));
     // `series!` covers blocks, parens, paths, strings, binary, files, urls.
     let is_series = matches!(
         v,
@@ -631,6 +634,9 @@ pub(crate) fn types_of(args: &[Value], _r: &RefineArgs, _e: &mut Env) -> Result<
     }
     if is_any_object {
         out.push(Value::word("any-object!"));
+    }
+    if is_any_function {
+        out.push(Value::word("any-function!"));
     }
     if is_series {
         out.push(Value::word("series!"));

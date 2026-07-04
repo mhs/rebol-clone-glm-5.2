@@ -206,7 +206,9 @@ pub(crate) fn extract_spec(spec_block: &Value) -> Result<FuncSpec, EvalError> {
 
 /// `function? value` — `true` if value is a `function!` or `closure!`, else
 /// `false`. M60: a closure is a function (subset relation: `closure?` →
-/// `function?` but not vice versa).
+/// `function?` but not vice versa). M87: the broad umbrella — true on
+/// `native!`/`op!`/`function!`/`closure!` alike (kept back-compat so existing
+/// fixtures like `function? :square` keep passing).
 pub(crate) fn function_predicate(
     args: &[Value],
     _refs: &RefineArgs,
@@ -214,6 +216,57 @@ pub(crate) fn function_predicate(
 ) -> Result<Value, EvalError> {
     if args.is_empty() {
         return Err(arity_err(args, "function?", 1, 0));
+    }
+    Ok(Value::Logic(matches!(
+        args[0],
+        Value::Func(_) | Value::Closure(_)
+    )))
+}
+
+/// `native? value` — `true` iff `value` is a built-in (`Value::Func` with
+/// `native.is_some()`) that is NOT an infix operator. Red parity: `op?` and
+/// `native?` are disjoint — an infix native like `+` is an `op!`, not a
+/// `native!`. Returns `false` on closures and user-defined funcs.
+pub(crate) fn native_predicate(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(arity_err(args, "native?", 1, 0));
+    }
+    Ok(Value::Logic(matches!(
+        &args[0],
+        Value::Func(fd) if fd.native.is_some() && !fd.infix
+    )))
+}
+
+/// `op? value` — `true` iff `value` is an infix operator (`Value::Func` with
+/// `fd.infix == true`). Returns `false` on closures and non-infix natives.
+pub(crate) fn op_predicate(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(arity_err(args, "op?", 1, 0));
+    }
+    Ok(Value::Logic(
+        matches!(&args[0], Value::Func(fd) if fd.infix),
+    ))
+}
+
+/// `any-function? value` — `true` iff `value` is any function-kind value
+/// (`function!`/`native!`/`op!`/`closure!`). M87 open-q #2 decision: add the
+/// umbrella predicate for completeness; mirrors `function?` (the existing
+/// broad predicate) but named to match Red's `any-function?`.
+pub(crate) fn any_function_predicate(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
+    if args.is_empty() {
+        return Err(arity_err(args, "any-function?", 1, 0));
     }
     Ok(Value::Logic(matches!(
         args[0],

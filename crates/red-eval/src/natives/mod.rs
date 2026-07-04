@@ -155,7 +155,22 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::LitWord { .. } => "lit-word!",
         Value::Block { .. } => "block!",
         Value::Paren { .. } => "paren!",
-        Value::Func(_) => "function!",
+        // M87: `native!`/`op!`/`function!` split. Red distinguishes infix
+        // operators (`op!`) from built-ins (`native!`) from user-defined
+        // functions (`function!`). We keep the `FuncDef` flags (no `Value`
+        // enum split — see plan8 M87 decision) but surface the distinction
+        // here so `type?`/`types-of`/error messages report the right word.
+        // Order matters: an infix native (e.g. `+`) is an `op!`, NOT a
+        // `native!` (Red parity — `op?` and `native?` are disjoint).
+        Value::Func(fd) => {
+            if fd.infix {
+                "op!"
+            } else if fd.native.is_some() {
+                "native!"
+            } else {
+                "function!"
+            }
+        }
         Value::Closure(_) => "closure!",
         Value::Path { .. } => "path!",
         Value::GetPath { .. } => "get-path!",
@@ -1083,6 +1098,95 @@ mod tests {
         );
         // None matches only `none!` (no umbrella).
         assert_eq!(mold_to_string(&val("types-of none")), "[none!]");
+    }
+
+    // --- M87 native!/op!/function! split ---
+
+    #[test]
+    fn m87_type_of_plus_is_op() {
+        // `+` is registered with `infix: true` AND `native: Some(...)`; the
+        // infix check wins → `op!` (Red parity: an op is NOT a native).
+        assert_eq!(mold_to_string(&val("type? :+")), "op!");
+    }
+
+    #[test]
+    fn m87_type_of_print_is_native() {
+        assert_eq!(mold_to_string(&val("type? :print")), "native!");
+    }
+
+    #[test]
+    fn m87_type_of_user_func_is_function() {
+        assert_eq!(mold_to_string(&val("type? func [x][x]")), "function!");
+    }
+
+    #[test]
+    fn m87_type_of_closure_is_closure() {
+        assert_eq!(mold_to_string(&val("type? closure [] []")), "closure!");
+    }
+
+    #[test]
+    fn m87_native_predicate() {
+        // `print` is a non-infix native → true.
+        assert_eq!(mold_to_string(&val("native? :print")), "true");
+        // `+` is infix → NOT a native (disjoint from `op?`).
+        assert_eq!(mold_to_string(&val("native? :+")), "false");
+        // User-defined func → false.
+        assert_eq!(mold_to_string(&val("native? func [] []")), "false");
+        // Closure → false (use `closure?`/`any-function?`).
+        assert_eq!(mold_to_string(&val("native? closure [] []")), "false");
+        // Non-function → false.
+        assert_eq!(mold_to_string(&val("native? 5")), "false");
+    }
+
+    #[test]
+    fn m87_op_predicate() {
+        assert_eq!(mold_to_string(&val("op? :+")), "true");
+        assert_eq!(mold_to_string(&val("op? :print")), "false");
+        assert_eq!(mold_to_string(&val("op? func [] []")), "false");
+        assert_eq!(mold_to_string(&val("op? 5")), "false");
+    }
+
+    #[test]
+    fn m87_any_function_predicate() {
+        // Umbrella: true on all function-kinds.
+        assert_eq!(mold_to_string(&val("any-function? :+")), "true");
+        assert_eq!(mold_to_string(&val("any-function? :print")), "true");
+        assert_eq!(mold_to_string(&val("any-function? func [] []")), "true");
+        assert_eq!(mold_to_string(&val("any-function? closure [] []")), "true");
+        // Non-function → false.
+        assert_eq!(mold_to_string(&val("any-function? 5")), "false");
+    }
+
+    #[test]
+    fn m87_function_predicate_unchanged_broad() {
+        // `function?` stays the broad umbrella (back-compat): true on
+        // native!/op!/function!/closure! alike.
+        assert_eq!(mold_to_string(&val("function? :+")), "true");
+        assert_eq!(mold_to_string(&val("function? :print")), "true");
+        assert_eq!(mold_to_string(&val("function? func [] []")), "true");
+        assert_eq!(mold_to_string(&val("function? closure [] []")), "true");
+        assert_eq!(mold_to_string(&val("function? 5")), "false");
+    }
+
+    #[test]
+    fn m87_types_of_func_includes_any_function() {
+        // A native's `types-of` includes `native!` (primary) + `any-function!`.
+        assert_eq!(
+            mold_to_string(&val("types-of :print")),
+            "[native! any-function!]"
+        );
+        // An op's `types-of` includes `op!` (primary) + `any-function!`.
+        assert_eq!(mold_to_string(&val("types-of :+")), "[op! any-function!]");
+        // A user func: `function!` + `any-function!`.
+        assert_eq!(
+            mold_to_string(&val("types-of func [] []")),
+            "[function! any-function!]"
+        );
+        // A closure: `closure!` + `any-function!`.
+        assert_eq!(
+            mold_to_string(&val("types-of closure [] []")),
+            "[closure! any-function!]"
+        );
     }
 
     // --- M42 error value tests ---

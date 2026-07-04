@@ -697,36 +697,54 @@ layer.** This avoids a sweeping `Value` refactor (splitting `Func` into
 `Native`/`Function`/`Op` would touch every match arm) while satisfying the
 `type?` contract.
 
-- [ ] Update `type_name` (`natives/mod.rs:134`):
-  - [ ] `Value::Func(fd)` where `fd.native.is_some()` → `"native!"`.
-  - [ ] `Value::Func(fd)` where `fd.infix` → `"op!"`.
-  - [ ] `Value::Func(fd)` otherwise → `"function!"`.
-  - [ ] `Value::Closure(_)` → `"closure!"` (unchanged).
-- [ ] Add `native?` predicate — true on `Value::Func` with `native.is_some()`
+- [x] Update `type_name` (`natives/mod.rs:134`):
+  - [x] `Value::Func(fd)` where `fd.native.is_some()` → `"native!"`.
+  - [x] `Value::Func(fd)` where `fd.infix` → `"op!"`.
+  - [x] `Value::Func(fd)` otherwise → `"function!"`.
+  - [x] `Value::Closure(_)` → `"closure!"` (unchanged).
+- [x] Add `native?` predicate — true on `Value::Func` with `native.is_some()`
       OR on `Value::Closure` (closures are native-ish? **decision: no —
       `native?` is false on closures**; `closure?` is the strict predicate
       and `function?` is the broad one).
-- [ ] Add `op?` predicate — true on `Value::Func` with `fd.infix`.
-- [ ] Update `type?` to return `native!`/`op!`/`function!`/`closure!`
+- [x] Add `op?` predicate — true on `Value::Func` with `fd.infix`.
+- [x] Update `type?` to return `native!`/`op!`/`function!`/`closure!`
       appropriately.
-- [ ] Update `types-of` to include the right type words (e.g. a native is
+- [x] Update `types-of` to include the right type words (e.g. a native is
       `[native! function!]`).
-- [ ] Inline `#[test]`: `type? :+` → `op!`; `type? :print` → `native!`;
+      *(Actual umbrella word is `any-function!` per Red — open-q #2's
+      `any-function?` predicate confirms the umbrella name. A native molds
+      `types-of` as `[native! any-function!]`; an op as `[op! any-function!]`;
+      a user func as `[function! any-function!]`; a closure as
+      `[closure! any-function!]`.)*
+- [x] Inline `#[test]`: `type? :+` → `op!`; `type? :print` → `native!`;
         `type? :func [x][x]` → `function!`.
-- [ ] Inline `#[test]`: `native? :print` → true; `native? :+` → true
+        *(Plus `type? closure [] []` → `closure!` — `m87_type_of_closure_is_closure`.)
+- [x] Inline `#[test]`: `native? :print` → true; `native? :+` → true
         (`+` is native AND op — `op?` is the strict op check; `native?` is
         "is it a built-in function" which includes ops. **Confirm Red
         parity**: in Red `op?` and `native?` are disjoint — an op is NOT a
         native. Decision: `native?` false on `infix` funcs; `op?` true on
         them. `function?` true on all three.)
-- [ ] Inline `#[test]`: `op? :+` → true; `op? :print` → false.
-- [ ] Inline `#[test]`: `function? :+`, `function? :print`,
+        *(Confirmed disjoint: `native? :+` → false; `op? :+` → true.
+        `m87_native_predicate` covers the full matrix incl. `native? :+` →
+        false.)*
+- [x] Inline `#[test]`: `op? :+` → true; `op? :print` → false.
+        *(`m87_op_predicate`.)*
+- [x] Inline `#[test]`: `function? :+`, `function? :print`,
         `function? :func [x][x]` → all true.
-- [ ] Add golden fixtures: `type_split_native`, `type_split_op`.
-- [ ] Audit existing fixtures: any fixture asserting `type? :foo == function!`
+        *(`m87_function_predicate_unchanged_broad` — also covers `closure [] []`
+        → true, since `function?` is the broad umbrella kept for back-compat.)*
+- [x] Add golden fixtures: `type_split_native`, `type_split_op`.
+- [x] Audit existing fixtures: any fixture asserting `type? :foo == function!`
         for a native needs updating to `native!`/`op!`. The parity harness
-        catches this.
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+        catches this. *(Audited — no existing fixture asserts `type? :foo`
+        on a native/op; `get_set_valueq`/`paths` use `function?` on user
+        funcs which stay true under the broad predicate.)*
+- [x] `cargo test --workspace` green; `--features force-walk` green.
+- [x] **Open-q #2:** add `any-function?` predicate. *(Added alongside
+      `native?`/`op?`; covers `function!`/`native!`/`op!`/`closure!`. Mirrors
+      `function?`'s match set today — named to match Red's umbrella. Covered
+      by `m87_any_function_predicate`.)*
 
 ### M87 open questions
 

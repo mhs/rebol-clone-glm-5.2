@@ -25,8 +25,8 @@ use super::control::{
 };
 use super::eval::{do_native, load_native, reduce};
 use super::func::{
-    closure_native, closure_predicate, does_native, func_native, function_native,
-    function_predicate, return_native,
+    any_function_predicate, closure_native, closure_predicate, does_native, func_native,
+    function_native, function_predicate, native_predicate, op_predicate, return_native,
 };
 use super::io::{prin, print, probe};
 use super::words::{
@@ -298,6 +298,19 @@ pub fn register_natives(env: &mut Env) {
     env.natives.insert(
         Symbol::new("function?"),
         fixed_native(function_predicate as NativeFn, 1),
+    );
+    // M87: native!/op!/function! split — strict predicates + umbrella.
+    env.natives.insert(
+        Symbol::new("native?"),
+        fixed_native(native_predicate as NativeFn, 1),
+    );
+    env.natives.insert(
+        Symbol::new("op?"),
+        fixed_native(op_predicate as NativeFn, 1),
+    );
+    env.natives.insert(
+        Symbol::new("any-function?"),
+        fixed_native(any_function_predicate as NativeFn, 1),
     );
     env.natives.insert(
         Symbol::new("return"),
