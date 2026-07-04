@@ -21,7 +21,7 @@
 
 use std::cell::Cell;
 
-use red_core::value::{ErrorValue, FuncDef, Symbol, Value};
+use red_core::value::{ErrorValue, FuncDef, Symbol, Value, VectorDef};
 use red_core::{CompileErrorKind, Env, EvalError, NativeFn, RefineArgs};
 
 use crate::natives::{arity_err, type_name};
@@ -748,7 +748,178 @@ fn money_binop(args: &[Value], op: &str) -> Result<Option<Value>, EvalError> {
     }
 }
 
-/// `+` infix — numeric addition, with string concatenation when both operands
+/// M84: vector! binary arithmetic dispatcher. Returns `Some(value)` when at
+/// least one operand is a `vector!`; `None` otherwise (so non-vector operands
+/// fall through to the next dispatcher in the chain).
+///
+/// - `vec ± vec` (same kind, same length): componentwise. Errors on length
+///   mismatch. Cross-kind mixed (int + float) promotes the int-kind operand
+///   to float-kind (lossy), then componentwise.
+/// - `vec * vec` / `vec / vec`: componentwise. Int-kind `/` promotes to
+///   float-kind (Red parity — `/` always returns a float).
+/// - `vec ± scalar` (scalar = Integer/Float/Percent): broadcast (scalar
+///   narrowed to the vector's kind).
+/// - `scalar ± vec`: commutative mirror.
+/// - `vec * scalar` / `vec / scalar` / `scalar * vec`: broadcast.
+/// - Length mismatch → `Native` error.
+/// - Non-numeric scalar → `TypeError`.
+fn vector_binop(args: &[Value], op: &str) -> Result<Option<Value>, EvalError> {
+    let a = &args[0];
+    let b = &args[1];
+    let a_v = matches!(a, Value::Vector(_));
+    let b_v = matches!(b, Value::Vector(_));
+    if !a_v && !b_v {
+        return Ok(None);
+    }
+
+    // vec OP vec — same length required (after cross-kind promotion).
+    if a_v && b_v {
+        let (va, vb) = match (a, b) {
+            (Value::Vector(x), Value::Vector(y)) => (x.clone(), y.clone()),
+            _ => unreachable!(),
+        };
+        let va_b = va.borrow();
+        let vb_b = vb.borrow();
+        if va_b.len() != vb_b.len() {
+            return Err(EvalError::Native {
+                message: format!(
+                    "vector {}: length mismatch ({} vs {})",
+                    op,
+                    va_b.len(),
+                    vb_b.len()
+                ),
+                span: a.span_or_default(),
+            });
+        }
+        // Determine the result kind. Cross-kind: promote int-kind to float.
+        let a_kind = va_b.kind();
+        let b_kind = vb_b.kind();
+        let a_is_float = a_kind.as_str().contains("float");
+        let b_is_float = b_kind.as_str().contains("float");
+        let result_kind = if a_is_float || b_is_float {
+            Symbol::new("float!")
+        } else if op == "divide" {
+            // `/`on int-kind promotes to float-kind (Red parity).
+            Symbol::new("float!")
+        } else {
+            a_kind.clone()
+        };
+        let a_elems = va_b.elements();
+        let b_elems = vb_b.elements();
+        drop(va_b);
+        drop(vb_b);
+        let mut out: Vec<Value> = Vec::with_capacity(a_elems.len());
+        for (x, y) in a_elems.iter().zip(b_elems.iter()) {
+            let r = scalar_binop(x, y, op, a.span_or_default())?;
+            out.push(r);
+        }
+        // Narrow each element to the result kind (the scalar_binop may have
+        // produced an int where float is needed, or vice versa).
+        let tmp = VectorDef::new(result_kind.clone(), Vec::new());
+        let narrowed: Vec<Value> = out.iter().map(|v| tmp.narrow(v)).collect();
+        return Ok(Some(Value::vector(VectorDef::new(result_kind, narrowed))));
+    }
+
+    // vec OP scalar / scalar OP vec — broadcast.
+    let (vec, scalar, scalar_on_left) = if a_v {
+        (
+            match a {
+                Value::Vector(v) => v.clone(),
+                _ => unreachable!(),
+            },
+            b.clone(),
+            false,
+        )
+    } else {
+        (
+            match b {
+                Value::Vector(v) => v.clone(),
+                _ => unreachable!(),
+            },
+            a.clone(),
+            true,
+        )
+    };
+    let v_b = vec.borrow();
+    if !v_b.accepts(&scalar) {
+        return Err(EvalError::TypeError {
+            expected: "numeric value",
+            found: type_name(&scalar),
+            span: scalar.span_or_default(),
+        });
+    }
+    let kind = v_b.kind();
+    let elems = v_b.elements();
+    drop(v_b);
+    // For `/` with int-kind, promote to float-kind.
+    let result_kind = if op == "divide" && !kind.as_str().contains("float") {
+        Symbol::new("float!")
+    } else {
+        kind.clone()
+    };
+    let mut out: Vec<Value> = Vec::with_capacity(elems.len());
+    for x in &elems {
+        let r = if scalar_on_left {
+            scalar_binop(&scalar, x, op, a.span_or_default())?
+        } else {
+            scalar_binop(x, &scalar, op, a.span_or_default())?
+        };
+        out.push(r);
+    }
+    let tmp = VectorDef::new(result_kind.clone(), Vec::new());
+    let narrowed: Vec<Value> = out.iter().map(|v| tmp.narrow(v)).collect();
+    Ok(Some(Value::vector(VectorDef::new(result_kind, narrowed))))
+}
+
+/// Scalar binary op helper for `vector_binop`: applies `op` to two scalar
+/// `Value`s (Integer/Float/Percent) and returns the result. Errors on
+/// non-numeric inputs. For int + int with add/subtract/multiply, returns an
+/// integer (so an int-kind vector stays int-kind); otherwise float.
+fn scalar_binop(a: &Value, b: &Value, op: &str, span: red_core::Span) -> Result<Value, EvalError> {
+    let na = as_number(a).ok_or_else(|| EvalError::TypeError {
+        expected: "number!",
+        found: type_name(a),
+        span: a.span_or_default(),
+    })?;
+    let nb = as_number(b).ok_or_else(|| EvalError::TypeError {
+        expected: "number!",
+        found: type_name(b),
+        span: b.span_or_default(),
+    })?;
+    // Integer fast path: int OP int → int (when no overflow & not `/`).
+    if let (Num::Int(x), Num::Int(y)) = (&na, &nb) {
+        let (x, y) = (*x, *y);
+        let int_op = match op {
+            "add" => x.checked_add(y),
+            "subtract" | "subtraction" => x.checked_sub(y),
+            "multiply" => x.checked_mul(y),
+            _ => None,
+        };
+        if let Some(n) = int_op {
+            return Ok(Value::integer(n));
+        }
+    }
+    let (af, bf) = match (na, nb) {
+        (Num::Int(x), Num::Int(y)) => (x as f64, y as f64),
+        (Num::Int(x), Num::Float(y)) => (x as f64, y),
+        (Num::Float(x), Num::Int(y)) => (x, y as f64),
+        (Num::Float(x), Num::Float(y)) => (x, y),
+    };
+    let r = match op {
+        "add" => af + bf,
+        "subtract" | "subtraction" => af - bf,
+        "multiply" => af * bf,
+        "divide" => af / bf,
+        _ => {
+            return Err(EvalError::Native {
+                message: format!("vector: unsupported op {op}"),
+                span,
+            })
+        }
+    };
+    Ok(Value::float(r))
+}
+
 /// are strings (M15), and char arithmetic (M38: `char + int → char`,
 /// `char + char → int`). M44: pair/tuple arithmetic. Falls through to numeric
 /// addition otherwise.
@@ -774,6 +945,10 @@ pub(crate) fn add(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<
     }
     // M80: money arithmetic (same-currency add/sub; money ± int; money * int).
     if let Some(r) = money_binop(args, "add")? {
+        return Ok(r);
+    }
+    // M84: vector arithmetic (componentwise; broadcast scalar).
+    if let Some(r) = vector_binop(args, "add")? {
         return Ok(r);
     }
     // M80: percent + percent → percent (everything else promotes to float
@@ -821,6 +996,10 @@ pub(crate) fn subtract(
     if let Some(r) = money_binop(args, "subtract")? {
         return Ok(r);
     }
+    // M84: vector subtraction (componentwise; broadcast scalar).
+    if let Some(r) = vector_binop(args, "subtract")? {
+        return Ok(r);
+    }
     // M80: percent - percent → percent (everything else promotes to float).
     if let Some(r) = percent_binop(args, "subtraction", |a, b| a - b)? {
         return Ok(r);
@@ -842,6 +1021,10 @@ pub(crate) fn multiply(
     }
     // M80: money * integer → money (integer * money → money).
     if let Some(r) = money_binop(args, "multiply")? {
+        return Ok(r);
+    }
+    // M84: vector multiplication (componentwise; broadcast scalar).
+    if let Some(r) = vector_binop(args, "multiply")? {
         return Ok(r);
     }
     num_binop(args, "multiply", |a, b| Some(a * b), |a, b| a * b)
@@ -881,6 +1064,11 @@ pub(crate) fn divide(
     }
     // M80: money / money → float (ratio); money / integer → money.
     if let Some(r) = money_binop(args, "divide")? {
+        return Ok(r);
+    }
+    // M84: vector division (componentwise; broadcast scalar; int-kind `/`
+    // promotes to float-kind).
+    if let Some(r) = vector_binop(args, "divide")? {
         return Ok(r);
     }
     num_binop(

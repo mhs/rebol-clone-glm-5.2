@@ -23,8 +23,8 @@
 
 use proptest::prelude::*;
 use red_core::{
-    load_source, mold_to_string, printer::mold, Context, DateValue, MapDef, MapKey, ModuleDef,
-    Series, Span, Symbol, Value,
+    load_source, mold_to_string, printer::mold, Context, DateValue, HashDef, MapDef, MapKey,
+    ModuleDef, Series, Span, Symbol, Value, VectorDef,
 };
 use std::rc::Rc;
 
@@ -348,6 +348,79 @@ proptest! {
         prop_assert!(
             molded1.starts_with("make map! ["),
             "expected `make map! [...]` form, got: {molded1}"
+        );
+        prop_assert!(molded1.ends_with(']'), "expected closing ]: {molded1}");
+    }
+}
+
+// M83: `hash!` mold stability. Like `map!`, `hash!` is synthetic (mold as
+// `make hash! [...]` which parses to a block, not a Hash value), so it's
+// excluded from `gen_value`. This focused test builds a `HashDef` directly
+// with hashable keys and asserts that molding it twice yields the same
+// string (the `key_order` vec makes output deterministic), and that the form
+// starts with `make hash! [`.
+proptest! {
+    #[test]
+    fn hash_mold_is_stable(
+        word_keys in prop::collection::vec("[a-z][a-z0-9]{0,6}", 0..4),
+        int_keys in prop::collection::vec(any::<i64>(), 0..3),
+    ) {
+        let h = HashDef::new();
+        for (i, k) in word_keys.iter().enumerate() {
+            h.set(
+                MapKey::Sym(Symbol::new(k)),
+                Value::Integer { n: i as i64, span: Span::new(0, 0) },
+            );
+        }
+        for (i, k) in int_keys.iter().enumerate() {
+            h.set(MapKey::Int(*k), Value::integer((i as i64) * 10));
+        }
+        let v = Value::hash(h);
+        let molded1 = mold_to_string(&v);
+        let molded2 = mold_to_string(&v);
+        prop_assert_eq!(&molded1, &molded2, "mold not deterministic");
+        prop_assert!(
+            molded1.starts_with("make hash! ["),
+            "expected `make hash! [...]` form, got: {molded1}"
+        );
+        prop_assert!(molded1.ends_with(']'), "expected closing ]: {molded1}");
+    }
+}
+
+// M84: `vector!` mold stability. Like `hash!`, `vector!` is synthetic (mold
+// as `make vector! [...]` which parses to a block, not a Vector value), so
+// it's excluded from `gen_value`. This focused test builds a `VectorDef`
+// directly with integer or float kinds and asserts that molding it twice
+// yields the same string, and that the form starts with `make vector! [`.
+proptest! {
+    #[test]
+    fn vector_mold_is_stable(
+        int_elems in prop::collection::vec(any::<i64>(), 0..8),
+        float_elems in prop::collection::vec(any::<f64>(), 0..8),
+    ) {
+        let int_v = Value::vector(VectorDef::new(
+            Symbol::new("integer!"),
+            int_elems.iter().map(|n| Value::integer(*n)).collect(),
+        ));
+        let molded1 = mold_to_string(&int_v);
+        let molded2 = mold_to_string(&int_v);
+        prop_assert_eq!(&molded1, &molded2, "int mold not deterministic");
+        prop_assert!(
+            molded1.starts_with("make vector! [integer!"),
+            "expected `make vector! [integer! ...]` form, got: {molded1}"
+        );
+        prop_assert!(molded1.ends_with(']'), "expected closing ]: {molded1}");
+
+        let float_v = Value::vector(VectorDef::new(
+            Symbol::new("float!"),
+            float_elems.iter().map(|f| Value::float(*f)).collect(),
+        ));
+        let molded1 = mold_to_string(&float_v);
+        let molded2 = mold_to_string(&float_v);
+        prop_assert_eq!(&molded1, &molded2, "float mold not deterministic");
+        prop_assert!(
+            molded1.starts_with("make vector! [float!"),
+            "expected `make vector! [float! ...]` form, got: {molded1}"
         );
         prop_assert!(molded1.ends_with(']'), "expected closing ]: {molded1}");
     }

@@ -125,6 +125,22 @@ pub struct BitsetDef {                          // M46 — bit-packed byte set
 // API: new(len), set(byte), clear(byte), test(byte), union/intersect/difference/
 //      complement, from_chars(&str), from_range(byte, byte)
 
+pub struct VectorDef {                          // M84 — typed-element numeric series
+    pub kind: RefCell<Symbol>,                  // integer!/float!/i8!/…/f64! — drives narrow-on-write
+    pub elems: RefCell<Vec<Value>>,             // Vec of Integer/Float (narrowed on write)
+    pub cursor: RefCell<usize>,                 // series cursor for next/back/at/skip/head/tail/index?
+}
+// API: new(kind, elems), empty(kind), pick(idx)/poke(idx, val) — 1-based,
+//      narrow(val) (clamp ints; round floats), kind_word(s) -> Option<Symbol>,
+//      kind_word_value() -> Value (word form for `vec/integer` path),
+//      infer_vector_kind(&[Value]) -> Result<(Symbol, Vec<Value>), String>
+//      (int → integer!, float → float!, mixed → float! with promotion).
+//      Stored as Vec<Value> for native-compat (packed-array wording is
+//      aspirational; perf deferred to v0.8). Full series! model: cursor-backed
+//      `next`/`back`/`at`/`skip`/`head`/`tail`/`index?` return a positioned
+//      Block view via `extract_series` (documented deviation from Red, where
+//      these return a positioned series over the vector's storage).
+
 pub struct DateValue {                          // M45 — single variant covers date-only / date+time / date+time+zone
     pub dt: chrono::NaiveDateTime,
     pub zone: Option<i32>,                      // minutes east of UTC; None = zone-naive (matches Red's date!/zone)
@@ -198,6 +214,8 @@ pub enum Value {
     Closure(Rc<ClosureDef>),                             // closure! — M60 (synthetic, no span)
     Module(Rc<RefCell<ModuleDef>>),                      // module! — M61 (synthetic, no span)
     Port(Rc<RefCell<PortDef>>),                          // port! — M113 (synthetic, no span)
+    Hash(Rc<RefCell<HashDef>>),                         // hash! — M83 (synthetic, no span)
+    Vector(Rc<RefCell<VectorDef>>),                      // vector! — M84 (synthetic, no span)
 }
 ```
 
@@ -205,7 +223,7 @@ Every source-origin variant (`Integer`/`Float`/`String`/word-family/`Block`/`Par
 `Path`/`GetPath`/`LitPath`/`SetPath`/`Refinement`/`File`/`Url`/`Char`/`String8`/
 `Pair`/`Tuple`/`Date`) carries the byte-offset `Span` of its originating token so
 eval-time errors can render `file:line:col:`. Synthetic variants (`None`/`Logic`/
-`Func`/`Error`/`Object`/`Map`/`Bitset`/`Closure`/`Module`/`Port`) are produced at runtime
+`Func`/`Error`/`Object`/`Map`/`Bitset`/`Closure`/`Module`/`Port`/`Hash`/`Vector`) are produced at runtime
 and carry no span; error rendering falls back to the call-site span (the
 originating `closure`/`module`/`open` native call's span, attached to the `EvalError`).
 

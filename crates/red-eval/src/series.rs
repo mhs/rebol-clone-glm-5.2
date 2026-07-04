@@ -24,6 +24,7 @@
 
 use red_core::value::{Series, Span, Symbol, Value};
 use red_core::{Env, EvalError, RefineArgs};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::interp::{active_captures, dispatch_block, resolve_compiled_block};
@@ -41,6 +42,39 @@ fn extract_series(v: &Value) -> Result<(Series, Span, bool), EvalError> {
     match v {
         Value::Block { series, span } => Ok((series.clone(), *span, false)),
         Value::Paren { series, span } => Ok((series.clone(), *span, true)),
+        // M84: vector! is a `series!` with a real cursor. We build a Series
+        // view that shares the vector's element storage (pushed into a fresh
+        // Rc<RefCell<Vec<Value>>>) and seeds the cursor from the vector's
+        // cursor field. Positional ops (`pick`/`poke`/`first`/`last`) bypass
+        // this path and operate on the VectorDef directly (they need
+        // narrow-on-write and typed returns). Cursor navigation (`next`/
+        // `back`/`at`/`skip`/`head`/`tail`/`index?`) goes through this Series
+        // view — cursored navigation returns a positioned Block, not a
+        // vector! (documented deviation: Red returns a positioned series over
+        // the vector's storage; we return a positioned Block snapshot).
+        // Mutation through `poke` on the returned Block propagates to the
+        // shared storage (Rc<RefCell<...>>), so subsequent `pick` on the
+        // original vector sees the change. Other mutations (`append`/
+        // `insert`/`remove`/`take`/`clear`) on the returned Block do NOT
+        // propagate — the cursor ops are read-positioned views.
+        Value::Vector(vd) => {
+            let b = vd.borrow();
+            let series = Series {
+                data: Rc::new(RefCell::new(b.elements())),
+                index: b.cursor(),
+            };
+            Ok((series, Span::default(), false))
+        }
+        // M83: hash! is a `series?` but has no cursor field; cursored
+        // navigation (`next`/`back`/`at`/`skip`/`head`/`tail`/`index?`/etc.)
+        // is deferred to v0.8. Natives that support hash! (`pick`/`poke`/
+        // `first`/`last`/`length?`/`append`/`insert`/`change`/`remove`/
+        // `take`/`clear`/`copy`/`select`/`find`) handle Hash before reaching
+        // here.
+        Value::Hash(_) => Err(EvalError::Native {
+            message: "hash! cursored navigation requires a cursor (deferred to v0.8)".into(),
+            span: v.span_or_default(),
+        }),
         other => Err(EvalError::TypeError {
             expected: "series!",
             found: type_name(other),
@@ -251,9 +285,11 @@ fn paren_q(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, 
 }
 
 fn series_q(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    // M83: hash! IS a series (the discriminator vs map!, which is not).
+    // M84: vector! IS a series (cursor-backed, like block!).
     Ok(Value::Logic(matches!(
         args[0],
-        Value::Block { .. } | Value::Paren { .. }
+        Value::Block { .. } | Value::Paren { .. } | Value::Hash(_) | Value::Vector(_)
     )))
 }
 
@@ -269,6 +305,14 @@ fn empty_q(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, 
     // M43: map! emptiness.
     if let Value::Map(m) = &args[0] {
         return Ok(Value::Logic(m.borrow().is_empty()));
+    }
+    // M83: hash! emptiness.
+    if let Value::Hash(h) = &args[0] {
+        return Ok(Value::Logic(h.borrow().is_empty()));
+    }
+    // M84: vector! emptiness (cursor-agnostic — empty if no elements).
+    if let Value::Vector(v) = &args[0] {
+        return Ok(Value::Logic(v.borrow().is_empty()));
     }
     let (series, _, _) = extract_series(&args[0])?;
     // Empty when the cursor is at or past the tail.
@@ -292,18 +336,42 @@ fn value_at(series: &Series, offset: usize, native: &str) -> Result<Value, EvalE
 }
 
 fn first(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    // M83: hash! first → first key (position 1 in the alternating view).
+    if let Value::Hash(h) = &args[0] {
+        return Ok(h.borrow().key_at(1).unwrap_or(Value::None));
+    }
     value_at(&extract_series(&args[0])?.0, 0, "first")
 }
 
 fn second(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    // M83: hash! second → first value (position 2 in the alternating view).
+    if let Value::Hash(h) = &args[0] {
+        return Ok(h.borrow().value_at(2).unwrap_or(Value::None));
+    }
     value_at(&extract_series(&args[0])?.0, 1, "second")
 }
 
 fn third(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    // M83: hash! third → second key (position 3 in the alternating view).
+    if let Value::Hash(h) = &args[0] {
+        return Ok(h.borrow().key_at(3).unwrap_or(Value::None));
+    }
     value_at(&extract_series(&args[0])?.0, 2, "third")
 }
 
 fn last(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    // M83: hash! last → last value (even position = pair_len).
+    if let Value::Hash(h) = &args[0] {
+        let b = h.borrow();
+        let pl = b.pair_len();
+        if pl == 0 {
+            return Err(EvalError::Native {
+                message: "last: empty hash!".into(),
+                span: Span::default(),
+            });
+        }
+        return Ok(b.value_at(pl).unwrap_or(Value::None));
+    }
     let (series, _, _) = extract_series(&args[0])?;
     let data = series.data.borrow();
     let Some(v) = data.last() else {
@@ -380,6 +448,15 @@ fn length_q(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value,
     if let Value::Map(m) = &args[0] {
         return Ok(Value::integer(m.borrow().len() as i64));
     }
+    // M83: hash! length is the alternating-pair count (2 × entry_count),
+    // since hash! is a series.
+    if let Value::Hash(h) = &args[0] {
+        return Ok(Value::integer(h.borrow().pair_len() as i64));
+    }
+    // M84: vector! length is the element count (cursor-agnostic).
+    if let Value::Vector(v) = &args[0] {
+        return Ok(Value::integer(v.borrow().len() as i64));
+    }
     // M44: pair! always 2; tuple! is its byte count (3 or 4).
     match &args[0] {
         Value::Pair { .. } => return Ok(Value::integer(2)),
@@ -417,6 +494,37 @@ fn pick(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eva
             .and_then(|_| bytes.get(idx))
             .map(|b| Value::integer(*b as i64))
             .unwrap_or(Value::None));
+    }
+    // M83: hash! pick — alternating key/value view (1-based, odd = key, even =
+    // value; negative from tail). No cursor on hash!; index is absolute.
+    if let Value::Hash(h) = &args[0] {
+        let n = as_int(&args[1], "pick")?;
+        let b = h.borrow();
+        let pair_len = b.pair_len() as i64;
+        let pos = if n >= 1 {
+            n as usize
+        } else if n <= -1 {
+            match pair_len + n + 1 {
+                i if i >= 1 => i as usize,
+                _ => return Ok(Value::None),
+            }
+        } else {
+            return Ok(Value::None);
+        };
+        if pos > pair_len as usize {
+            return Ok(Value::None);
+        }
+        if pos % 2 == 1 {
+            return Ok(b.key_at(pos).unwrap_or(Value::None));
+        }
+        return Ok(b.value_at(pos).unwrap_or(Value::None));
+    }
+    // M84: vector! pick — 1-based element (negative from tail). Returns
+    // the element as Integer/Float (not a vector! of length 1). Ignores the
+    // cursor (positional access, like hash!).
+    if let Value::Vector(v) = &args[0] {
+        let n = as_int(&args[1], "pick")?;
+        return Ok(v.borrow().pick(n).unwrap_or(Value::None));
     }
     let (series, _, _) = extract_series(&args[0])?;
     let n = as_int(&args[1], "pick")?;
@@ -483,18 +591,112 @@ fn poke(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eva
             span: *span,
         });
     }
-    let (series, _, _) = extract_series(&args[0])?;
-    let n = as_int(&args[1], "poke")?;
-    let len = storage_len(&series);
-    let Some(idx) = pick_index(series.index, len, n) else {
-        return Err(EvalError::Native {
-            message: "poke: index out of range".into(),
-            span: args[0].span_or_default(),
-        });
-    };
-    let val = args[2].clone();
-    series.data.borrow_mut()[idx] = val.clone();
-    Ok(val)
+    // M83: hash! poke — write at an alternating key/value position (1-based,
+    // odd = key slot, even = value slot). Writing the key slot replaces the
+    // entry (re-inserts under the new key); writing the value slot updates
+    // the value in place. Returns the written value.
+    if let Value::Hash(h) = &args[0] {
+        let n = as_int(&args[1], "poke")?;
+        let val = args[2].clone();
+        let pair_len = {
+            let b = h.borrow();
+            b.pair_len() as i64
+        };
+        let pos = if n >= 1 {
+            n as usize
+        } else if n <= -1 {
+            match pair_len + n + 1 {
+                i if i >= 1 => i as usize,
+                _ => {
+                    return Err(EvalError::Native {
+                        message: "poke: index out of range".into(),
+                        span: args[0].span_or_default(),
+                    })
+                }
+            }
+        } else {
+            return Err(EvalError::Native {
+                message: "poke: index 0 is invalid (1-based)".into(),
+                span: args[0].span_or_default(),
+            });
+        };
+        if pos > pair_len as usize {
+            return Err(EvalError::Native {
+                message: format!("poke: index {n} out of range"),
+                span: args[0].span_or_default(),
+            });
+        }
+        if pos % 2 == 1 {
+            // Key slot: replace the entry. The old key is removed; the new
+            // value (`args[2]`) must be hashable and becomes the new key,
+            // preserving the old value.
+            let b = h.borrow();
+            let old_key = b.key_at(pos);
+            let old_val = old_key
+                .as_ref()
+                .and_then(red_core::value::MapKey::from_value)
+                .and_then(|mk| b.get(&mk));
+            drop(b);
+            if let Some(old_key_v) = old_key {
+                if let Some(old_mk) = red_core::value::MapKey::from_value(&old_key_v) {
+                    h.borrow().remove(&old_mk);
+                }
+            }
+            let new_key =
+                red_core::value::MapKey::from_value(&val).ok_or_else(|| EvalError::Native {
+                    message: format!("poke: key type {} is not hashable", type_name(&val)),
+                    span: val.span_or_default(),
+                })?;
+            h.borrow().set(new_key, old_val.unwrap_or(Value::None));
+            return Ok(val);
+        }
+        // Value slot: update in place.
+        if !h.borrow().set_value_at(pos, val.clone()) {
+            return Err(EvalError::Native {
+                message: format!("poke: index {n} out of range"),
+                span: args[0].span_or_default(),
+            });
+        }
+        return Ok(val);
+    }
+    // M84: vector! poke — 1-based write (negative from tail). Narrows the
+    // value to the vector's kind (clamp ints; round floats). Returns the
+    // narrowed value (matching the poke contract: "returns the written
+    // value"). Errors on out-of-range or non-numeric value.
+    if let Value::Vector(v) = &args[0] {
+        let n = as_int(&args[1], "poke")?;
+        let val = args[2].clone();
+        let b = v.borrow();
+        if !b.accepts(&val) {
+            return Err(EvalError::TypeError {
+                expected: "numeric value",
+                found: type_name(&val),
+                span: val.span_or_default(),
+            });
+        }
+        let narrowed = b.narrow(&val);
+        drop(b);
+        match v.borrow().poke(n, narrowed.clone()) {
+            Some(_) => Ok(narrowed),
+            None => Err(EvalError::Native {
+                message: format!("poke: index {n} out of range"),
+                span: args[0].span_or_default(),
+            }),
+        }
+    } else {
+        let (series, _, _) = extract_series(&args[0])?;
+        let n = as_int(&args[1], "poke")?;
+        let len = storage_len(&series);
+        let Some(idx) = pick_index(series.index, len, n) else {
+            return Err(EvalError::Native {
+                message: "poke: index out of range".into(),
+                span: args[0].span_or_default(),
+            });
+        };
+        let val = args[2].clone();
+        series.data.borrow_mut()[idx] = val.clone();
+        Ok(val)
+    }
 }
 
 /// Equality used by `select`/`find`. Extends `values_equal` with word-family
@@ -546,6 +748,25 @@ fn select(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, E
         }
         return Ok(m.borrow().get(&key).unwrap_or(Value::None));
     }
+    // M83: hash! select by key (mirrors map!).
+    if let Value::Hash(h) = &args[0] {
+        let key =
+            red_core::value::MapKey::from_value(&args[1]).ok_or_else(|| EvalError::Native {
+                message: format!("select: key type {} is not hashable", type_name(&args[1])),
+                span: args[1].span_or_default(),
+            })?;
+        if let red_core::value::MapKey::Sym(sym) = &key {
+            let b = h.borrow();
+            if let Some(v) = b.get(&key) {
+                return Ok(v);
+            }
+            let s: std::rc::Rc<str> = std::rc::Rc::from(sym.as_str());
+            return Ok(b
+                .get(&red_core::value::MapKey::Str(s))
+                .unwrap_or(Value::None));
+        }
+        return Ok(h.borrow().get(&key).unwrap_or(Value::None));
+    }
     let (series, _, _) = extract_series(&args[0])?;
     let needle = &args[1];
     let data = series.data.borrow();
@@ -578,6 +799,30 @@ fn find(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eval
             })?;
         let b = m.borrow();
         // Word-key fall-back: Sym then Str.
+        if let red_core::value::MapKey::Sym(sym) = &key {
+            if b.get(&key).is_some() {
+                return Ok(key.to_value());
+            }
+            let s: std::rc::Rc<str> = std::rc::Rc::from(sym.as_str());
+            let str_key = red_core::value::MapKey::Str(s);
+            if b.get(&str_key).is_some() {
+                return Ok(str_key.to_value());
+            }
+            return Ok(Value::None);
+        }
+        if b.get(&key).is_some() {
+            return Ok(key.to_value());
+        }
+        return Ok(Value::None);
+    }
+    // M83: hash! lookup. Returns the key (as a `Value`) if present, else none.
+    if let Value::Hash(h) = &args[0] {
+        let key =
+            red_core::value::MapKey::from_value(&args[1]).ok_or_else(|| EvalError::Native {
+                message: format!("find: key type {} is not hashable", type_name(&args[1])),
+                span: args[1].span_or_default(),
+            })?;
+        let b = h.borrow();
         if let red_core::value::MapKey::Sym(sym) = &key {
             if b.get(&key).is_some() {
                 return Ok(key.to_value());
@@ -687,6 +932,42 @@ fn append(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Ev
     if args.len() != 2 {
         return Err(arity(args, "append", 2, args.len()));
     }
+    // M83: hash! append — append a key/value pair. The value must be a 2-element
+    // block `[key value]` (with `/only`, a single value is treated as a value
+    // keyed by `none` — uncommon but consistent). Returns the hash.
+    if let Value::Hash(h) = &args[0] {
+        return append_hash_pair(h, &args[1], refs);
+    }
+    // M84: vector! append — push a numeric value (narrowed to the vector's
+    // kind). A block argument is spliced (each element narrowed). Returns
+    // the vector. `/only` prevents splicing.
+    if let Value::Vector(v) = &args[0] {
+        let only = refs.has(&Symbol::new("only"));
+        let append_one = |val: &Value| -> Result<(), EvalError> {
+            let b = v.borrow();
+            if !b.accepts(val) {
+                return Err(EvalError::TypeError {
+                    expected: "numeric value",
+                    found: type_name(val),
+                    span: val.span_or_default(),
+                });
+            }
+            let narrowed = b.narrow(val);
+            drop(b);
+            v.borrow().elems.borrow_mut().push(narrowed);
+            Ok(())
+        };
+        match &args[1] {
+            Value::Block { series, .. } | Value::Paren { series, .. } if !only => {
+                let data = series.data.borrow();
+                for elem in data.iter().skip(series.index) {
+                    append_one(elem)?;
+                }
+            }
+            other => append_one(other)?,
+        }
+        return Ok(Value::Vector(v.clone()));
+    }
     // M41: binary! series. Value semantics: builds a new binary.
     if let Value::String8 { bytes, span } = &args[0] {
         let only = refs.has(&Symbol::new("only"));
@@ -791,11 +1072,62 @@ fn append_value(series: &Series, value: &Value) {
     }
 }
 
+/// M83: append/insert a key/value pair into a hash!. The `value` must be a
+/// 2-element block `[key value]` (with `/only`, a single non-block value is
+/// keyed by `none`). The key must be hashable. Returns the hash.
+fn append_hash_pair(
+    h: &std::rc::Rc<std::cell::RefCell<red_core::value::HashDef>>,
+    value: &Value,
+    refs: &RefineArgs,
+) -> Result<Value, EvalError> {
+    let only = refs.has(&Symbol::new("only"));
+    let (key, val) = if only {
+        (red_core::value::MapKey::None, value.clone())
+    } else {
+        match value {
+            Value::Block { series, .. } | Value::Paren { series, .. } => {
+                let data = series.data.borrow();
+                if data.len() - series.index < 2 {
+                    return Err(EvalError::Native {
+                        message: "append: hash! pair block needs key and value".into(),
+                        span: value.span_or_default(),
+                    });
+                }
+                let k =
+                    red_core::value::MapKey::from_value(&data[series.index]).ok_or_else(|| {
+                        EvalError::Native {
+                            message: format!(
+                                "append: key type {} is not hashable",
+                                type_name(&data[series.index])
+                            ),
+                            span: data[series.index].span_or_default(),
+                        }
+                    })?;
+                (k, data[series.index + 1].clone())
+            }
+            _ => {
+                return Err(EvalError::Native {
+                    message: "append: hash! needs a [key value] block (or use /only)".into(),
+                    span: value.span_or_default(),
+                })
+            }
+        }
+    };
+    h.borrow().set(key, val);
+    Ok(Value::Hash(h.clone()))
+}
+
 /// `insert series value` — insert `value` at the cursor. For strings (no
 /// cursor in POC), inserts at the head.
 fn insert(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity(args, "insert", 2, args.len()));
+    }
+    // M83: hash! insert — hash! has no cursor, so insert == append (the
+    // key/value pair is added at the tail of `key_order`). The value must be
+    // a 2-element block `[key value]`.
+    if let Value::Hash(h) = &args[0] {
+        return append_hash_pair(h, &args[1], &RefineArgs::empty());
     }
     // M41: binary! series. No cursor → insert at head.
     if let Value::String8 { bytes, span } = &args[0] {
@@ -817,6 +1149,68 @@ fn insert(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, E
             span: *span,
         });
     }
+    // M84: vector! insert at the cursor (matches block! semantics). A
+    // block argument is spliced (each element narrowed). Returns the
+    // vector at its (advanced) cursor.
+    if let Value::Vector(v) = &args[0] {
+        let cursor = v.borrow().cursor();
+        let insert_one = |val: &Value| -> Result<(), EvalError> {
+            let b = v.borrow();
+            if !b.accepts(val) {
+                return Err(EvalError::TypeError {
+                    expected: "numeric value",
+                    found: type_name(val),
+                    span: val.span_or_default(),
+                });
+            }
+            let narrowed = b.narrow(val);
+            drop(b);
+            v.borrow().elems.borrow_mut().push(narrowed);
+            Ok(())
+        };
+        // Insert preserves order: collect the narrowed values, then splice
+        // them in at the cursor position in one shot.
+        let mut new_vals: Vec<Value> = Vec::new();
+        match &args[1] {
+            Value::Block { series, .. } | Value::Paren { series, .. } => {
+                let data = series.data.borrow();
+                for elem in data.iter().skip(series.index) {
+                    let b = v.borrow();
+                    if !b.accepts(elem) {
+                        return Err(EvalError::TypeError {
+                            expected: "numeric value",
+                            found: type_name(elem),
+                            span: elem.span_or_default(),
+                        });
+                    }
+                    new_vals.push(b.narrow(elem));
+                    drop(b);
+                }
+            }
+            other => {
+                let b = v.borrow();
+                if !b.accepts(other) {
+                    return Err(EvalError::TypeError {
+                        expected: "numeric value",
+                        found: type_name(other),
+                        span: other.span_or_default(),
+                    });
+                }
+                new_vals.push(b.narrow(other));
+                drop(b);
+            }
+        }
+        let _ = insert_one; // suppress dead-code lint
+        let b = v.borrow();
+        let mut storage = b.elems.borrow_mut();
+        let pos = cursor.min(storage.len());
+        let mut idx = pos;
+        for nv in new_vals {
+            storage.insert(idx, nv);
+            idx += 1;
+        }
+        return Ok(Value::Vector(v.clone()));
+    }
     let (series, span, is_paren) = extract_series(&args[0])?;
     series
         .data
@@ -829,6 +1223,31 @@ fn insert(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, E
 fn change(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity(args, "change", 2, args.len()));
+    }
+    // M84: vector! change — narrow on write.
+    if let Value::Vector(v) = &args[0] {
+        let cursor = v.borrow().cursor();
+        let val = &args[1];
+        let b = v.borrow();
+        if !b.accepts(val) {
+            return Err(EvalError::TypeError {
+                expected: "numeric value",
+                found: type_name(val),
+                span: val.span_or_default(),
+            });
+        }
+        let narrowed = b.narrow(val);
+        drop(b);
+        let b = v.borrow();
+        let mut storage = b.elems.borrow_mut();
+        if cursor >= storage.len() {
+            return Err(EvalError::Native {
+                message: "change: at tail".into(),
+                span: Span::default(),
+            });
+        }
+        storage[cursor] = narrowed;
+        return Ok(Value::Vector(v.clone()));
     }
     let (series, span, is_paren) = extract_series(&args[0])?;
     let len = storage_len(&series);
@@ -847,6 +1266,16 @@ fn remove(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, E
     if !args.is_empty() && args.len() != 1 {
         return Err(arity(args, "remove", 1, args.len()));
     }
+    // M84: vector! remove at the cursor.
+    if let Value::Vector(v) = &args[0] {
+        let cursor = v.borrow().cursor();
+        let b = v.borrow();
+        let mut storage = b.elems.borrow_mut();
+        if cursor < storage.len() {
+            storage.remove(cursor);
+        }
+        return Ok(Value::Vector(v.clone()));
+    }
     let (series, span, is_paren) = extract_series(&args[0])?;
     let len = storage_len(&series);
     if series.index < len {
@@ -863,6 +1292,17 @@ fn clear(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, Ev
         m.borrow().clear();
         return Ok(args[0].clone());
     }
+    // M83: hash! clear.
+    if let Value::Hash(h) = &args[0] {
+        h.borrow().clear();
+        return Ok(args[0].clone());
+    }
+    // M84: vector! clear — truncate from cursor to tail (cursor 0 ⇒ clear all).
+    if let Value::Vector(v) = &args[0] {
+        let cursor = v.borrow().cursor();
+        v.borrow().elems.borrow_mut().truncate(cursor);
+        return Ok(Value::Vector(v.clone()));
+    }
     let (series, span, is_paren) = extract_series(&args[0])?;
     {
         let mut data = series.data.borrow_mut();
@@ -874,6 +1314,16 @@ fn clear(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, Ev
 /// `take series` — remove and return the value at the cursor; `none` if at
 /// tail.
 fn take(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    // M84: vector! take at the cursor.
+    if let Value::Vector(v) = &args[0] {
+        let cursor = v.borrow().cursor();
+        let b = v.borrow();
+        let mut storage = b.elems.borrow_mut();
+        if cursor >= storage.len() {
+            return Ok(Value::None);
+        }
+        return Ok(storage.remove(cursor));
+    }
     let (series, _, _) = extract_series(&args[0])?;
     let len = storage_len(&series);
     if series.index >= len {
@@ -894,6 +1344,20 @@ fn copy(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eval
     // M43: map! shallow copy (new MapDef with cloned entries).
     if let Value::Map(m) = &args[0] {
         return Ok(Value::map(m.borrow().clone()));
+    }
+    // M83: hash! shallow copy (new HashDef with cloned entries + key_order).
+    if let Value::Hash(h) = &args[0] {
+        return Ok(Value::hash(h.borrow().clone()));
+    }
+    // M84: vector! shallow copy (new VectorDef with cloned kind + elems
+    // from cursor to tail; cursor reset to 0).
+    if let Value::Vector(v) = &args[0] {
+        let b = v.borrow();
+        let kind = b.kind();
+        let elems = b.elements();
+        let start = b.cursor().min(elems.len());
+        let cloned: Vec<Value> = elems[start..].to_vec();
+        return Ok(Value::vector(red_core::value::VectorDef::new(kind, cloned)));
     }
     // M41: binary! copy. `/part n` copies the first `n` bytes.
     if let Value::String8 { bytes, span } = &args[0] {
@@ -1009,12 +1473,84 @@ fn foreach(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, E
     if args.len() != 3 {
         return Err(arity(args, "foreach", 3, args.len()));
     }
-    let slot = resolve_loop_slot(&args[0], env)?;
-    let (series, _, _) = extract_series(&args[1])?;
     let body = body_block(args, 2, "foreach")?;
-
     let compiled = resolve_compiled_block(&body, env);
     let mut last = Value::None;
+
+    // M83: `foreach [k v] series body` — block word-list form. Resolves each
+    // word to a slot, then advances by the word count each iteration. For a
+    // hash!, iterates the alternating key/value view (one pair per iteration).
+    if let Value::Block { series: ws, .. } | Value::Paren { series: ws, .. } = &args[0] {
+        let wdata = ws.data.borrow();
+        let words: Vec<Value> = wdata.iter().skip(ws.index).cloned().collect();
+        drop(wdata);
+        if words.is_empty() {
+            return Err(EvalError::Native {
+                message: "foreach: word list is empty".into(),
+                span: args[0].span_or_default(),
+            });
+        }
+        let slots: Vec<LoopSlot> = words
+            .iter()
+            .map(|w| resolve_loop_slot(w, env))
+            .collect::<Result<Vec<_>, _>>()?;
+        let n = slots.len();
+
+        // Build the value stream to iterate.
+        let values: Vec<Value> = match &args[1] {
+            Value::Block { series: s, .. } | Value::Paren { series: s, .. } => {
+                let d = s.data.borrow();
+                d.iter().skip(s.index).cloned().collect()
+            }
+            Value::Hash(h) => {
+                // Alternating key/value view via key_order.
+                let b = h.borrow();
+                let keys: Vec<red_core::value::MapKey> =
+                    b.key_order.borrow().iter().cloned().collect();
+                let entries = b.entries.borrow();
+                let mut out: Vec<Value> = Vec::with_capacity(keys.len() * 2);
+                for k in &keys {
+                    out.push(k.to_value());
+                    out.push(entries.get(k).cloned().unwrap_or(Value::None));
+                }
+                out
+            }
+            // M84: vector! foreach over elements (cursor-agnostic —
+            // iterate the full element vec).
+            Value::Vector(v) => v.borrow().elements(),
+            other => {
+                return Err(EvalError::TypeError {
+                    expected: "series!",
+                    found: type_name(other),
+                    span: other.span_or_default(),
+                })
+            }
+        };
+
+        let mut i = 0;
+        while i + n <= values.len() {
+            for (j, slot) in slots.iter().enumerate() {
+                write_loop_slot(slot, values[i + j].clone(), env);
+            }
+            let result = if let Some(ref c) = compiled {
+                let caps = active_captures(env);
+                crate::vm::run((**c).clone(), env, caps)
+            } else {
+                dispatch_block(&body, env)
+            };
+            match result {
+                Ok(v) => last = v,
+                Err(EvalError::Break(bv)) => return Ok(bv.unwrap_or(Value::None)),
+                Err(EvalError::Continue) => {}
+                Err(e) => return Err(e),
+            }
+            i += n;
+        }
+        return Ok(last);
+    }
+
+    let slot = resolve_loop_slot(&args[0], env)?;
+    let (series, _, _) = extract_series(&args[1])?;
     let mut i = series.index;
     loop {
         let v = {

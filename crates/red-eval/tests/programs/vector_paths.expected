@@ -1,0 +1,4 @@
+integer!
+20
+99
+make vector! [integer! 10 99 30]

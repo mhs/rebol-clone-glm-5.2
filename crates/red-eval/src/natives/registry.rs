@@ -359,6 +359,12 @@ pub fn register_natives(env: &mut Env) {
     // Maps (M43)
     crate::map::register_map_natives(env);
 
+    // Hashes (M83)
+    crate::hash::register_hash_natives(env);
+
+    // Vectors (M84)
+    crate::vector::register_vector_natives(env);
+
     // Bitsets (M46)
     crate::bitset::register_bitset_natives(env);
 

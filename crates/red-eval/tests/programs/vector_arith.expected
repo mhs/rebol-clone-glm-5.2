@@ -1,0 +1,6 @@
+make vector! [integer! 5 7 9]
+make vector! [integer! 4 3 2]
+make vector! [integer! 2 4 6]
+make vector! [integer! 4 3 2]
+make vector! [float! 2.0 3.0 4.0]
+make vector! [integer! 6 7 8]

@@ -1,0 +1,9 @@
+make vector! [integer! 1 2 3]
+true
+false
+true
+3
+make vector! [float! 1.0 2.0]
+make vector! [integer! 1 2 3]
+make vector! [float! 1.0 2.0 3.0]
+make vector! [integer! 0 0 0]

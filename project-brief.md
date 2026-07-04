@@ -170,6 +170,8 @@ enum Value {
     Bitset(Rc<RefCell<BitsetDef>>),          // charset "ABC" — M46 (synthetic, no span)
     Closure(Rc<ClosureDef>),                 // closure! — M60 (synthetic, no span)
     Module(Rc<RefCell<ModuleDef>>),          // module! — M61 (synthetic, no span)
+    Hash(Rc<RefCell<HashDef>>),             // hash! — M83 (synthetic, no span)
+    Vector(Rc<RefCell<VectorDef>>),          // vector! — M84 (synthetic, no span)
 }
 
 // v0.5 (M60): closure! — snapshot-capture first-class function.
@@ -335,7 +337,8 @@ binding, not just dynamic lookup.
   deferred to v0.6+. `DD/MM/YYYY` is not supported (`/`
   is a lexer delimiter — use `DD-Mon-YYYY` or `YYYY-MM-DD`). `pair!`/`tuple!`
   `same?` returns `false` (immutable value types; use `=`` for structural
-  equality). `tag!`/`ref!`/`image!`/`vector!`/`hash!`/`regex!`, advanced
+  equality). `tag!`/`hash!`/`vector!` landed in v0.7 (M81/M83/M84);
+  `ref!`/`image!`/`regex!`, advanced
   `bitset!`/`logic!` ops, `object!` `on-change` reactive slots, `routine!` FFI
   remain deferred. The structured error model
   (`code`/`type`/`args`/`near`/`where`/`by`) IS in v0.4 (M42). Block-integer
@@ -431,7 +434,8 @@ for `bind` to report unbound words with a location.
   `rust-networking-protocol-crate-recommendation.md` (the composed-facade
   rationale).
 - Optional/deferred: shared-cell closures, `unimport`, reactivity (v0.6);
-  concurrency (v0.7); `tag!`/`ref!`/`image!`/`vector!`/`hash!`/`regex!`,
+  concurrency (v0.7); `tag!`/`hash!`/`vector!` landed in v0.7 (M81/M83/M84);
+  `ref!`/`image!`/`regex!`,
   `routine!` FFI, named timezones, the full port model. `recurse`/`recur`
   (anonymous self-reference) is deferred to v0.6+ as a possible ergonomic
   extension — not a Red-parity gap. (`parse` is in scope — see "Dialects".)

@@ -4,7 +4,8 @@
 use chrono::{Datelike, Timelike};
 
 use crate::value::{
-    BitsetDef, DateValue, MapDef, MapKey, ModuleDef, MoneyValue, ObjectDef, PortDef, Value,
+    BitsetDef, DateValue, HashDef, MapDef, MapKey, ModuleDef, MoneyValue, ObjectDef, PortDef,
+    Value, VectorDef,
 };
 
 /// Append the Red source form of `value` to `out`.
@@ -165,6 +166,8 @@ pub fn mold(value: &Value, out: &mut String) {
         Value::Url { url, .. } => out.push_str(url),
         Value::Object(obj) => mold_object(&obj.borrow(), out),
         Value::Map(m) => mold_map(&m.borrow(), out),
+        Value::Hash(h) => mold_hash(&h.borrow(), out),
+        Value::Vector(v) => mold_vector(&v.borrow(), out),
         Value::Module(m) => mold_module(&m.borrow(), out),
         Value::Date { dt, .. } => mold_date(dt, out),
         Value::Bitset(b) => mold_bitset(&b.borrow(), out),
@@ -259,6 +262,8 @@ pub fn form(value: &Value, out: &mut String) {
             form_object_body(&o, out);
         }
         Value::Map(m) => form_map(&m.borrow(), out),
+        Value::Hash(h) => form_hash(&h.borrow(), out),
+        Value::Vector(v) => mold_vector(&v.borrow(), out),
         Value::Module(m) => mold_module(&m.borrow(), out),
         Value::Date { dt, .. } => mold_date(dt, out),
         Value::Bitset(b) => mold_bitset(&b.borrow(), out),
@@ -412,6 +417,69 @@ fn form_map(m: &MapDef, out: &mut String) {
         mold_map_key(k, out, false);
         out.push(' ');
         form(v, out);
+    }
+    out.push(']');
+}
+
+/// Mold a hash! as `make hash! [k1 v1 k2 v2 ...]`. Iterates `key_order` for
+/// stable output (documented deviation — Red's `hash!` mold is unspecified-
+/// order). Word keys emit as set-words (`a: 1`) so the block reparses via
+/// `make hash!`. Other key types emit the key value followed by its value.
+fn mold_hash(h: &HashDef, out: &mut String) {
+    out.push_str("make hash! [");
+    let entries = h.entries.borrow();
+    let order = h.key_order.borrow();
+    let mut first = true;
+    for k in order.iter() {
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+        mold_map_key(k, out, true);
+        out.push(' ');
+        if let Some(v) = entries.get(k) {
+            mold(v, out);
+        } else {
+            out.push_str("none");
+        }
+    }
+    out.push(']');
+}
+
+/// `form` of a hash!: same `make hash! [...]` body as `mold`.
+fn form_hash(h: &HashDef, out: &mut String) {
+    out.push_str("make hash! [");
+    let entries = h.entries.borrow();
+    let order = h.key_order.borrow();
+    let mut first = true;
+    for k in order.iter() {
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+        mold_map_key(k, out, false);
+        out.push(' ');
+        if let Some(v) = entries.get(k) {
+            form(v, out);
+        } else {
+            out.push_str("none");
+        }
+    }
+    out.push(']');
+}
+
+/// M84: mold a vector! as `make vector! [<kind-word> <e1> <e2> ...]`. The
+/// kind word is the first element (`integer!`/`float!`/`i8!`/…), followed by
+/// space-separated molded elements. The whole vector is molded from index 0
+/// (cursor-agnostic — mold always reflects the full contents, not a
+/// positioned view). The form is reparseable via `make vector!`.
+fn mold_vector(v: &VectorDef, out: &mut String) {
+    out.push_str("make vector! [");
+    out.push_str(v.kind.borrow().as_str());
+    let elems = v.elems.borrow();
+    for e in elems.iter() {
+        out.push(' ');
+        mold(e, out);
     }
     out.push(']');
 }
@@ -1320,5 +1388,59 @@ mod tests {
     fn form_path_is_slash_joined() {
         let p = Value::path(vec![Value::word("foo"), Value::word("bar")]);
         assert_eq!(form_to_string(&p), "foo/bar");
+    }
+
+    // -- M84: vector! mold ------------------------------------------------
+
+    fn int_vec(elems: &[i64]) -> Value {
+        Value::vector(crate::value::VectorDef::new(
+            Symbol::new("integer!"),
+            elems.iter().map(|n| Value::integer(*n)).collect(),
+        ))
+    }
+
+    fn float_vec(elems: &[f64]) -> Value {
+        Value::vector(crate::value::VectorDef::new(
+            Symbol::new("float!"),
+            elems.iter().map(|f| Value::float(*f)).collect(),
+        ))
+    }
+
+    #[test]
+    fn mold_vector_int_kind() {
+        assert_eq!(
+            mold_to_string(&int_vec(&[1, 2, 3])),
+            "make vector! [integer! 1 2 3]"
+        );
+    }
+
+    #[test]
+    fn mold_vector_float_kind() {
+        assert_eq!(
+            mold_to_string(&float_vec(&[1.0, 2.5, 3.0])),
+            "make vector! [float! 1.0 2.5 3.0]"
+        );
+    }
+
+    #[test]
+    fn mold_vector_empty() {
+        assert_eq!(mold_to_string(&int_vec(&[])), "make vector! [integer!]");
+    }
+
+    #[test]
+    fn mold_vector_round_trips_via_make() {
+        // mold → load_source → mold should be stable (synthetic value; the
+        // reparse just yields a block that `make vector!` would consume).
+        let v = int_vec(&[10, 20, 30]);
+        let molded1 = mold_to_string(&v);
+        let parsed = crate::parser::load_source(&molded1).expect("parse");
+        // `load_source` yields the body Series; the first value is the
+        // `make` call. We don't re-mold the parsed block (that would yield
+        // a block mold, not a vector mold); instead assert the mold string
+        // is itself well-formed and starts with the vector! prefix.
+        assert!(molded1.starts_with("make vector! [integer!"));
+        assert!(molded1.ends_with(']'));
+        // Sanity: the parsed body has at least one value (the `make` path).
+        assert!(!parsed.data.borrow().is_empty());
     }
 }

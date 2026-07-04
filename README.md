@@ -89,7 +89,11 @@ closure), `Module` (self-contained namespace with exported words),
 (heterogeneous insertion-ordered keys), `Pair` (`100x200`), `Tuple`
 (`255.0.0` / `128.64.32.128` RGBA), `Date` (date-only / date+time /
 date+time+zone; `29-Jun-2024/12:30:00+5:30`), `Bitset` (bit-packed charset
-for `parse`), `Port` (synchronous I/O handle — file or HTTP; v0.6).
+for `parse`), `Port` (synchronous I/O handle — file or HTTP; v0.6),
+`Percent` (`50%`), `Money` (`$10.00`), `Issue` (`#ABC`), `Email`
+(`foo@bar.com`), `Tag` (`<b>`), `Hash` (unordered `series!` table), `Vector`
+(packed numeric series with typed element kind: `integer!`/`float!`/`i8!`/…
+`i64!`/`f32!`/`f64!` — full `series!` model + componentwise arithmetic).
 
 ### Evaluation
 - **Bytecode compiler + stack VM** (v0.3, default): blocks compile to a flat
@@ -176,6 +180,8 @@ for `parse`), `Port` (synchronous I/O handle — file or HTTP; v0.6).
   `to-url`, `to-path`/`to-get-path`/`to-lit-path`, `make`, `to`, `form`.
   **v0.4 additions:** `to-char`, `to-binary`, `to-map`, `to-pair`, `to-tuple`,
   `to-date`, `to-bitset`, `to-error`, `to-utc`.
+  **v0.7 additions:** `to-percent`, `to-money`, `to-issue`, `to-email`,
+  `to-tag`, `to-hash`, `to-vector`.
 - **Type predicates (v0.4 fill-in):** `integer?`, `float?`, `number?`,
   `string?`, `logic?`, `none?`, `char?`, `binary?`, `map?`, `pair?`, `tuple?`,
   `date?`, `time?`, `bitset?`, `error?`, `word?`, `set-word?`, `get-word?`,
@@ -183,6 +189,8 @@ for `parse`), `Port` (synchronous I/O handle — file or HTTP; v0.6).
   `any-path?`, `any-object?`, `function?`, `object?`, `series?`, `block?`,
   `paren?`, `file?`, `url?`, `same?`, `not-same?`, `value?`. `type?` returns
   the type word; `types-of` returns the block of matching type words.
+  **v0.7 additions:** `percent?`, `money?`, `issue?`, `email?`, `tag?`,
+  `hash?`, `vector?`.
 - **Objects:** `make object!`, `object`, `context`, `in`, `words-of`,
   `values-of`, `reflect`, `object?`, `same?`. Prototype inheritance, `self`
   reference, method calls via `o/method` paths.
@@ -386,8 +394,9 @@ authoritative list. Headlines:
   run splits before the date scanner. Use `DD-Mon-YYYY` or `YYYY-MM-DD`.
 - **`pair!`/`tuple!` `same?`** returns `false` (immutable value types; use `=`
   for structural equality). `same?` is for reference-identity comparisons.
-- **No `tag!`/`ref!`/`image!`/`vector!`/`hash!`/`regex!`**; advanced
-  `bitset!`/`logic!` ops; `object!` `on-change` reactive slots; `routine!` FFI.
+- **No `ref!`/`image!`/`regex!`**; `tag!`/`vector!`/`hash!` landed in v0.7
+  (M81/M83/M84). Advanced `bitset!`/`logic!` ops; `object!` `on-change` reactive
+  slots; `routine!` FFI remain deferred.
 - **Object path method calls** work for `o/method` followed by trailing
   block args; `func/refinement` bound refinements references are deferred.
 - **Reactivity (`react`/`is-thunk`) is a v0.7 candidate** (see

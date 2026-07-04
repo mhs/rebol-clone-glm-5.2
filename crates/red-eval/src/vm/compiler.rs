@@ -689,6 +689,8 @@ fn compile_prefix(
         | Value::Object(_)
         | Value::Module(_)
         | Value::Map(_)
+        | Value::Hash(_)
+        | Value::Vector(_)
         | Value::Bitset(_)
         | Value::Port(_) => {
             let idx = c.push_const(cur.clone());

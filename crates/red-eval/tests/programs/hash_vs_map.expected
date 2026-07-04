@@ -1,0 +1,6 @@
+false
+true
+true
+true
+false
+make hash! [a 1 b 2]

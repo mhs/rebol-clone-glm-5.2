@@ -5,7 +5,7 @@
 //! Milestones 5 and 9.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use chrono::{DateTime, FixedOffset, Local, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -397,6 +397,23 @@ pub enum Value {
     /// are the hashable subset of `Value` (`MapKey`); values are arbitrary.
     /// Synthetic — produced by `make map!`/`to-map`; carries no source span.
     Map(Rc<RefCell<MapDef>>),
+    /// A hash! (M83): an unordered heterogeneous key→value table backed by a
+    /// real `HashMap` (not `IndexMap`). Distinct from `map!` in two ways:
+    /// (1) iteration order is unspecified (HashMap order); a `key_order` vec
+    /// is kept for stable mold/`keys-of` output in tests only (documented
+    /// deviation — Red's `keys-of hash!` is unspecified); (2) `hash!` IS a
+    /// `series!` — indexable/sliceable as alternating key/value pairs.
+    /// Synthetic — produced by `make hash!`/`to-hash`; carries no source span.
+    Hash(Rc<RefCell<HashDef>>),
+    /// A vector! (M84): a numeric series with a typed element kind
+    /// (`integer!`/`float!`/`i8!`/`i16!`/`i32!`/`i64!`/`f32!`/`f64!`).
+    /// Synthetic — produced by `make vector!`/`to-vector`; carries no source
+    /// span. Stored as `Vec<Value>` of `Integer`/`Float` for native-compat
+    /// (documented deviation — plan8's packed-array wording is aspirational;
+    /// the `kind` field drives narrow-on-write and `vec/integer` path access).
+    /// Full `series!` semantics: cursor-backed `next`/`back`/`at`/`skip`/
+    /// `head`/`tail`/`index?` work via `extract_series`.
+    Vector(Rc<RefCell<VectorDef>>),
     /// `29-Jun-2024` / `2024-06-29T12:30:00Z` — a `date!` literal (M45).
     /// Source-origin (the lexer scans the date/time/zone form); carries the
     /// byte-offset span of the whole token. A single variant covers date-only,
@@ -725,6 +742,481 @@ impl MapDef {
     /// Values in insertion order.
     pub fn values(&self) -> Vec<Value> {
         self.entries.borrow().values().cloned().collect()
+    }
+}
+
+/// A hash! (M83): an unordered heterogeneous key→value table backed by
+/// `HashMap<MapKey, Value>`. Distinct from `map!` (which uses `IndexMap` and
+/// preserves insertion order): `hash!` iteration order is unspecified (Red
+/// parity — `hash!` is the performance table, `map!` is the ordered one).
+///
+/// A `key_order: Vec<MapKey>` is kept alongside the `HashMap` for *test
+/// determinism only*: `mold`/`form`/`keys-of` iterate `key_order` so golden
+/// fixtures have stable output. This is a documented deviation from Red
+/// (where `keys-of hash!` is unspecified). All other iteration (e.g. internal
+/// equality checks) is order-independent.
+///
+/// Unlike `map!`, `hash!` IS a `series!`: it is indexable as alternating
+/// key/value pairs (`pick h 1` → first key, `pick h 2` → first value, …).
+/// Positional series ops derive their position from `key_order`.
+///
+/// Mutation is interior (`RefCell`), so a `Hash` value is shared by aliases
+/// the same way `Map`/`Object`/`Series` are.
+#[derive(Clone, Debug, Default)]
+pub struct HashDef {
+    pub entries: RefCell<HashMap<MapKey, Value>>,
+    /// Insertion-order key list for stable test output only. Kept in sync
+    /// with `entries` by `set`/`remove`/`clear`/the series-positional ops.
+    pub key_order: RefCell<Vec<MapKey>>,
+}
+
+impl HashDef {
+    pub fn new() -> Self {
+        Self {
+            entries: RefCell::new(HashMap::new()),
+            key_order: RefCell::new(Vec::new()),
+        }
+    }
+
+    pub fn get(&self, key: &MapKey) -> Option<Value> {
+        self.entries.borrow().get(key).cloned()
+    }
+
+    /// Insert `val` at `key`. Returns the previous value (if any). On a brand-
+    /// new key, appends to `key_order`; on replace, leaves `key_order` as-is.
+    pub fn set(&self, key: MapKey, val: Value) -> Option<Value> {
+        let prev = self.entries.borrow_mut().insert(key.clone(), val);
+        if prev.is_none() {
+            self.key_order.borrow_mut().push(key);
+        }
+        prev
+    }
+
+    /// Remove the entry at `key`. Returns the removed value (if any). Also
+    /// removes the key from `key_order` so the two stay in sync.
+    pub fn remove(&self, key: &MapKey) -> Option<Value> {
+        let prev = self.entries.borrow_mut().remove(key);
+        if prev.is_some() {
+            self.key_order.borrow_mut().retain(|k| k != key);
+        }
+        prev
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.borrow().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.borrow().is_empty()
+    }
+
+    pub fn clear(&self) {
+        self.entries.borrow_mut().clear();
+        self.key_order.borrow_mut().clear();
+    }
+
+    /// Keys in insertion order (via `key_order`), as `Value`s.
+    pub fn keys(&self) -> Vec<Value> {
+        self.key_order
+            .borrow()
+            .iter()
+            .map(MapKey::to_value)
+            .collect()
+    }
+
+    /// Values in insertion order (via `key_order`).
+    pub fn values(&self) -> Vec<Value> {
+        let entries = self.entries.borrow();
+        self.key_order
+            .borrow()
+            .iter()
+            .filter_map(|k| entries.get(k).cloned())
+            .collect()
+    }
+
+    // -- Series-positional helpers (M83: hash! is a series) ---------------
+
+    /// Number of "slots" in the alternating key/value view = `2 * entry_count`.
+    pub fn pair_len(&self) -> usize {
+        self.len() * 2
+    }
+
+    /// 1-based positional key at series index `pos` (1..=pair_len, odd = key).
+    /// Returns `None` if `pos` is out of range or even.
+    pub fn key_at(&self, pos: usize) -> Option<Value> {
+        if pos == 0 || pos.is_multiple_of(2) {
+            return None;
+        }
+        let i = (pos - 1) / 2;
+        self.key_order.borrow().get(i).map(MapKey::to_value)
+    }
+
+    /// 1-based positional value at series index `pos` (1..=pair_len, even =
+    /// value). Returns `None` if `pos` is out of range or odd.
+    pub fn value_at(&self, pos: usize) -> Option<Value> {
+        if pos == 0 || pos % 2 == 1 {
+            return None;
+        }
+        let i = (pos - 2) / 2;
+        let key = self.key_order.borrow().get(i)?.clone();
+        self.entries.borrow().get(&key).cloned()
+    }
+
+    /// Write the value at 1-based positional index `pos` (must be even). The
+    /// key slot is not affected. Errors via `false` return if `pos` is out of
+    /// range or odd.
+    pub fn set_value_at(&self, pos: usize, val: Value) -> bool {
+        if pos == 0 || pos % 2 == 1 {
+            return false;
+        }
+        let i = (pos - 2) / 2;
+        let key = match self.key_order.borrow().get(i) {
+            Some(k) => k.clone(),
+            None => return false,
+        };
+        self.entries.borrow_mut().insert(key, val);
+        true
+    }
+
+    /// Remove the key/value pair whose key occupies 1-based positional index
+    /// `pos` (must be odd). Returns the removed value (if any). Returns
+    /// `None` if `pos` is out of range or even.
+    pub fn remove_at(&self, pos: usize) -> Option<Value> {
+        if pos == 0 || pos.is_multiple_of(2) {
+            return None;
+        }
+        let i = (pos - 1) / 2;
+        let key = self.key_order.borrow().get(i)?.clone();
+        self.remove(&key)
+    }
+}
+
+/// A vector! (M84): a numeric series with a typed element kind. Element
+/// kinds: `integer!` (i64), `float!` (f64), `i8!`/`i16!`/`i32!`/`i64!`,
+/// `f32!`/`f64!`. Stored as `Vec<Value>` of `Integer`/`Float`; the `kind`
+/// field drives narrow-on-write (clamped for int kinds, rounded for float
+/// kinds) and the `vec/integer` path accessor (returns the kind word).
+///
+/// Mutation is interior (`RefCell`), mirroring `HashDef`/`MapDef`/`Series` —
+/// a `Value::Vector(Rc<RefCell<VectorDef>>)` is shared by aliases and
+/// mutations are visible to all references.
+///
+/// `cursor` mirrors Red's series cursor: `next`/`back`/`at`/`skip`/
+/// `head`/`tail`/`index?` operate on a positioned view (built by
+/// `extract_series`). Positional ops (`pick`/`poke`/`first`/`last`) are
+/// 1-based and ignore the cursor.
+#[derive(Clone, Debug)]
+pub struct VectorDef {
+    /// Element kind symbol: `integer!`/`float!`/`i8!`/`i16!`/`i32!`/`i64!`/
+    /// `f32!`/`f64!`. The synthetic `integer!` and `float!` are the inferred
+    /// defaults (no explicit width); the sized kinds are set when the user
+    /// names them in `make vector! [i8! ...]`.
+    pub kind: RefCell<Symbol>,
+    /// Elements as `Vec<Value>` of `Integer`/`Float`. Narrowed on write.
+    pub elems: RefCell<Vec<Value>>,
+    /// Series cursor for `next`/`back`/`at`/`skip`/`head`/`tail`/`index?`.
+    pub cursor: RefCell<usize>,
+}
+
+impl VectorDef {
+    /// Build a new vector with the given kind and element vec. Does not
+    /// narrow — assumes `elems` already matches `kind`. Use `from_block` for
+    /// user-supplied element lists.
+    pub fn new(kind: Symbol, elems: Vec<Value>) -> Self {
+        VectorDef {
+            kind: RefCell::new(kind),
+            elems: RefCell::new(elems),
+            cursor: RefCell::new(0),
+        }
+    }
+
+    /// Empty vector of the given kind.
+    pub fn empty(kind: Symbol) -> Self {
+        Self::new(kind, Vec::new())
+    }
+
+    /// Number of elements.
+    pub fn len(&self) -> usize {
+        self.elems.borrow().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.elems.borrow().is_empty()
+    }
+
+    /// Current cursor position (0..=len).
+    pub fn cursor(&self) -> usize {
+        *self.cursor.borrow()
+    }
+
+    /// Set the cursor (clamped to 0..=len).
+    pub fn set_cursor(&self, pos: usize) {
+        let max = self.len();
+        *self.cursor.borrow_mut() = pos.min(max);
+    }
+
+    /// Element kind symbol.
+    pub fn kind(&self) -> Symbol {
+        self.kind.borrow().clone()
+    }
+
+    /// Set the element kind (does not narrow existing elements; caller must
+    /// narrow if needed).
+    pub fn set_kind(&self, kind: Symbol) {
+        *self.kind.borrow_mut() = kind;
+    }
+
+    pub fn clear(&self) {
+        self.elems.borrow_mut().clear();
+        *self.cursor.borrow_mut() = 0;
+    }
+
+    /// 1-based positional element access (negative counts from tail;
+    /// out-of-range returns `None`). Ignores the cursor.
+    pub fn pick(&self, idx: i64) -> Option<Value> {
+        let len = self.len() as i64;
+        let pos = if idx > 0 {
+            idx - 1
+        } else if idx < 0 {
+            len + idx
+        } else {
+            return None;
+        };
+        if pos < 0 || pos >= len {
+            return None;
+        }
+        self.elems.borrow().get(pos as usize).cloned()
+    }
+
+    /// 1-based positional write (negative counts from tail). Returns the
+    /// previous value, or `None` if out of range. Narrows to the vector's
+    /// kind (clamp ints; round floats). Use `poke_unchecked` to skip
+    /// narrowing.
+    pub fn poke(&self, idx: i64, val: Value) -> Option<Value> {
+        let len = self.len() as i64;
+        let pos = if idx > 0 {
+            idx - 1
+        } else if idx < 0 {
+            len + idx
+        } else {
+            return None;
+        };
+        if pos < 0 || pos >= len {
+            return None;
+        }
+        let narrowed = self.narrow(&val);
+        let prev = std::mem::replace(&mut self.elems.borrow_mut()[pos as usize], narrowed);
+        Some(prev)
+    }
+
+    /// Narrow a `Value` to this vector's kind. `Integer`/`Float`/`Percent` are
+    /// accepted; others are returned as `Value::None` (the caller — typically
+    /// `poke`/`append`/`insert` — should error before reaching here). For int
+    /// kinds, clamps to the kind's range; for float kinds, rounds.
+    pub fn narrow(&self, val: &Value) -> Value {
+        let kind = self.kind.borrow();
+        let kind_str = kind.as_str();
+        match kind_str {
+            "integer!" | "i64!" => match val {
+                Value::Integer { n, .. } => Value::integer(*n),
+                Value::Float { f, .. } => Value::integer(*f as i64),
+                Value::Percent { value, .. } => Value::integer(*value as i64),
+                _ => Value::None,
+            },
+            "i8!" => match val {
+                Value::Integer { n, .. } => Value::integer((*n).clamp(-128, 128)),
+                Value::Float { f, .. } => Value::integer(*f as i64),
+                Value::Percent { value, .. } => Value::integer(*value as i64),
+                _ => Value::None,
+            },
+            "i16!" => match val {
+                Value::Integer { n, .. } => Value::integer((*n).clamp(-32768, 32767)),
+                Value::Float { f, .. } => Value::integer(*f as i64),
+                Value::Percent { value, .. } => Value::integer(*value as i64),
+                _ => Value::None,
+            },
+            "i32!" => match val {
+                Value::Integer { n, .. } => Value::integer((*n).clamp(-2147483648, 2147483647)),
+                Value::Float { f, .. } => Value::integer(*f as i64),
+                Value::Percent { value, .. } => Value::integer(*value as i64),
+                _ => Value::None,
+            },
+            "float!" | "f64!" | "f32!" => match val {
+                Value::Integer { n, .. } => Value::float(*n as f64),
+                Value::Float { f, .. } => Value::float(*f),
+                Value::Percent { value, .. } => Value::float(*value),
+                _ => Value::None,
+            },
+            _ => val.clone(),
+        }
+    }
+
+    /// Is `val` numerically narrowable to this vector's kind?
+    pub fn accepts(&self, val: &Value) -> bool {
+        matches!(
+            val,
+            Value::Integer { .. } | Value::Float { .. } | Value::Percent { .. }
+        )
+    }
+
+    /// Append `val` (narrowed). Errors via `false` return if `val` is not
+    /// numeric.
+    pub fn append(&self, val: Value) -> bool {
+        if !self.accepts(&val) {
+            return false;
+        }
+        let narrowed = self.narrow(&val);
+        self.elems.borrow_mut().push(narrowed);
+        true
+    }
+
+    /// Insert `val` (narrowed) at 1-based `idx` (negative counts from tail).
+    /// Returns `false` if `val` is non-numeric or `idx` is out of range.
+    pub fn insert(&self, idx: i64, val: Value) -> bool {
+        if !self.accepts(&val) {
+            return false;
+        }
+        let len = self.len() as i64;
+        let pos = if idx > 0 {
+            idx - 1
+        } else if idx < 0 {
+            len + idx + 1
+        } else {
+            return false;
+        };
+        if pos < 0 || pos > len {
+            return false;
+        }
+        let narrowed = self.narrow(&val);
+        self.elems.borrow_mut().insert(pos as usize, narrowed);
+        true
+    }
+
+    /// Remove and return the element at 1-based `idx` (negative counts from
+    /// tail). Returns `None` if out of range.
+    pub fn remove(&self, idx: i64) -> Option<Value> {
+        let len = self.len() as i64;
+        let pos = if idx > 0 {
+            idx - 1
+        } else if idx < 0 {
+            len + idx
+        } else {
+            return None;
+        };
+        if pos < 0 || pos >= len {
+            return None;
+        }
+        Some(self.elems.borrow_mut().remove(pos as usize))
+    }
+
+    /// Iterate elements (cursor-agnostic — used by `foreach`).
+    pub fn elements(&self) -> Vec<Value> {
+        self.elems.borrow().clone()
+    }
+
+    /// Recognized kind word strings (used by `make vector!` and path
+    /// resolution). Returns the kind symbol for `s` if `s` names a kind.
+    pub fn kind_word(s: &str) -> Option<Symbol> {
+        let sym = match s {
+            "integer!" | "i64!" => "integer!",
+            "float!" | "f64!" => "float!",
+            "i8!" => "i8!",
+            "i16!" => "i16!",
+            "i32!" => "i32!",
+            "f32!" => "f32!",
+            _ => return None,
+        };
+        Some(Symbol::new(sym))
+    }
+
+    /// The kind word as a `Word` value (for `vec/integer` path access).
+    /// Returns e.g. `integer!`/`float!`/`i8!` (molded without a leading
+    /// quote, matching Red's `type?` word form).
+    pub fn kind_word_value(&self) -> Value {
+        Value::word(self.kind.borrow().as_str())
+    }
+}
+
+/// Build a `VectorDef` from a list of values by inferring the kind.
+/// Promotes: all-int → `integer!`; all-float (or percent) → `float!`;
+/// mixed → `float!` (ints promoted to f64). Rejects non-numeric with
+/// `Err(message)`. Used by `make vector!`/`to-vector` when no explicit
+/// kind is given.
+pub fn infer_vector_kind(elems: &[Value]) -> Result<(Symbol, Vec<Value>), String> {
+    let mut has_float = false;
+    let mut out = Vec::with_capacity(elems.len());
+    for v in elems {
+        match v {
+            Value::Integer { .. } => {}
+            Value::Float { .. } | Value::Percent { .. } => has_float = true,
+            _ => return Err(format!("vector: cannot include {}", type_name_for(v))),
+        }
+        out.push(v.clone());
+    }
+    let kind = if has_float { "float!" } else { "integer!" };
+    let kind_sym = Symbol::new(kind);
+    let narrowed: Vec<Value> = out
+        .iter()
+        .map(|v| {
+            if has_float {
+                match v {
+                    Value::Integer { n, .. } => Value::float(*n as f64),
+                    Value::Float { f, .. } => Value::float(*f),
+                    Value::Percent { value, .. } => Value::float(*value),
+                    _ => v.clone(),
+                }
+            } else {
+                v.clone()
+            }
+        })
+        .collect();
+    Ok((kind_sym, narrowed))
+}
+
+/// Minimal type name for `infer_vector_kind`'s error message (avoids a
+/// circular dep on `red_eval::natives::type_name`). Returns the same strings
+/// the native-side switch produces for the common cases; falls back to
+/// `"value"` for anything else.
+fn type_name_for(v: &Value) -> &'static str {
+    match v {
+        Value::None => "none!",
+        Value::Logic(_) => "logic!",
+        Value::Integer { .. } => "integer!",
+        Value::Float { .. } => "float!",
+        Value::Percent { .. } => "percent!",
+        Value::Money { .. } => "money!",
+        Value::String { .. } => "string!",
+        Value::String8 { .. } => "binary!",
+        Value::Issue { .. } => "issue!",
+        Value::Email { .. } => "email!",
+        Value::Tag { .. } => "tag!",
+        Value::Char { .. } => "char!",
+        Value::Block { .. } => "block!",
+        Value::Paren { .. } => "paren!",
+        Value::Word { .. } => "word!",
+        Value::SetWord { .. } => "set-word!",
+        Value::GetWord { .. } => "get-word!",
+        Value::LitWord { .. } => "lit-word!",
+        Value::Path { .. } => "path!",
+        Value::GetPath { .. } => "get-path!",
+        Value::LitPath { .. } => "lit-path!",
+        Value::SetPath { .. } => "set-path!",
+        Value::Refinement { .. } => "refinement!",
+        Value::File { .. } => "file!",
+        Value::Url { .. } => "url!",
+        Value::Date { .. } => "date!",
+        Value::Pair { .. } => "pair!",
+        Value::Tuple { .. } => "tuple!",
+        Value::Func(_) => "function!",
+        Value::Closure(_) => "closure!",
+        Value::Error(_) => "error!",
+        Value::Object(_) => "object!",
+        Value::Module(_) => "module!",
+        Value::Map(_) => "map!",
+        Value::Hash(_) => "hash!",
+        Value::Vector(_) => "vector!",
+        Value::Bitset(_) => "bitset!",
+        Value::Port(_) => "port!",
     }
 }
 
@@ -1292,6 +1784,8 @@ impl Value {
             | Value::Object(_)
             | Value::Module(_)
             | Value::Map(_)
+            | Value::Hash(_)
+            | Value::Vector(_)
             | Value::Bitset(_)
             | Value::Port(_) => None,
         }
@@ -1567,6 +2061,16 @@ impl Value {
     /// Constructor shorthand for a map wrapping `map_def`.
     pub fn map(map_def: MapDef) -> Self {
         Value::Map(Rc::new(RefCell::new(map_def)))
+    }
+
+    /// Constructor shorthand for a hash! wrapping `hash_def`. (M83.)
+    pub fn hash(hash_def: HashDef) -> Self {
+        Value::Hash(Rc::new(RefCell::new(hash_def)))
+    }
+
+    /// Constructor shorthand for a vector! wrapping `vec_def`. (M84.)
+    pub fn vector(vec_def: VectorDef) -> Self {
+        Value::Vector(Rc::new(RefCell::new(vec_def)))
     }
 
     /// Constructor shorthand for a `date!` value with a zero span (test/REPL

@@ -250,9 +250,23 @@ pub(crate) fn collect_loop_vars(series: &Series, ctx: &Context) {
             ) =>
             {
                 if i + 1 < n {
-                    let name = loop_word_name(&data[i + 1]);
-                    if let Some(sym) = name {
-                        ctx.slot_index(sym);
+                    // `foreach [k v] series body` — block word-list form:
+                    // allocate a slot for each word in the block.
+                    if let Value::Block { series: ws, .. } | Value::Paren { series: ws, .. } =
+                        &data[i + 1]
+                    {
+                        let wd = ws.data.borrow();
+                        for w in wd.iter().skip(ws.index) {
+                            if let Some(sym) = loop_word_name(w) {
+                                ctx.slot_index(sym);
+                            }
+                        }
+                    } else {
+                        // Single-word form: `foreach 'word series body`.
+                        let name = loop_word_name(&data[i + 1]);
+                        if let Some(sym) = name {
+                            ctx.slot_index(sym);
+                        }
                     }
                 }
                 i += 1;

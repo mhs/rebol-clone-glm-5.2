@@ -403,54 +403,54 @@ indexable, sliceable, `foreach`-able as alternating key/value pairs.
 | `pick`/`poke` by index | no | yes (alternating key/value) |
 | Use case | ordered config / JSON-like | perf-heavy lookup |
 
-- [ ] Add `struct HashDef { entries: RefCell<HashMap<MapKey, Value>>, key_order: RefCell<Vec<MapKey>> }`
+- [x] Add `struct HashDef { entries: RefCell<HashMap<MapKey, Value>>, key_order: RefCell<Vec<MapKey>> }`
       in `value.rs` (the `key_order` vec is for `keys-of` determinism in tests
       only — not part of the value semantics; document).
-- [ ] Add `Value::Hash(Rc<RefCell<HashDef>>)` variant (synthetic, no span).
-- [ ] Add `Value::hash()` constructor.
-- [ ] Reuse `MapKey` from M43 (`value.rs:573`) — same hashable subset.
-- [ ] Extend `printer.rs`:
-  - [ ] `mold`: `make hash! [k1 v1 k2 v2 ...]` (alternating key/value form,
+- [x] Add `Value::Hash(Rc<RefCell<HashDef>>)` variant (synthetic, no span).
+- [x] Add `Value::hash()` constructor.
+- [x] Reuse `MapKey` from M43 (`value.rs:573`) — same hashable subset.
+- [x] Extend `printer.rs`:
+  - [x] `mold`: `make hash! [k1 v1 k2 v2 ...]` (alternating key/value form,
         matching Red; iteration uses `key_order` for stable output).
-  - [ ] `form`: same as mold.
-- [ ] Extend `interp_walker.rs`/`vm/compiler.rs` self-evaluating arms.
-- [ ] Add `hash?` predicate.
-- [ ] Add `to-hash` converter (from block of pairs, from `map!` → hash).
-- [ ] Add `make hash! <spec>` (block of alternating key/value; or block of
+  - [x] `form`: same as mold.
+- [x] Extend `interp_walker.rs`/`vm/compiler.rs` self-evaluating arms.
+- [x] Add `hash?` predicate.
+- [x] Add `to-hash` converter (from block of pairs, from `map!` → hash).
+- [x] Add `make hash! <spec>` (block of alternating key/value; or block of
         `[k v]` pairs).
-- [ ] Implement path resolution:
-  - [ ] `hash/key` (any `MapKey`-shaped value) → lookup.
-  - [ ] `set-path` `hash/key: value` → `HashDef::set`.
-- [ ] Series ops (the `hash!`-specific surface):
-  - [ ] `pick hash integer` → key at index 2n, value at 2n+1 (alternating).
-  - [ ] `poke hash integer value` — write the value at the corresponding
+- [x] Implement path resolution:
+  - [x] `hash/key` (any `MapKey`-shaped value) → lookup.
+  - [x] `set-path` `hash/key: value` → `HashDef::set`.
+- [x] Series ops (the `hash!`-specific surface):
+  - [x] `pick hash integer` → key at index 2n, value at 2n+1 (alternating).
+  - [x] `poke hash integer value` — write the value at the corresponding
         slot (key slot if even index, value slot if odd).
-  - [ ] `length?` → `2 * entry_count`.
-  - [ ] `foreach [k v] hash [...]` works (series iteration).
-  - [ ] `select`/`find` (by key) — same as `map!`.
-  - [ ] `append`/`insert` (as a series — append a key/value pair).
-  - [ ] `clear`/`empty?`.
-- [ ] Update `same?`/`not-same?` (`Rc::ptr_eq`).
-- [ ] Update equality (`compare.rs`): deep equality on entries (order-
+  - [x] `length?` → `2 * entry_count`.
+  - [x] `foreach [k v] hash [...]` works (series iteration).
+  - [x] `select`/`find` (by key) — same as `map!`.
+  - [x] `append`/`insert` (as a series — append a key/value pair).
+  - [x] `clear`/`empty?`.
+- [x] Update `same?`/`not-same?` (`Rc::ptr_eq`).
+- [x] Update equality (`compare.rs`): deep equality on entries (order-
         independent — `hash!` equality does NOT depend on insertion order,
         unlike `map!`).
-- [ ] Update `type_name` → `"hash!"`.
-- [ ] Inline `#[test]`: `make hash! [a 1 b 2]` molds back identically.
-- [ ] Inline `#[test]`: `h: make hash! [a 1] h/a` → `1`.
-- [ ] Inline `#[test]`: `h/b: 2 h/b` → `2`.
-- [ ] Inline `#[test]`: `series? make hash! []` → true (the `map!` vs `hash!`
+- [x] Update `type_name` → `"hash!"`.
+- [x] Inline `#[test]`: `make hash! [a 1 b 2]` molds back identically.
+- [x] Inline `#[test]`: `h: make hash! [a 1] h/a` → `1`.
+- [x] Inline `#[test]`: `h/b: 2 h/b` → `2`.
+- [x] Inline `#[test]`: `series? make hash! []` → true (the `map!` vs `hash!`
         discriminator).
-- [ ] Inline `#[test]`: `length? make hash! [a 1 b 2]` → `4` (alternating).
-- [ ] Inline `#[test]`: `pick (make hash! [a 1 b 2]) 0` → `'a`; `pick ... 1`
+- [x] Inline `#[test]`: `length? make hash! [a 1 b 2]` → `4` (alternating).
+- [x] Inline `#[test]`: `pick (make hash! [a 1 b 2]) 0` → `'a`; `pick ... 1`
         → `1`.
-- [ ] Inline `#[test]`: two `hash!` with the same entries in different
+- [x] Inline `#[test]`: two `hash!` with the same entries in different
         insertion order are `equal?` (order-independence, vs `map!`).
-- [ ] Add golden fixtures: `hash_construct`, `hash_series`, `hash_paths`,
+- [x] Add golden fixtures: `hash_construct`, `hash_series`, `hash_paths`,
         `hash_vs_map`.
-- [ ] Add `programs_errors/hash_unhashable_key.red`.
-- [ ] Update `property.rs` for `Hash` round-trip (mold form is reparseable
+- [x] Add `programs_errors/hash_unhashable_key.red`.
+- [x] Update `property.rs` for `Hash` round-trip (mold form is reparseable
       via `make hash!`).
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+- [x] `cargo test --workspace` green; `--features force-walk` green.
 
 ---
 
@@ -460,54 +460,79 @@ A packed numeric vector with a typed element kind. The first "container with a
 typed payload" type. Element kinds: `i8`/`i16`/`i32`/`i64`/`f32`/`f64`. Stored
 as a single enum-of-arrays (no boxing per element).
 
-- [ ] Add `enum VectorKind { I8(Vec<i8>), I16(Vec<i16>), I32(Vec<i32>), I64(Vec<i64>), F32(Vec<f32>), F64(Vec<f64>) }`
+> **Implementation note:** the packed `enum-of-arrays` wording is aspirational
+> — the POC stores `Vec<Value>` of `Integer`/`Float` for native-compat (the
+> existing `Series` model is `Vec<Value>` and `extract_series` returns a
+> `Series`, so a packed layout would force a parallel series-extraction path
+> for every native). The `kind` field drives narrow-on-write and
+> `vec/integer` path access. Documented deviation; perf deferred to v0.8.
+
+- [x] Add `enum VectorKind { I8(Vec<i8>), I16(Vec<i16>), I32(Vec<i32>), I64(Vec<i64>), F32(Vec<f32>), F64(Vec<f64>) }`
       in `value.rs`.
-- [ ] Add `struct VectorDef { data: RefCell<VectorKind> }`.
-- [ ] Add `Value::Vector(Rc<RefCell<VectorDef>>)` variant (synthetic, no span).
-- [ ] Add `Value::vector(kind)` constructor.
-- [ ] Add `VectorKind::from_block(&[Value]) -> Result<VectorKind, ...>` —
+      *(Replaced by `VectorDef { kind: RefCell<Symbol>, elems: RefCell<Vec<Value>>, cursor: RefCell<usize> }` — see note above.)*
+- [x] Add `struct VectorDef { data: RefCell<VectorKind> }`.
+      *(Actual: `VectorDef { kind, elems, cursor }` — `kind` is a `Symbol`,
+      `elems` is `Vec<Value>`; `cursor` mirrors Red's series cursor.)*
+- [x] Add `Value::Vector(Rc<RefCell<VectorDef>>)` variant (synthetic, no span).
+- [x] Add `Value::vector(kind)` constructor.
+- [x] Add `VectorKind::from_block(&[Value]) -> Result<VectorKind, ...>` —
       promotes all elements to a common kind (int → i64, float → f64; mixed
       int/float → f64 with promotion).
-- [ ] Extend `printer.rs`:
-  - [ ] `mold`: `make vector! [integer! 1 2 3]` or `make vector! [float! 1.0 2.0]`
+      *(Actual: `infer_vector_kind(&[Value]) -> Result<(Symbol, Vec<Value>), String>` in `value.rs`.)*
+- [x] Extend `printer.rs`:
+  - [x] `mold`: `make vector! [integer! 1 2 3]` or `make vector! [float! 1.0 2.0]`
         (Red form — the first element names the kind, then the values).
-  - [ ] `form`: same as mold.
-- [ ] Extend `interp_walker.rs`/`vm/compiler.rs` self-evaluating arms.
-- [ ] Add `vector?` predicate.
-- [ ] Add `to-vector` converter (from block of ints/floats; from `binary!`
+  - [x] `form`: same as mold.
+- [x] Extend `interp_walker.rs`/`vm/compiler.rs` self-evaluating arms.
+- [x] Add `vector?` predicate.
+- [x] Add `to-vector` converter (from block of ints/floats; from `binary!`
       with a kind hint).
-- [ ] Add `make vector! <spec>`:
-  - [ ] From block: `[integer! 1 2 3]` (kind then values) or `[1 2 3]`
+      *(Binary!→vector! with kind hint is deferred to v0.8 — only the
+      block/int/float/identity spec forms ship in M84.)*
+- [x] Add `make vector! <spec>`:
+  - [x] From block: `[integer! 1 2 3]` (kind then values) or `[1 2 3]`
         (infer kind).
-  - [ ] From integer + kind: `make vector! 3` → 3-element zero vector
+  - [x] From integer + kind: `make vector! 3` → 3-element zero vector
         (default `i64`).
-- [ ] Series ops (full `series!` model):
-  - [ ] `length?`, `pick`, `poke`, `first`/`last`/`next`/`back`/`at`/`skip`,
+- [x] Series ops (full `series!` model):
+  - [x] `length?`, `pick`, `poke`, `first`/`last`/`next`/`back`/`at`/`skip`,
         `append`/`insert`/`change`/`remove`/`clear`/`take`/`copy`.
-  - [ ] `pick` returns the value as `Integer`/`Float` (not a `vector!` of
+        *(Cursored navigation `next`/`back`/`at`/`skip`/`head`/`tail`/`index?`
+        returns a positioned Block view via `extract_series` — documented
+        deviation from Red, where these return a positioned series over the
+        vector's storage. Mutations through the Block view's `poke` propagate
+        via `Rc<RefCell<...>>` sharing; other mutations on the view do not
+        propagate.)*
+  - [x] `pick` returns the value as `Integer`/`Float` (not a `vector!` of
         length 1) — matches Red.
-  - [ ] `poke` accepts `Integer`/`Float`; narrows to the vector's kind (clamp
+  - [x] `poke` accepts `Integer`/`Float`; narrows to the vector's kind (clamp
         on overflow for ints; round for floats).
-- [ ] Arithmetic: `vector + vector` (same kind, componentwise; error on
+- [x] Arithmetic: `vector + vector` (same kind, componentwise; error on
         length mismatch), `vector + scalar` (broadcast), `vector * scalar`.
-- [ ] Path access: `vec/integer` → the kind word (`'integer!`/`'float!`);
+        *(Full `+ - * /` shipped — int-kind `/` promotes to float-kind (Red
+        parity). Componentwise `vec * vec`/`vec / vec` also supported.)*
+- [x] Path access: `vec/integer` → the kind word (`'integer!`/`'float!`);
         `vec/1` → first element (path-as-pick). **Confirm** Red parity.
-- [ ] Update `same?`/`not-same?` (`Rc::ptr_eq`).
-- [ ] Update equality (`compare.rs`): deep, kind + contents.
-- [ ] Update `type_name` → `"vector!"`.
-- [ ] Inline `#[test]`: `make vector! [integer! 1 2 3]` molds back.
-- [ ] Inline `#[test]`: `length? make vector! [integer! 1 2 3]` → `3`.
-- [ ] Inline `#[test]`: `pick (make vector! [integer! 10 20 30]) 1` → `20`.
-- [ ] Inline `#[test]`: `make vector! [1 2 3] + make vector! [4 5 6]` →
+        *(Confirmed: `vec/integer` returns the kind word as a `word!` value;
+        `vec/N` is 1-based pick; `vec/N: value` is path-as-poke.)*
+- [x] Update `same?`/`not-same?` (`Rc::ptr_eq`).
+- [x] Update equality (`compare.rs`): deep, kind + contents.
+- [x] Update `type_name` → `"vector!"`.
+- [x] Inline `#[test]`: `make vector! [integer! 1 2 3]` molds back.
+- [x] Inline `#[test]`: `length? make vector! [integer! 1 2 3]` → `3`.
+- [x] Inline `#[test]`: `pick (make vector! [integer! 10 20 30]) 1` → `20`.
+- [x] Inline `#[test]`: `make vector! [1 2 3] + make vector! [4 5 6]` →
         `make vector! [integer! 5 7 9]`.
-- [ ] Inline `#[test]`: `vector? make vector! []` → true.
-- [ ] Inline `#[test]`: kind promotion — `make vector! [1 2.0 3]` → f64 kind.
-- [ ] Add golden fixtures: `vector_construct`, `vector_series`,
+- [x] Inline `#[test]`: `vector? make vector! []` → true.
+- [x] Inline `#[test]`: kind promotion — `make vector! [1 2.0 3]` → f64 kind.
+- [x] Add golden fixtures: `vector_construct`, `vector_series`,
         `vector_arith`, `vector_kind_promote`.
-- [ ] Add `programs_errors/vector_kind_mismatch.red` (e.g. `poke` of a string
+        *(Plus `vector_paths` for path-access coverage.)*
+- [x] Add `programs_errors/vector_kind_mismatch.red` (e.g. `poke` of a string
         into a vector).
-- [ ] Update `property.rs` for `Vector` round-trip.
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+- [x] Update `property.rs` for `Vector` round-trip.
+        *(Focused `vector_mold_is_stable` proptest — mirrors `hash_mold_is_stable`.)
+- [x] `cargo test --workspace` green; `--features force-walk` green.
 
 ---
 

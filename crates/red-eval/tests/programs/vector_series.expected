@@ -1,0 +1,11 @@
+10
+20
+30
+10
+30
+20
+make vector! [integer! 10 99 30]
+3
+make vector! [integer! 1 2 3 4]
+make vector! [integer! 2 3 4]
+make vector! [integer!]

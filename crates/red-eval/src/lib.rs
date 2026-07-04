@@ -14,6 +14,7 @@
 pub mod binding;
 pub mod bitset;
 pub mod convert;
+pub mod hash;
 pub mod interp;
 pub mod interp_runner;
 pub mod interp_walker;
@@ -29,6 +30,7 @@ pub mod path;
 pub mod series;
 pub mod stdlib;
 pub mod strings;
+pub mod vector;
 pub mod vm;
 
 pub use binding::{bind_pass, bind_pass_into, deep_clone_series};

@@ -192,6 +192,8 @@ fn same_predicate(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<
         (Value::Func(a), Value::Func(b)) => Rc::ptr_eq(a, b),
         (Value::Error(a), Value::Error(b)) => Rc::ptr_eq(a, b),
         (Value::Map(a), Value::Map(b)) => Rc::ptr_eq(a, b),
+        (Value::Hash(a), Value::Hash(b)) => Rc::ptr_eq(a, b),
+        (Value::Vector(a), Value::Vector(b)) => Rc::ptr_eq(a, b),
         (Value::Bitset(a), Value::Bitset(b)) => Rc::ptr_eq(a, b),
         (Value::Port(a), Value::Port(b)) => Rc::ptr_eq(a, b),
         _ => false,
@@ -222,6 +224,10 @@ fn words_of_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result
             Ok(Value::block(Series::new(borrow)))
         }
         Value::Map(m) => Ok(Value::block(Series::new(m.borrow().keys()))),
+        // M83: hash! keys via key_order (insertion-order for test stability).
+        Value::Hash(h) => Ok(Value::block(Series::new(h.borrow().keys()))),
+        // M84: vector! has no word keys — return an empty block.
+        Value::Vector(_) => Ok(Value::block(Series::new(Vec::new()))),
         // M61: module exports only, in ctx insertion order.
         Value::Module(m) => {
             let md = m.borrow();
@@ -288,6 +294,10 @@ fn values_of_native(
             Ok(Value::block(Series::new(values)))
         }
         Value::Map(m) => Ok(Value::block(Series::new(m.borrow().values()))),
+        // M83: hash! values via key_order.
+        Value::Hash(h) => Ok(Value::block(Series::new(h.borrow().values()))),
+        // M84: vector! elements as a block.
+        Value::Vector(v) => Ok(Value::block(Series::new(v.borrow().elements()))),
         // M61: module exports' values, in ctx insertion order.
         Value::Module(m) => {
             let md = m.borrow();

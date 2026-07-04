@@ -390,6 +390,8 @@ fn eval_prefix(
         | Value::Object(_)
         | Value::Module(_)
         | Value::Map(_)
+        | Value::Hash(_)
+        | Value::Vector(_)
         | Value::Date { .. }
         | Value::Bitset(_)
         | Value::Port(_) => Ok(cur),
@@ -631,6 +633,13 @@ fn eval_path_call(
             let result = walk_data_path(resolved.clone(), &parts[1..], env, path_span)?;
             Ok(result)
         }
+        // M83: hash-headed path — `h/word`, `h/2`, `h/key: val`. Integer parts
+        // are *key lookups* (like map!), not positions; positional access uses
+        // `pick`/`poke`. No method-call dispatch.
+        Value::Hash(_) => {
+            let result = walk_data_path(resolved.clone(), &parts[1..], env, path_span)?;
+            Ok(result)
+        }
         // Non-function, non-object data path: walk the tail selecting by
         // integer index (block/string) or word field (object encountered
         // mid-walk). Paren parts are evaluated in place. M19.
@@ -724,6 +733,7 @@ fn select_field(current: &Value, sym: &Symbol, path_span: Span) -> Result<Value,
             span: path_span,
         }),
         Value::Map(m) => Ok(crate::map::select_map_field(m, sym)),
+        Value::Hash(h) => Ok(crate::hash::select_hash_field(h, sym)),
         Value::Pair { x, y, .. } => match sym.as_str() {
             "x" => Ok((**x).clone()),
             "y" => Ok((**y).clone()),
@@ -793,6 +803,29 @@ fn select_field(current: &Value, sym: &Symbol, path_span: Span) -> Result<Value,
                 span: path_span,
             }),
         },
+        // M84: vector! kind-word path — `vec/integer`, `vec/float`,
+        // `vec/i8`/etc. Returns the kind word as a `LitWord` (e.g.
+        // `'integer!`). The kind word is read-only (set-path errors).
+        // The refinement token drops the trailing `!` (`/integer` ⇒
+        // sym `"integer"`), so we accept either the bare name or the full
+        // `kind!` form.
+        Value::Vector(v) => {
+            let kind = v.borrow().kind();
+            let kind_str = kind.as_str();
+            let bare = kind_str.trim_end_matches('!');
+            if sym.as_str() == kind_str || sym.as_str() == bare {
+                Ok(v.borrow().kind_word_value())
+            } else {
+                Err(EvalError::Native {
+                    message: format!(
+                        "vector! has no field {} (kind is {})",
+                        sym.as_str(),
+                        kind_str
+                    ),
+                    span: path_span,
+                })
+            }
+        },
         other => Err(EvalError::Native {
             message: format!(
                 "cannot select field {} from {}",
@@ -851,6 +884,14 @@ fn pick_path_index(current: &Value, n: i64, path_span: Span) -> Result<Value, Ev
             m,
             &red_core::value::MapKey::Int(n),
         )),
+        // M83: hash!/n → key lookup (Integer keys, like map!), not a position.
+        Value::Hash(h) => Ok(crate::hash::select_hash_key(
+            h,
+            &red_core::value::MapKey::Int(n),
+        )),
+        // M84: vector!/n → 1-based element pick (negative from tail).
+        // Out-of-range returns `none`. Ignores the cursor (positional access).
+        Value::Vector(v) => Ok(v.borrow().pick(n).unwrap_or(Value::None)),
         // M44: pair/2 → y, tuple/3 → blue byte (1-based). Out of range → none.
         Value::Pair { x, y, .. } => match n {
             1 => Ok((**x).clone()),
@@ -1299,6 +1340,35 @@ fn write_path_slot(
                     m.borrow().set(key, rhs);
                     Ok(())
                 }
+                Value::Hash(h) => {
+                    // M83: set hash entry — same Sym-key behavior as map!.
+                    let key = red_core::value::MapKey::Sym(sym.clone());
+                    h.borrow().set(key, rhs);
+                    Ok(())
+                }
+                // M84: vector! kind-word set-path is read-only (`vec/integer:`
+                // errors — the kind word reflects the vector's kind; it's not
+                // a mutable field).
+                Value::Vector(v) => {
+                    let kind = v.borrow().kind();
+                    let kind_str = kind.as_str();
+                    let bare = kind_str.trim_end_matches('!');
+                    if sym.as_str() == kind_str || sym.as_str() == bare {
+                        Err(EvalError::Native {
+                            message: "vector! kind word is read-only".into(),
+                            span: path_span,
+                        })
+                    } else {
+                        Err(EvalError::Native {
+                            message: format!(
+                                "vector! has no field {} (kind is {})",
+                                sym.as_str(),
+                                kind_str
+                            ),
+                            span: path_span,
+                        })
+                    }
+                }
                 other => Err(EvalError::Native {
                     message: format!(
                         "cannot set field {} on {}",
@@ -1350,6 +1420,34 @@ fn write_path_slot(
                 m.borrow().set(key, rhs);
                 Ok(())
             }
+            Value::Hash(h) => {
+                // M83: `h/2: value` → set MapKey::Int(2) (key lookup, like map!).
+                let key = red_core::value::MapKey::Int(*n);
+                h.borrow().set(key, rhs);
+                Ok(())
+            }
+            // M84: vector! `vec/N: value` — poke with narrow-on-write.
+            // Out-of-range and non-numeric value error (matches the `poke`
+            // native).
+            Value::Vector(v) => {
+                let b = v.borrow();
+                if !b.accepts(&rhs) {
+                    return Err(EvalError::TypeError {
+                        expected: "numeric value",
+                        found: crate::natives::type_name(&rhs),
+                        span: rhs.span_or_default(),
+                    });
+                }
+                let narrowed = b.narrow(&rhs);
+                drop(b);
+                match v.borrow().poke(*n, narrowed) {
+                    Some(_) => Ok(()),
+                    None => Err(EvalError::Native {
+                        message: format!("poke index {n} out of range"),
+                        span: path_span,
+                    }),
+                }
+            }
             other => Err(EvalError::TypeError {
                 expected: "block! or paren! for integer set-path index",
                 found: crate::natives::type_name(other),
@@ -1374,6 +1472,14 @@ fn write_path_slot(
             if let Value::Map(m) = current {
                 if let Some(key) = red_core::value::MapKey::from_value(other) {
                     m.borrow().set(key, rhs);
+                    return Ok(());
+                }
+            }
+            // M83: hash! set-path with a non-word/non-integer key part
+            // (string, char, logic, none). Any hashable value is a valid key.
+            if let Value::Hash(h) = current {
+                if let Some(key) = red_core::value::MapKey::from_value(other) {
+                    h.borrow().set(key, rhs);
                     return Ok(());
                 }
             }

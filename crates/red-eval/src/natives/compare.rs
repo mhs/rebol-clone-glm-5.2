@@ -87,6 +87,31 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
                     .iter()
                     .all(|(k, v)| b.get(k).is_some_and(|bv| values_equal(v, &bv)))
         }
+        (Value::Hash(a), Value::Hash(b)) => {
+            // M83: deep entry equality, order-independent (the headline
+            // discriminator vs map! — two hashes with the same entries in
+            // different insertion order are equal).
+            let a = a.borrow();
+            let b = b.borrow();
+            a.len() == b.len()
+                && a.entries
+                    .borrow()
+                    .iter()
+                    .all(|(k, v)| b.get(k).is_some_and(|bv| values_equal(v, &bv)))
+        }
+        // M84: vector! equality — same kind, same length, elementwise
+        // `values_equal`. Cross-kind inequality (integer! ≠ float! even if
+        // values match numerically — mirrors Red's strict `=`).
+        (Value::Vector(a), Value::Vector(b)) => {
+            let a = a.borrow();
+            let b = b.borrow();
+            a.kind() == b.kind()
+                && a.len() == b.len()
+                && a.elements()
+                    .iter()
+                    .zip(b.elements().iter())
+                    .all(|(x, y)| values_equal(x, y))
+        }
         // M45: date! equality. Normalize `None` zone → `Some(0)` (UTC) for
         // comparison, so a zone-naive date equals the same UTC date. Two
         // dates are equal iff their `dt` matches AND normalized zones match.
