@@ -366,6 +366,7 @@ fn eval_prefix(
     match &cur {
         // Data / literals: returned as-is.
         Value::None
+        | Value::Unset
         | Value::Logic(_)
         | Value::Integer { .. }
         | Value::Float { .. }
@@ -2053,6 +2054,11 @@ fn resolve_word(
                 Ok(v)
             } else if let Some(fd) = env.natives.get(sym) {
                 Ok(Value::Func(Rc::clone(fd)))
+            } else if env.unset_on_unbound {
+                // M86: gated fallback — unbound word yields `unset!` instead
+                // of erroring. Default off (back-compat); the
+                // `--unset-on-unbound` CLI flag enables it.
+                Ok(Value::Unset)
             } else {
                 Err(EvalError::UnboundWord {
                     sym: sym.clone(),

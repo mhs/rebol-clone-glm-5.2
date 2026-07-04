@@ -155,6 +155,13 @@ pub struct Env {
     /// (M113 sandbox policy — mirrors `allow_shell`). File ports are
     /// unaffected (gated only by the existing filesystem permissions).
     pub allow_network: bool,
+    /// M86: when true, resolving a truly-unbound word yields `Value::Unset`
+    /// instead of raising `EvalError::UnboundWord`. Default **off** —
+    /// preserves the v0.2–v0.6 strict-binding contract. Enabled by the CLI
+    /// `--unset-on-unbound` flag (runtime gate, not a cargo feature). The
+    /// `user_ctx` (M62) and native-registry fallbacks still run before this
+    /// gate, so `import`-aliased words and natives keep resolving normally.
+    pub unset_on_unbound: bool,
     /// Current working directory for file! path resolution. Updated by
     /// `change-dir`; read by `what-dir`. Relative file paths in `read`/
     /// `write`/`exists?`/etc. resolve against this.
@@ -296,6 +303,7 @@ impl Env {
             out,
             allow_shell: false,
             allow_network: false,
+            unset_on_unbound: false,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             // M29: the bytecode VM is the default evaluator. The
             // `force-walk` cargo feature (re-exported by `red-eval/force-walk`)

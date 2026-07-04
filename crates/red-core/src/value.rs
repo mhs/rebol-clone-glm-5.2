@@ -243,6 +243,13 @@ pub enum Value {
     /// a native like `if false [...]`). The source token `none` is parsed as
     /// a `Word`; eval resolves it to this variant.
     None,
+    /// `unset!` (M86) — a distinct "no value" sentinel, separate from `none!`.
+    /// Runtime-only: produced by the `unset` word (seeded into `user_ctx`), or
+    /// (gated on `Env::unset_on_unbound`) by resolving a truly-unbound word.
+    /// Molds/forms to the empty string (`mold unset == ""`). `unset = unset` →
+    /// true; `unset = none` → false (distinct from `none!`). `print unset`
+    /// prints nothing. Synthetic (no span).
+    Unset,
     /// Runtime-only boolean (result of `true`/`false` words, comparison
     /// natives, etc.).
     Logic(bool),
@@ -1180,6 +1187,7 @@ pub fn infer_vector_kind(elems: &[Value]) -> Result<(Symbol, Vec<Value>), String
 fn type_name_for(v: &Value) -> &'static str {
     match v {
         Value::None => "none!",
+        Value::Unset => "unset!",
         Value::Logic(_) => "logic!",
         Value::Integer { .. } => "integer!",
         Value::Float { .. } => "float!",
@@ -1777,6 +1785,7 @@ impl Value {
             | Value::String8 { span, .. }
             | Value::Date { span, .. } => Some(*span),
             Value::None
+            | Value::Unset
             | Value::Logic(_)
             | Value::Func(_)
             | Value::Closure(_)
@@ -2565,6 +2574,7 @@ mod tests {
     #[test]
     fn span_returns_none_for_synthetic_variants() {
         assert!(Value::None.span().is_none());
+        assert!(Value::Unset.span().is_none());
         assert!(Value::Logic(true).span().is_none());
         assert!(Value::Func(Rc::new(FuncDef::default())).span().is_none());
         assert!(Value::error("x").span().is_none());
@@ -2580,6 +2590,7 @@ mod tests {
     #[test]
     fn span_or_default_returns_zero_for_synthetic() {
         assert!(Value::None.span_or_default().is_default());
+        assert!(Value::Unset.span_or_default().is_default());
         assert!(Value::Logic(true).span_or_default().is_default());
         assert!(Value::Func(Rc::new(FuncDef::default()))
             .span_or_default()

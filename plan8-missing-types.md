@@ -598,46 +598,73 @@ and a *gated* fallback so existing error fixtures stay green.
 
 ### `unset!` semantics
 
-- [ ] Add `Value::Unset` variant in `value.rs` (unit, no span — synthetic).
-- [ ] Update `printer.rs`: `mold`/`form` of `Unset` → `""` (empty string,
+- [x] Add `Value::Unset` variant in `value.rs` (unit, no span — synthetic).
+- [x] Update `printer.rs`: `mold`/`form` of `Unset` → `""` (empty string,
         matching Red — `unset!` molds to nothing).
-- [ ] Add `unset?` predicate.
-- [ ] Add `unset` constant in `user_ctx` (a word evaluating to `Unset`).
-- [ ] **Gated fallback** — the behavior change:
-  - [ ] Today, `resolve_word` `Unbound` arm in the walker errors with
+- [x] Add `unset?` predicate.
+- [x] Add `unset` constant in `user_ctx` (a word evaluating to `Unset`).
+- [x] **Gated fallback** — the behavior change:
+  - [x] Today, `resolve_word` `Unbound` arm in the walker errors with
         `EvalError::UnboundWord` (M62 added a `user_ctx` fallback first, but
         truly-unbound words still error).
-  - [ ] M86 adds a `--unset-on-unbound` CLI flag (default **off** —
+  - [x] M86 adds a `--unset-on-unbound` CLI flag (default **off** —
         back-compat). When on, an unbound word evaluates to `Value::Unset`
         instead of erroring. When off (default), behavior is unchanged.
-  - [ ] The VM's `LoadDynamic` arm gets the same gate (consult a new
+  - [x] The VM's `LoadDynamic` arm gets the same gate (consult a new
         `Env.unset_on_unbound: bool` field, default false).
-  - [ ] This is the **only** v0.7 behavior change; it's opt-in. All existing
+  - [x] This is the **only** v0.7 behavior change; it's opt-in. All existing
         `unbound_word` error fixtures stay green with the flag off.
-- [ ] `do` of an empty block → `Unset` (today returns `None`; **decision:
+- [x] `do` of an empty block → `Unset` (today returns `None`; **decision:
         keep `None` for empty `do` — Red parity is `unset!` but changing
         `do []` to `Unset` would break existing fixtures. Document as a
         deviation; revisit if a fixture depends on `do []` returning
-        `none!`.)
-- [ ] `print` of `Unset` → prints nothing (Red parity).
-- [ ] Update `type_name` → `"unset!"`.
-- [ ] Update `compare.rs`: `Unset = Unset` → true; `Unset = None` → false
-        (they ARE distinct in Red).
-- [ ] Inline `#[test]`: `unset? ()` — wait, `()` evaluates its content;
+        `none!`.) *(Verified — no edit; `eval` empty-block loop in
+        `interp_walker.rs` keeps `last = Value::None`.)*
+- [x] `print` of `Unset` → prints nothing (Red parity). *(Handled via
+        `form(Unset) == ""` — `print`/`prin`/`probe` route through
+        `form_to_string` and emit a blank line.)*
+- [x] Update `type_name` → `"unset!"`.
+- [x] Update `compare.rs`: `Unset = Unset` → true; `Unset = None` → false
+        (they ARE distinct in Red). *(Explicit `Unset=Unset` arm added;
+        `Unset=None` falls through the existing `_ => false` catch-all.)*
+- [x] Inline `#[test]`: `unset? ()` — wait, `()` evaluates its content;
         `unset? do []` → false (do [] = none today); `unset? unset` → true.
-- [ ] Inline `#[test]`: with `--unset-on-unbound`, an unbound word → `Unset`;
-        without, it errors.
-- [ ] Inline `#[test]`: `mold unset` → `""`.
-- [ ] Inline `#[test]`: `print unset` → prints empty line.
-- [ ] Inline `#[test]`: `unset = unset` → true; `unset = none` → false.
-- [ ] Inline `#[test]`: regression guard — all existing `unbound_word`
-        fixtures still error with the flag off.
-- [ ] Add golden fixtures: `unset_value`, `unset_on_unbound` (with the flag).
-- [ ] Add a stable-string property test for `Unset` (`mold unset == ""`).
-- [ ] `cargo test --workspace` green (default); `--features force-walk` green;
+        *(Covered by `m86_unset_predicate` in `natives/mod.rs`.)*
+- [x] Inline `#[test]`: with `--unset-on-unbound`, an unbound word → `Unset`;
+        without, it errors. *(Covered by `m86_unset_on_unbound_gate_default_off`
+        + `m86_unset_on_unbound_gate_on_yields_unset` in `natives/mod.rs`,
+        plus the dedicated `tests/unset_on_unbound.rs` driver with 9 tests.)*
+- [x] Inline `#[test]`: `mold unset` → `""`. *(Covered by
+        `m86_unset_molds_to_empty` in `natives/mod.rs` and
+        `unset_mold_is_empty_string` in `crates/red-core/tests/property.rs`.)*
+- [x] Inline `#[test]`: `print unset` → prints empty line. *(Covered by
+        `m86_unset_prints_nothing` in `natives/mod.rs`.)*
+- [x] Inline `#[test]`: `unset = unset` → true; `unset = none` → false.
+        *(Covered by `m86_unset_distinct_from_none` in `natives/mod.rs`.)*
+- [x] Inline `#[test]`: regression guard — all existing `unbound_word`
+        fixtures still error with the flag off. *(Covered by
+        `unbound_word_errors_default_vm`/`unbound_word_errors_default_walker`
+        in `tests/unset_on_unbound.rs`; the existing
+        `programs_errors/unbound_word*` fixtures continue to pass under
+        `cargo test --workspace` with the default `RunOptions` (flag off).)*
+- [x] Add golden fixtures: `unset_value`, `unset_on_unbound` (with the flag).
+        *(`unset_value` added under `crates/red-eval/tests/programs/` (default
+        mode — uses the `unset` constant, not the gate); `unset_on_unbound`
+        is a dedicated test file `crates/red-eval/tests/unset_on_unbound.rs`
+        rather than a `programs/` fixture, since the `programs.rs` harness
+        uses `RunOptions::default()` (flag off).)*
+- [x] Add a stable-string property test for `Unset` (`mold unset == ""`).
+        *(Added `unset_mold_is_empty_string` in
+        `crates/red-core/tests/property.rs`; `Unset` is deliberately NOT
+        added to `gen_value`'s round-trip pool — empty mold re-parses as an
+        empty block, not as `Word("unset")`, so it cannot round-trip.)*
+- [x] `cargo test --workspace` green (default); `--features force-walk` green;
       **plus** a new `cargo test --workspace --features unset-fallback` mode
-      gating the `--unset-on-unbound` behavior.
-- [ ] **Open:** add a `unset-fallback` cargo feature to `red-eval` for the
+      gating the `--unset-on-unbound` behavior. *(Workspace green in both
+      feature configs; the `--unset-on-unbound` behavior is gated at runtime
+      via `Env.unset_on_unbound` + the `tests/unset_on_unbound.rs` driver —
+      no cargo feature.)*
+- [x] **Open:** add a `unset-fallback` cargo feature to `red-eval` for the
         test mode, or thread the flag purely through `Env` and the CLI.
         Decision: `Env` field + CLI flag; no cargo feature (the behavior is
         runtime-gated, not compile-gated).

@@ -366,6 +366,16 @@ pub(crate) fn none_predicate(
     pred1(args, "none?", |v| matches!(v, Value::None))
 }
 
+/// `unset?` (M86) — true for `unset!` (`Value::Unset`). Distinct from
+/// `none?`: `unset? none` → false, `unset? unset` → true.
+pub(crate) fn unset_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "unset?", |v| matches!(v, Value::Unset))
+}
+
 /// `binary?` — true for `binary!` (`Value::String8`). The variant exists
 /// (M16 stub); M41 wires the lexer/parser/converters to make it reachable
 /// from source. The predicate is real today.
@@ -665,6 +675,7 @@ pub(crate) fn register_word_predicate_natives(env: &mut Env) {
     reg(env, "string?", string_predicate);
     reg(env, "logic?", logic_predicate);
     reg(env, "none?", none_predicate);
+    reg(env, "unset?", unset_predicate);
     reg(env, "binary?", binary_predicate);
     reg(env, "pair?", pair_predicate);
     reg(env, "tuple?", tuple_predicate);

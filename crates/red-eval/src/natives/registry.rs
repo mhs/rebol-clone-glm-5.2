@@ -401,6 +401,8 @@ pub fn register_natives(env: &mut Env) {
 /// its flags; `change-dir` updates `path` at runtime.
 pub fn install_constants(ctx: &Context) {
     ctx.set(Symbol::new("none"), Value::None);
+    // M86: `unset` evaluates to `Value::Unset` (distinct from `none`).
+    ctx.set(Symbol::new("unset"), Value::Unset);
     ctx.set(Symbol::new("true"), Value::Logic(true));
     ctx.set(Symbol::new("false"), Value::Logic(false));
     ctx.set(

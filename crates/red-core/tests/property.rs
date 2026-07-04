@@ -23,8 +23,8 @@
 
 use proptest::prelude::*;
 use red_core::{
-    load_source, mold_to_string, printer::mold, Context, DateValue, HashDef, MapDef, MapKey,
-    ModuleDef, Series, Span, Symbol, Value, VectorDef,
+    form_to_string, load_source, mold_to_string, printer::mold, Context, DateValue, HashDef, MapDef,
+    MapKey, ModuleDef, Series, Span, Symbol, Value, VectorDef,
 };
 use std::rc::Rc;
 
@@ -511,4 +511,14 @@ fn closure_mold_is_stable_placeholder() {
     let mut form_buf = String::new();
     mold(&v, &mut form_buf);
     assert_eq!(form_buf, "#[closure]");
+}
+
+// M86: `unset!` is a synthetic sentinel that molds/forms to the empty string
+// (matches Red). It is deliberately NOT added to `gen_value`'s round-trip
+// pool — the empty mold re-parses as an empty block, not as a `Word("unset")`,
+// so it cannot round-trip. The stable-string contract is asserted here.
+#[test]
+fn unset_mold_is_empty_string() {
+    assert_eq!(mold_to_string(&Value::Unset), "");
+    assert_eq!(form_to_string(&Value::Unset), "");
 }

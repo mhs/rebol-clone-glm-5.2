@@ -73,6 +73,12 @@ pub struct RunOptions {
     /// sandbox policy (network access is gated, like `call`/`shell`). The
     /// CLI `--allow-network` flag sets this to true.
     pub allow_network: bool,
+    /// M86: mirror of `Env::unset_on_unbound` — off by default (back-compat
+    /// with the v0.2–v0.6 strict-binding contract). The CLI
+    /// `--unset-on-unbound` flag sets this to true, causing truly-unbound
+    /// words to evaluate to `Value::Unset` instead of raising
+    /// `EvalError::UnboundWord`.
+    pub unset_on_unbound: bool,
     pub args: Vec<String>,
     pub walk: bool,
     pub trace: bool,
@@ -152,6 +158,7 @@ fn run_series_inner_opts(
     crate::natives::register_natives(&mut env);
     env.allow_shell = opts.allow_shell;
     env.allow_network = opts.allow_network;
+    env.unset_on_unbound = opts.unset_on_unbound;
     // M29: `--walk` forces the tree-walker regardless of the build default.
     // (Under `--features force-walk` the default is already `Walk`, so this
     // is a no-op; without the feature it overrides the `Vm` default.)

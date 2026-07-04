@@ -660,6 +660,12 @@ fn compile_prefix(
         Value::None => {
             c.emit(Instr::ConstNone);
         }
+        // M86: `unset!` is a synthetic sentinel — push as `Const` (pool) so
+        // the same `Value::Unset` flows through the VM.
+        Value::Unset => {
+            let idx = c.push_const(cur.clone());
+            c.emit(Instr::Const(idx));
+        }
         Value::Logic(b) => {
             c.emit(Instr::ConstBool(*b));
         }

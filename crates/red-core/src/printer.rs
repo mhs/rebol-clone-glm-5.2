@@ -12,6 +12,8 @@ use crate::value::{
 pub fn mold(value: &Value, out: &mut String) {
     match value {
         Value::None => out.push_str("none"),
+        // M86: `unset!` molds/forms to the empty string (matches Red).
+        Value::Unset => {}
         Value::Logic(true) => out.push_str("true"),
         Value::Logic(false) => out.push_str("false"),
         Value::Integer { n, .. } => {
@@ -195,6 +197,8 @@ pub fn mold_to_string(value: &Value) -> String {
 pub fn form(value: &Value, out: &mut String) {
     match value {
         Value::None => out.push_str("none"),
+        // M86: `unset!` molds/forms to the empty string (matches Red).
+        Value::Unset => {}
         Value::Logic(true) => out.push_str("true"),
         Value::Logic(false) => out.push_str("false"),
         Value::Integer { n, .. } => {

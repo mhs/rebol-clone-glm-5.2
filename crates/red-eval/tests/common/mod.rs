@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 /// A matched fixture pair: source `.red` and its expected stdout.
+#[allow(dead_code)] // only used by some test targets (programs.rs, programs_errors.rs, parity.rs)
 pub struct Fixture {
     pub name: String,
     pub source_path: PathBuf,
@@ -60,12 +61,14 @@ pub fn golden_fixtures_with_ext(subdir: &str, expected_ext: &str) -> Vec<Fixture
     out
 }
 
+#[allow(dead_code)] // only used by some test targets (programs.rs, programs_errors.rs, parity.rs)
 pub fn read_source(f: &Fixture) -> String {
     fs::read_to_string(&f.source_path).unwrap_or_else(|e| panic!("read {:?}: {e}", f.source_path))
 }
 
 /// Read a fixture's expected output verbatim (no trimming). Program stdout
 /// legitimately ends with newlines, so we compare byte-for-byte.
+#[allow(dead_code)] // only used by some test targets (programs.rs, programs_errors.rs, parity.rs)
 pub fn read_expected(f: &Fixture) -> String {
     fs::read_to_string(&f.expected_path)
         .unwrap_or_else(|e| panic!("read {:?}: {e}", f.expected_path))

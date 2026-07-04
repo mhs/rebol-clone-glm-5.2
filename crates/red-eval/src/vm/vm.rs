@@ -446,6 +446,9 @@ impl<'env> Vm<'env> {
                         val
                     } else if let Some(fd) = self.env.natives.get(&sym) {
                         Value::Func(Rc::clone(fd))
+                    } else if self.env.unset_on_unbound {
+                        // M86: gated fallback — unbound word → `unset!`.
+                        Value::Unset
                     } else {
                         // M31: use the per-instr span (the word's source
                         // position) rather than the block-level fallback.
@@ -835,6 +838,9 @@ impl<'env> Vm<'env> {
                     val
                 } else if let Some(fd) = self.env.natives.get(&sym) {
                     Value::Func(Rc::clone(fd))
+                } else if self.env.unset_on_unbound {
+                    // M86: gated fallback — unbound word → `unset!`.
+                    Value::Unset
                 } else {
                     return Err(EvalError::UnboundWord {
                         sym,

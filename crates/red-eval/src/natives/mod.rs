@@ -135,6 +135,7 @@ pub(crate) fn arity_err(args: &[Value], native: &str, expected: usize, got: usiz
 pub(crate) fn type_name(v: &Value) -> &'static str {
     match v {
         Value::None => "none!",
+        Value::Unset => "unset!",
         Value::Logic(_) => "logic!",
         Value::Integer { .. } => "integer!",
         Value::Float { .. } => "float!",
@@ -1199,5 +1200,92 @@ mod tests {
         assert_eq!(mold_to_string(&val("1x2 <> 2x1")), "true");
         assert_eq!(mold_to_string(&val("255.0.0 = 255.0.0")), "true");
         assert_eq!(mold_to_string(&val("255.0.0 <> 0.255.0")), "true");
+    }
+
+    // --- M86 unset! tests ---
+
+    #[test]
+    fn m86_unset_predicate() {
+        // `unset` constant (installed by `install_constants`) evaluates to
+        // `Value::Unset`; `unset?` is true on it, false on `none`/other types.
+        assert_eq!(mold_to_string(&val("unset? unset")), "true");
+        assert_eq!(mold_to_string(&val("unset? none")), "false");
+        assert_eq!(mold_to_string(&val("unset? 5")), "false");
+    }
+
+    #[test]
+    fn m86_unset_distinct_from_none() {
+        assert_eq!(mold_to_string(&val("unset = unset")), "true");
+        // M86: `unset = none` is false (distinct from `none!`).
+        assert_eq!(mold_to_string(&val("unset = none")), "false");
+        assert_eq!(mold_to_string(&val("unset <> none")), "true");
+    }
+
+    #[test]
+    fn m86_unset_molds_to_empty() {
+        // Direct: `mold_to_string(&Value::Unset)` is the empty string. The
+        // script-level `mold unset` native returns `Value::string("")` (an
+        // empty string value), whose own mold is `""` — so the contract is
+        // verified at the printer level here.
+        assert_eq!(mold_to_string(&Value::Unset), "");
+        // The native `mold unset` returns an empty `string!` value.
+        let v = val("mold unset");
+        match v {
+            Value::String { s, .. } => assert!(s.is_empty(), "expected empty string, got {s:?}"),
+            other => panic!("expected string!, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn m86_unset_prints_nothing() {
+        // `print unset` emits just a newline (the `writeln!`).
+        assert_eq!(s(&run_capture("print unset").unwrap()), "\n");
+    }
+
+    #[test]
+    fn m86_unset_type_name() {
+        assert_eq!(type_name(&Value::Unset), "unset!");
+        assert_eq!(mold_to_string(&val("type? unset")), "unset!");
+    }
+
+    #[test]
+    fn m86_unset_on_unbound_gate_default_off() {
+        // Default: `unset_on_unbound` is off, so a truly-unbound word errors.
+        let err = run_capture("xyzzy_unbound_word").err().unwrap_or_else(|| {
+            panic!(
+                "expected unbound-word error, got: {:?}",
+                run_capture("xyzzy_unbound_word")
+            )
+        });
+        assert!(
+            err.contains("has no value") || err.contains("xyzzy_unbound_word"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn m86_unset_on_unbound_gate_on_yields_unset() {
+        // With `env.unset_on_unbound = true`, a truly-unbound word resolves to
+        // `Value::Unset` (walker path — `eval` is the dispatch shim's walker
+        // route when no VM is involved for this small block). Both the walker
+        // and the VM consult the gate.
+        use crate::binding::bind_pass;
+        let body = load_source("xyzzy_unbound_word").unwrap();
+        let ctx = Context::new();
+        install_constants(&ctx);
+        let ctx_rc = bind_pass(&body, ctx);
+        let buf = Rc::new(RefCell::new(Vec::<u8>::new()));
+        let mut env = Env::new_with_output(ctx_rc, Box::new(BufferWriter(Rc::clone(&buf))));
+        register_natives(&mut env);
+        env.unset_on_unbound = true;
+        let block = Value::block(body);
+        let v = eval(&block, &mut env).expect("expected Unset, got error");
+        assert!(
+            matches!(v, Value::Unset),
+            "expected Value::Unset, got {:?}",
+            v
+        );
+        // `unset?` on the result is true.
+        assert_eq!(type_name(&v), "unset!");
     }
 }

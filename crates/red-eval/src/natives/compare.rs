@@ -42,6 +42,9 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Tuple { bytes: x, .. }, Value::Tuple { bytes: y, .. }) => x == y,
         (Value::String8 { bytes: x, .. }, Value::String8 { bytes: y, .. }) => x == y,
         (Value::None, Value::None) => true,
+        // M86: `unset!` is distinct from `none!`. `unset = none` falls
+        // through to the catch-all `_ => false` below.
+        (Value::Unset, Value::Unset) => true,
         (Value::Logic(x), Value::Logic(y)) => x == y,
         (Value::Error(a), Value::Error(b)) => {
             // M42: structural equality — compare all fields. `args`/`near`

@@ -17,7 +17,7 @@ const HELP: &str = "\
 red — a Red subset clone
 
 USAGE:
-    red [--allow-shell] [--allow-network] [--walk] [--trace] [--module-path <dir>...] [--no-stdlib] <file.red> [args...]   Load and evaluate a Red source file
+    red [--allow-shell] [--allow-network] [--unset-on-unbound] [--walk] [--trace] [--module-path <dir>...] [--no-stdlib] <file.red> [args...]   Load and evaluate a Red source file
     red --disasm <file.red>                                       Compile and disassemble the script (no run)
     red --disasm-func <name> <file.red>                           Disassemble a named top-level func
     red                                                           Interactive REPL (quit with `quit`/`exit` or Ctrl-D)
@@ -29,7 +29,10 @@ Trailing args after the script path are exposed to the script as
 `system/options/args` (a block of strings). `--allow-shell` enables the
 `call`/`shell` natives (disabled by default for test safety).
 `--allow-network` enables `open`/`read`/`write` on `url!`/HTTP `port!`
-values (disabled by default — mirrors `--allow-shell`). `--walk`
+values (disabled by default — mirrors `--allow-shell`). `--unset-on-unbound`
+(M86) makes truly-unbound words evaluate to `unset!` instead of raising
+`EvalError::UnboundWord` (disabled by default — preserves the strict-
+binding contract). `--walk`
 forces the tree-walking evaluator instead of the default bytecode VM
 (useful for debugging and parity comparison). `--trace` emits one line
 per executed VM instr to stderr (VM mode only; no-op in `--walk` mode).
@@ -63,6 +66,8 @@ fn main() -> ExitCode {
     // bytecode VM since M29); `--trace` enables per-instr VM tracing (M31).
     let mut allow_shell = false;
     let mut allow_network = false;
+    // M86: opt-in — unbound words evaluate to `unset!` instead of erroring.
+    let mut unset_on_unbound = false;
     let mut walk = false;
     let mut trace = false;
     let mut disasm = false;
@@ -78,6 +83,8 @@ fn main() -> ExitCode {
             allow_shell = true;
         } else if a == "--allow-network" {
             allow_network = true;
+        } else if a == "--unset-on-unbound" {
+            unset_on_unbound = true;
         } else if a == "--walk" {
             walk = true;
         } else if a == "--trace" {
@@ -133,6 +140,7 @@ fn main() -> ExitCode {
             rest,
             allow_shell,
             allow_network,
+            unset_on_unbound,
             walk,
             trace,
             no_stdlib,
@@ -147,6 +155,7 @@ fn run_file(
     args: &[String],
     allow_shell: bool,
     allow_network: bool,
+    unset_on_unbound: bool,
     walk: bool,
     trace: bool,
     no_stdlib: bool,
@@ -162,6 +171,7 @@ fn run_file(
     let opts = red_eval::RunOptions {
         allow_shell,
         allow_network,
+        unset_on_unbound,
         args: args.to_vec(),
         walk,
         trace,
