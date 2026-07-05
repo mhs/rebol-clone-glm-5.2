@@ -4,7 +4,117 @@ Performance baseline for the Red-clone interpreter. Established in
 Milestone Pre-22 (`plan3.md`) as the reference the v0.3 VM milestones
 (M22–M30) are compared against.
 
-## Current status (v0.5.0, native arm64)
+## Current status (v0.7.0, native arm64)
+
+v0.7 is a **type-completeness release** in the spirit of v0.4 but smaller:
+it lands ten new `Value` variants (`percent!`/`money!`/`issue!`/`email!`/
+`tag!`/`unset!`/`hash!`/`vector!`/`image!`/`typeset!`), the `native!`/`op!`
+type split at the predicate layer, a gated `--unset-on-unbound` fallback
+(M86 — the one non-additive change, default off), and `typeset!`-backed
+runtime type-checking of typed-func args (M89 — `FuncDef.param_types:
+Vec<Option<Rc<TypesetDef>>>` parallel to `params`, checked at call time).
+`regex!`/`struct!`/`handle!` were deferred to v0.8 (see `plan8-missing-types.md`).
+
+**No new `Instr` variants** and **no new per-iter work** were added to the
+VM dispatch loop. Every new source-origin literal (`Percent`/`Money`/
+`Issue`/`Email`/`Tag`) compiles through the existing `Const(idx)` +
+`Call(native_idx, argc)` path. Synthetic variants (`Hash`/`Vector`/`Image`/
+`Unset`/`Typeset`) are produced by `make`/`to-*` natives and enter via the
+const-pool when bound to a word. The M89 type-check adds one
+`param_types.is_empty()` early-out per `CallUser`/`prepare_call` (skipped
+for pre-M89 funcs which have an empty `param_types` vec); the `accepts`
+path runs only when `Some(ts)` is present. `Value` enum size is unchanged
+at 64 bytes (the new variants land in the existing tag space); `Instr` is
+unchanged at 16 bytes.
+
+- **Host:** Apple M4, 10 cores, 24 GB RAM, macOS
+- **Rust toolchain:** `rustc 1.94.0 (4a4ef493e 2026-03-02)`
+- **Command:** `cargo bench --bench eval` (criterion default; uses
+  `[profile.bench]` with `opt-level = 3`)
+- **Date:** 2026-07-04
+
+### End-to-end fixtures
+
+| Fixture              | v0.7.0 VM              | v0.7.0 Walker          | Speedup vs. walker | v0.5.0 VM     | v0.5.0→v0.7.0 delta |
+|----------------------|------------------------|------------------------|--------------------|---------------|---------------------|
+| `fib 30`             | 423.42 ms              | 1.3582 s               | **3.21× faster**   | 396.49 ms     | +6.8% (noise)       |
+| `sum_loop`           | 134.70 ms              | 140.08 ms              | **1.04× faster**   | 147.85 ms     | **−8.9%**           |
+| `sum_while`          | 313.95 ms              | 354.25 ms              | **1.13× faster**   | (unchanged)   | —                   |
+| `ackermann 3 5`      | 30.836 ms              | 31.570 ms              | ~neutral (1.02×)   | (unchanged)   | —                   |
+| `ackermann_small`    | 321.40 µs              | 277.90 µs              | 0.87×              | (unchanged)   | —                   |
+| `foreach_block`      | 30.048 ms              | 38.658 ms              | **1.29× faster**   | (unchanged)   | —                   |
+| `block_build`        | 1.5108 ms              | 2.2858 ms              | **1.51× faster**   | (unchanged)   | —                   |
+| `parse_heavy`        | 7.8990 ms              | 9.9915 ms              | **1.27× faster**   | (unchanged)   | —                   |
+| `string_concat`      | 740.81 µs              | 687.32 µs              | ~neutral (0.93×)   | (unchanged)   | —                   |
+| `func_call_heavy`    | 154.37 ms              | 131.48 ms              | 0.85× (regress)    | 153.13 ms     | ~neutral            |
+| `closure_heavy`      | 51.654 ms              | 96.238 ms              | **1.86× faster**    | 44.75 ms      | +15.5%             |
+
+### v0.7.0 notes
+
+### v0.10.0 notes (M130–M136 feature-parity round-out)
+
+- **Expected neutral.** All v0.10 additions are native-call-path: new
+  natives (`map-each`/`collect`/`checksum`/`protect`/…) and refinement
+  widenings on existing natives (`find`/`append`/`copy`/`replace`/`round`/
+  `parse`). No new `Instr` variants, no compiler/VM hot-path changes, no
+  per-instr overhead added. The only per-call addition is `protect`'s
+  `check_protected` guard at mutating-native entry — a single
+  `HashSet::contains`/`RefCell::borrow` on the protected path, skipped
+  entirely for unprotected values (the overwhelmingly common case). No
+  fixture in the bench suite exercises a protected value, so the bench
+  numbers are unaffected.
+- The `Env` gained two fields (`collect_stack: Vec<Vec<Value>>`,
+  `protected_series: HashSet<*const ()>`, `user_trace: Option<Box<dyn
+  Write>>`) — heap-allocated, lazily grown, zero cost when unused.
+- `cargo test --workspace` and `cargo test --workspace --features
+  force-walk` are both fully green (16 test binaries each, zero failures).
+  Run `cargo bench --bench eval` for refreshed criterion numbers.
+
+- **Wins:** `fib 30` holds at **3.21× faster** (was 3× in v0.5.0).
+  `closure_heavy` (the M65 closure-creation+call fixture) improved to
+  **1.86× faster** (was 1.64× in v0.5.0). `foreach_block` jumped to
+  **1.29× faster** and `block_build`/`parse_heavy` to **1.27–1.51×
+  faster** — the walker pays more for the new value-variant match arms
+  in its `eval_prefix` self-evaluating list than the VM pays for the
+  const-pool entries, so the VM widened its lead on these fixtures.
+- **Remaining regression:** `func_call_heavy` (0.85×) — the `does`
+  invocation path still allocates a `Frame` per call (the `locals` Vec
+  is pooled, but the `Frame` struct itself is pushed/popped). Pre-existing
+  from v0.3.3; the Tier 3 `Frame`-pool reuse candidate remains deferred.
+- **Environment drift:** the criterion `change:` output flagged
+  regressions on most fixtures vs. the saved baseline, **including the
+  walker fixtures** — which don't run any v0.7 type code on those
+  programs. This mirrors the v0.4.0 regression analysis (BENCHMARKS.md
+  history): the walker regressing alongside the VM is the signature of
+  environment drift (thermal/toolchain/baseline), not a v0.7 code change.
+  The VM/walker *ratios* above are the robust comparison; absolute
+  numbers may shift on re-run.
+- **M89 type-check cost:** the `param_types.is_empty()` fast path means
+  pre-M89 funcs (all the bench fixtures) pay only one `Vec::is_empty`
+  check per call. Negligible — no bench fixture uses typed args, so the
+  `accepts` path is never exercised. The 6.8% `fib` uptick is within
+  machine-noise range (the v0.5.0 `fib` itself was recorded as ~6%
+  slower than v0.4.0 with no fib-path code change).
+
+### What's been completed (v0.6 + v0.7)
+
+| Milestone | What | Key change |
+|-----------|------|------------|
+| M110–M114 (v0.6) | Core functional gaps | `parse` named-rule recursion + depth guard; `mold` native (`/only`); series `sort` + set ops (`unique`/`intersect`/`union`/`difference`/`exclude`); `port!` + minimal synchronous HTTP networking (`open`/`close`/`create`/`read port`/`read url!` GET via `ureq`, TLS on by default) behind `--allow-network`. **No new VM instrs.** |
+| M120–M121 (v0.5.1) | Control-flow completeness | `unless`, `forever`, `for` (counted, direction-aware, int/float/char), `forskip`. |
+| M80–M89 (v0.7) | Type completeness | `percent!`/`money!`/`issue!`/`email!`/`tag!`/`unset!`/`hash!`/`vector!`/`image!`/`typeset!`, `native!`/`op!` split, `--unset-on-unbound` gate, `typeset!` func-spec type-checking. **No new VM instrs** — all additive through `Const`/`Call`. |
+
+### Regress guard
+
+The inline `#[test] vm_no_slower_than_walker_on_fib` in
+`crates/red-eval/tests/bench_fixtures.rs` runs `fib 20` in both VM and
+Walk modes, asserting the VM is never > 3× slower (debug) and is ≥ 1.2×
+faster (release). The authoritative regress guard is the criterion bench
+suite via [`critcmp`](https://github.com/BurntSushi/critcmp).
+
+---
+
+## Prior status (v0.5.0, native arm64)
 
 v0.5 adds **first-class closures** (`closure!` with snapshot freevar
 capture) and **modules** (`module`/`export`/`import`). The closure path

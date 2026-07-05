@@ -454,6 +454,7 @@ fn analyze_func_form(data: &[Value], i: usize, scope: &mut Scope, result: &mut A
             params: Vec::new(),
             refinements: Vec::new(),
             locals: Vec::new(),
+            param_types: Vec::new(),
         }
     } else {
         match extract_spec(&data[i + 1]) {

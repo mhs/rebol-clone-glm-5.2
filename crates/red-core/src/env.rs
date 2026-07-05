@@ -9,7 +9,7 @@
 //! and `Return`/`Native` error variants are present for M9+ but unused here.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -272,6 +272,24 @@ pub struct Env {
     /// stdlib words. `None` when `--no-stdlib` is set or `ensure_stdlib`
     /// hasn't run yet.
     pub stdlib: Option<Rc<RefCell<crate::value::ModuleDef>>>,
+    /// M130: dynamic-scope stack for the `collect`/`keep` native pair. Each
+    /// `collect` entry pushes a fresh accumulator; `keep value` appends to the
+    /// top entry. Empty outside an active `collect` call (a stray `keep`
+    /// errors). Distinct from the parse-only `collect` keyword in `parse.rs`.
+    pub collect_stack: Vec<Vec<Value>>,
+    /// M131: pointer-identity set of protected `series!` storage cells. A
+    /// series is protected when its `Rc<RefCell<Vec<Value>>>` pointer (as
+    /// `*const ()`) is in this set. `protect`/`unprotect` add/remove; every
+    /// mutating series native calls `check_series_protected` before writing.
+    /// Objects use `ObjectDef.protected` directly (no entry here). Pragmatic
+    /// deviation from the "field on Series backing cell" plan note: avoids a
+    /// sweeping `Series.data` type change; behavior is identical.
+    pub protected_series: HashSet<*const ()>,
+    /// M134: user-level `trace on`/`trace off` toggle. When `Some`, every
+    /// evaluated top-level expression is molded and written to this sink
+    /// before evaluation. Distinct from the CLI `--trace` VM-instruction
+    /// dump (`Env::trace_out`) — this is a script-level tracing mode.
+    pub user_trace: Option<Box<dyn std::io::Write>>,
     /// High-water mark of `call_stack.len()` since the last
     /// [`Self::reset_stats`] call. Used by the v0.3 VM milestones to prove
     /// tail-call stack bounds. Only present under the `stats` cargo feature;
@@ -329,6 +347,9 @@ impl Env {
             loading_modules: Vec::new(),
             current_vm_captures: None,
             stdlib: None,
+            collect_stack: Vec::new(),
+            protected_series: HashSet::new(),
+            user_trace: None,
             #[cfg(feature = "stats")]
             max_frame_depth: 0,
             #[cfg(feature = "stats")]

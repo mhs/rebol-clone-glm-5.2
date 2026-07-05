@@ -1252,6 +1252,28 @@ impl<'env> Vm<'env> {
                 locals[i] = self.stack[start + i].clone();
             }
         }
+        // M89: runtime type-check for typed-function params. Match the
+        // walker's `check_param_types` message format byte-for-byte so the
+        // `--features force-walk` parity gate stays green.
+        if !fd.param_types.is_empty() {
+            for (i, pt) in fd.param_types.iter().enumerate() {
+                if let Some(ts) = pt {
+                    if let Some(arg) = self.stack.get(start + i) {
+                        if !ts.accepts(arg) {
+                            return Err(EvalError::Native {
+                                message: format!(
+                                    "type error: arg {} expected {}, got {}",
+                                    i + 1,
+                                    crate::typeset::typeset_label(ts),
+                                    crate::natives::type_name(arg),
+                                ),
+                                span: arg.span_or_default(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
         // Now pop the args from the operand stack.
         self.stack.truncate(start);
         // Refinement slots default to none/logic false. M25's tests don't
@@ -1576,6 +1598,7 @@ impl<'env> Vm<'env> {
             refinements: spec.refinements,
             locals: spec.locals,
             freevars,
+            param_types: spec.param_types,
             compiled: None,
             body: body_series,
             ctx: Context::new(),
@@ -1633,6 +1656,7 @@ impl<'env> Vm<'env> {
             refinements: spec.refinements,
             locals: spec.locals,
             freevars: freevar_names,
+            param_types: spec.param_types,
             compiled: None,
             body: body_series,
             ctx: Context::new(),

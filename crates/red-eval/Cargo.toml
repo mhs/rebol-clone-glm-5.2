@@ -1,6 +1,6 @@
 [package]
 name = "red-eval"
-version = "0.6.0"
+version = "0.10.0"
 edition = "2021"
 
 [features]
@@ -17,6 +17,15 @@ force-walk = ["red-core/force-walk"]
 [dependencies]
 red-core = { path = "../red-core" }
 ureq = "2"
+# M130: `compress`/`decompress` (deflate) and `enbase`/`debase` (base64).
+# Pure-Rust, no-async, minimal dep trees — matches the `plan8` M82 precedent.
+flate2 = "1"
+base64 = "0.22"
+# M130: `checksum` native — CRC32 + SHA-1/SHA-256. Mirrors red-core's dep
+# choice so the native impl can use them directly (cargo dedups the shared
+# versions).
+crc32fast = "1"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

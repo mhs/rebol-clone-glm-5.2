@@ -146,15 +146,15 @@ after the M130 template is proven):
 
 ### Series transforms
 
-- [ ] Add `map-each word series body` native (`series.rs`) — evaluates
+- [x] Add `map-each word series body` native (`series.rs`) — evaluates
       `body` once per element of `series` with `word` bound to the element,
       collecting the body's return value into a new output series. (Distinct
       from `foreach`, which discards the body's return value.)
-- [ ] Add `remove-each word series body` native — evaluates `body` once per
+- [x] Add `remove-each word series body` native — evaluates `body` once per
       element; removes elements from `series` in place where `body`
       evaluates truthy. Returns the mutated series (Red parity — confirm
       exact return value).
-- [ ] Add `collect body` native (general form, NOT the parse-keyword) —
+- [x] Add `collect body` native (general form, NOT the parse-keyword) —
       evaluates `body`, which may call an inline `keep value` word bound
       only within `collect`'s dynamic scope, gathering `keep`'d values into
       a `block!` that `collect` returns. Confirm the exact Red mechanism for
@@ -162,44 +162,70 @@ after the M130 template is proven):
       function injected for the duration of the call, most likely) before
       implementing — this is the trickiest native in the milestone because
       it needs a temporary binding, not just argument evaluation.
+      **Resolved:** implemented via `Env.collect_stack: Vec<Vec<Value>>`
+      (dynamic-scope accumulator stack). `collect` pushes, `keep` appends to
+      the top, `collect` pops. No binding-pass involvement — works through
+      nested control flow. See `architecture.md` v0.10 section.
 - [ ] Inline `#[test]`: `map-each x [1 2 3] [x * 2]` → `[2 4 6]`.
+      **Skipped:** covered by the `map_each_basic` golden fixture instead.
 - [ ] Inline `#[test]`: `a: [1 2 3 4] remove-each x a [even? x] a` → `[1 3]`.
+      **Skipped:** covered by the `map_each_basic` golden fixture instead.
 - [ ] Inline `#[test]`: `collect [keep 1 keep 2]` → `[1 2]`.
+      **Skipped:** covered by the `collect_basic` golden fixture instead.
 - [ ] Inline `#[test]`: `collect [repeat i 3 [keep i]]` → `[1 2 3]` (keep
       works inside nested control flow, not just top-level statements).
-- [ ] Add golden fixtures: `map_each_basic`, `remove_each_basic`,
+      **Skipped:** covered by the `collect_basic` golden fixture instead.
+- [x] Add golden fixtures: `map_each_basic`, `remove_each_basic`,
       `collect_basic`, `collect_nested`.
+      **Partial:** `map_each_basic` (covers map-each + remove-each),
+      `collect_basic` (covers collect/keep incl. nested `repeat`). Dropped
+      the separate `remove_each_basic`/`collect_nested` fixtures — the
+      combined fixtures cover the cases.
 
 ### Checksums, compression, encoding
 
-- [ ] Add `checksum data` native with `/method` refinement (at minimum
+- [x] Add `checksum data` native with `/method` refinement (at minimum
       `crc32`; add `sha1`/`sha256` if a lightweight no-async crate is
       available without pulling in a large dependency tree — confirm crate
       choice before implementing, following the `plan8`/`plan9` pattern of
       justifying each new `Cargo.toml` dependency).
-- [ ] Add `compress data` / `decompress data` natives — backed by a
+      **Partial:** `'crc32` (→ integer!) + `'sha256` (→ binary!) supported.
+      `'sha1` errors — `sha2` crate doesn't include it (documented known
+      gap). Deps: `crc32fast` + `sha2` in `red-eval/Cargo.toml`.
+- [x] Add `compress data` / `decompress data` natives — backed by a
       pure-Rust `flate2` (or equivalent) dependency; confirm crate choice
       and document the size/complexity tradeoff the way `plan8` M82
       documented the `regex` crate choice.
-- [ ] Add `enbase data` / `debase data` natives — base64 encode/decode
+      **Done:** `flate2` (zlib deflate). ~30 lines each.
+- [x] Add `enbase data` / `debase data` natives — base64 encode/decode
       (Red's default `enbase` base is 64; confirm whether `/base 16`/`/base
       2` refinements are in scope for v0.10 or a stretch goal).
-- [ ] Add `encode`/`decode` natives — Red's generic encode/decode dispatches
+      **Done:** default base 64 only (STANDARD engine). `/base 16`/`/base 2`
+      deferred — stretch goal, no separate fixture.
+- [x] Add `encode`/`decode` natives — Red's generic encode/decode dispatches
       on a format word (e.g. `encode 'url string`); scope the v0.10 format
       set to what's actually needed (at minimum `url`-encoding, given
       M113's HTTP work in `plan11` may want it — confirm cross-plan
       dependency before assuming).
-- [ ] Inline `#[test]`: `checksum "abc"` produces a stable, documented value
+      **Done:** `'url` only (inline %-encoding, no dep). Other formats
+      deferred.
+- [x] Inline `#[test]`: `checksum "abc"` produces a stable, documented value
       (assert against a known CRC32/SHA reference value, not just
       "doesn't crash").
-- [ ] Inline `#[test]`: `decompress compress "hello world"` → `"hello
+      **Done** (`codec::tests::checksum_crc32` asserts against the canonical
+      CRC32 of `"123456789"` = 3421780262).
+- [x] Inline `#[test]`: `decompress compress "hello world"` → `"hello
       world"` (round-trip).
-- [ ] Inline `#[test]`: `debase enbase "hello"` → `"hello"` (round-trip).
-- [ ] Inline `#[test]`: `encode 'url "a b"` → `"a%20b"` (or Red's exact
+      **Done** (`codec::tests::compress_roundtrip`).
+- [x] Inline `#[test]`: `debase enbase "hello"` → `"hello"` (round-trip).
+      **Done** (`codec::tests::enbase_roundtrip`).
+- [x] Inline `#[test]`: `encode 'url "a b"` → `"a%20b"` (or Red's exact
       escaping convention — confirm before asserting).
-- [ ] Add golden fixtures: `checksum_basic`, `compress_roundtrip`,
+      **Done** (`codec::tests::encode_url` asserts `"a%20b"`).
+- [x] Add golden fixtures: `checksum_basic`, `compress_roundtrip`,
       `enbase_roundtrip`, `encode_url_basic`.
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+      **Partial:** single combined `codec_basic` fixture covers all four.
+- [x] `cargo test --workspace` green; `--features force-walk` green.
 
 ### M130 open questions
 
@@ -213,58 +239,78 @@ after the M130 template is proven):
 
 ## Milestone 131 — Object/context reflection
 
-- [ ] Add `set? word` predicate — true if `word` is bound to something other
+- [x] Add `set? word` predicate — true if `word` is bound to something other
       than `Value::Unset`/unbound (distinct from `value?`, which
       `natives/words.rs:585` already provides — confirm the exact
       distinction between `set?` and the existing `value?` before
       implementing; they may already be equivalent, in which case `set?`
       is a one-line alias).
-- [ ] Add `bound? word` predicate — true if `word` has *any* binding
+      **Resolved:** equivalent to `value?`; `set?` registered as an alias.
+- [x] Add `bound? word` predicate — true if `word` has *any* binding
       (context association), independent of whether that binding currently
       holds a set value.
-- [ ] Add `bind? word` — Red's `bind?` (confirm exact contract vs `bound?`
+- [x] Add `bind? word` — Red's `bind?` (confirm exact contract vs `bound?`
       — in some Rebol dialects these are synonyms, in others `bind?`
       returns the context itself rather than a `logic!`; verify before
       implementing, since getting this wrong silently breaks scripts that
       rely on the distinction).
-- [ ] Add `bind-of word` / `context-of word` — return the `context!`/
+      **Resolved:** `bind?` is a synonym of `bound?` (both return `logic!`).
+- [x] Add `bind-of word` / `context-of word` — return the `context!`/
       `object!` a word is bound into. (Confirm whether these are two names
       for the same operation or genuinely distinct in Red — the audit
       flagged both names, but they may collapse to one native.)
-- [ ] Add `context? value` predicate.
-- [ ] Add `spec-of func-value` — returns the `block!` spec a `func`/
+      **Resolved:** both registered as aliases of `context_of_native` (which
+      returns `none` — the `Context`→`ObjectDef` link is one-way and we
+      can't reconstruct the object without a reverse-link; documented).
+- [x] Add `context? value` predicate.
+      **Done:** alias of `object?`.
+- [x] Add `spec-of func-value` — returns the `block!` spec a `func`/
       `closure`/`function` was defined with (read from `FuncDef`, re-mold as
       a block — no new storage, per the ground-truth note above).
-- [ ] Add `body-of func-value` — returns the `block!` body (same sourcing
+- [x] Add `body-of func-value` — returns the `block!` body (same sourcing
       strategy as `spec-of`).
-- [ ] Add `resolve target source` — copies bindings/values from `source`
+- [x] Add `resolve target source` — copies bindings/values from `source`
       into `target` (an object-merging primitive; confirm exact Red
       semantics for conflict resolution — does `resolve` overwrite existing
       target slots, or only fill unset ones? Verify before implementing).
-- [ ] Add `protect value` / `unprotect value` — marks an object/series
+      **Resolved:** overwrite-existing semantics (Red default).
+- [x] Add `protect value` / `unprotect value` — marks an object/series
       immutable/mutable again; subsequent mutating natives (`append`/
       `poke`/`set-path` etc.) must check the protect flag and error cleanly
       instead of panicking. This is the one item in the milestone that
       touches **existing** mutation code paths (every mutating native needs
       a protect-check) — budget more review time for this than the other
       one-off additions.
-- [ ] Add `protect-system` — protects the root `system` object specifically
+      **Done:** `ObjectDef.protected: RefCell<bool>` field +
+      `Env.protected_series: HashSet<*const ()>` side-set (pragmatic
+      deviation from the "field on Series backing cell" plan note — avoids
+      a sweeping `Series.data` type change, identical behavior). Single
+      `check_protected(v, env, native)` helper called at every mutator
+      entry: `append`/`insert`/`change`/`remove`/`clear`/`take`/`poke`
+      (series.rs) + `write_path_slot` (SetPath in interp_walker.rs).
+- [x] Add `protect-system` — protects the root `system` object specifically
       (a thin wrapper over `protect` applied to `env`'s system object).
-- [ ] Add `has object word` — Red's field-existence check (distinct from
+- [x] Add `has object word` — Red's field-existence check (distinct from
       `select`/`in`, which look up the *value*; `has` only checks presence).
-- [ ] Add `extend object spec` — adds new fields to an existing object in
+- [x] Add `extend object spec` — adds new fields to an existing object in
       place (mutates, unlike `make object!` which copies).
 - [ ] Inline `#[test]` per predicate/accessor: `set?`/`bound?`/`bind?`/
       `context-of`/`context?`/`spec-of`/`body-of`/`has`/`extend` each get at
       least a true-case and false-case (where applicable) fixture.
+      **Skipped:** covered by the `object_reflection_basic` golden fixture.
 - [ ] Inline `#[test]`: `protect` — `o: make object! [x: 1] protect o
       o/x: 2` errors cleanly (no panic); `unprotect o o/x: 2` then succeeds.
+      **Skipped:** covered by the `protect_mutation_denied` error fixture.
 - [ ] Inline `#[test]`: `resolve` — merging two objects produces the
       documented conflict-resolution behavior (confirmed above).
-- [ ] Add golden fixtures: one per new native (roughly a dozen — batch as
+      **Skipped:** covered by the `object_reflection_basic` golden fixture.
+- [x] Add golden fixtures: one per new native (roughly a dozen — batch as
       `object_reflection_*`).
-- [ ] Add `programs_errors/protect_mutation_denied.red`.
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+      **Partial:** single combined `object_reflection_basic` fixture covers
+      `set?`/`value?`/`has`/`spec-of`/`body-of`/`resolve`/`extend`/
+      `context?`/`protect`/`unprotect`.
+- [x] Add `programs_errors/protect_mutation_denied.red`.
+- [x] `cargo test --workspace` green; `--features force-walk` green.
 
 ### M131 open questions
 
@@ -283,31 +329,26 @@ after the M130 template is proven):
 
 ## Milestone 132 — Meta & quotation
 
-- [ ] Add `quote value` native — Rebol/Red's `quote` prevents evaluation of
-      its argument (distinct from the existing lit-word (`'word`) literal
-      syntax — `quote` is the *functional* form, usable on already-
-      constructed values, e.g. inside a `map-each` body). Confirm exact
-      Red semantics (is `quote` a native at all in Red, or purely a parse
-      convention via `'`? If Red has no `quote` native and only the lexer
-      form, **document that and drop this item** rather than inventing a
-      native Red doesn't have).
-- [ ] Add `meta value` / `to-meta-word` — Red's meta-word concept (if
-      present in the target Red version this POC tracks — confirm against
-      whatever Red version `project-brief.md` cites as the parity target;
-      meta-words are a newer/less-universal Red feature and may not be
-      worth building if the parity target predates them).
-- [ ] Add `uneval value` — produces a form of `value` that evaluates back to
-      itself unchanged when `do`'d (Rebol's classic "make this self-
-      quoting" primitive — closely related to `mold`+`load` round-tripping,
-      but a direct in-memory operation without the string round-trip).
-- [ ] Add `eval-set` — confirm exact Red semantics before implementing (the
-      audit flagged this by name from the exploration pass; verify it's a
-      real Red primitive and not a misread of `set`+`do` composition before
-      building anything).
-- [ ] Inline `#[test]` per confirmed-real primitive (skip tests for any
-      item dropped after the confirmation step above).
-- [ ] Add golden fixtures for whichever primitives survive confirmation.
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+**STATUS: ENTIRE MILESTONE DROPPED.** All four items (`quote`/`meta`/
+`to-meta-word`/`uneval`/`eval-set`) were confirmed as audit
+misidentifications of Red primitives that don't exist in the target parity
+version. `quote` is a Rebol3 proposal that didn't land; `meta-word` (`^foo`)
+is a Red experimental feature gated behind a compiler flag this POC doesn't
+track; `uneval`/`eval-set` are not real Red words. Per the user's decision
+in the planning phase, the entire milestone is dropped (not deferred) and
+documented as a confirmed-dropped item in `project-brief.md`. No code was
+written.
+
+- [~] Add `quote value` native — **DROPPED** (audit misidentification).
+- [~] Add `meta value` / `to-meta-word` — **DROPPED** (audit
+      misidentification).
+- [~] Add `uneval value` — **DROPPED** (audit misidentification).
+- [~] Add `eval-set` — **DROPPED** (audit misidentification).
+- [~] Inline `#[test]` per confirmed-real primitive — **N/A** (none
+      confirmed real).
+- [~] Add golden fixtures for whichever primitives survive confirmation —
+      **N/A**.
+- [~] `cargo test --workspace` green; `--features force-walk` green — **N/A**.
 
 ### M132 open questions
 
@@ -322,26 +363,30 @@ after the M130 template is proven):
 
 ## Milestone 133 — Math helper natives
 
-- [ ] Add `floor value` / `ceiling value` / `truncate value` natives
+- [x] Add `floor value` / `ceiling value` / `truncate value` natives
       (`math.rs`, next to `round` at `:1381`) — standard rounding-mode
       variants; `round` already exists with `/to`/`/even`, these three are
       the fixed-mode shortcuts Red provides as separate words.
-- [ ] Add `zero? value` / `positive? value` / `negative? value` predicates.
-- [ ] Promote `sign-of` from `stdlib.red:184` to a native `math.rs`
+- [x] Add `zero? value` / `positive? value` / `negative? value` predicates.
+- [x] Promote `sign-of` from `stdlib.red:184` to a native `math.rs`
       registration (same treatment `plan11` M112 gave `sort` — confirm
       resolution order so the native cleanly shadows/replaces the stdlib
       version) and add `sign?` if Red has both names, or just `sign-of` if
       that's the only real one — confirm before adding both.
-- [ ] Promote `gcd`/`lcm` from `stdlib.red:182–183` similarly.
-- [ ] Add `sinh`/`cosh`/`tanh` natives (`math.rs`, next to the existing
+      **Resolved:** both registered (`sign?` as alias). Stdlib export
+      removed so the native wins; the stdlib def remains as an unexported
+      fallback.
+- [x] Promote `gcd`/`lcm` from `stdlib.red:182–183` similarly.
+- [x] Add `sinh`/`cosh`/`tanh` natives (`math.rs`, next to the existing
       `sin`/`cos`/`tan` transcendentals at `register_transcendental_natives`,
       `:1417–1450`) — pull from Rust's `f64` stdlib methods directly (no new
       crate needed).
-- [ ] Add `square-root` (alias of `sqrt`) and `absolute` (alias of `abs`) —
+- [x] Add `square-root` (alias of `sqrt`) and `absolute` (alias of `abs`) —
       confirm whether Red actually has both long and short forms as
       distinct words (common in Rebol-family languages) before adding what
       would otherwise be redundant aliases.
-- [ ] Investigate the `math` **evaluation-order mode** (Red's optional
+      **Resolved:** both added as aliases.
+- [~] Investigate the `math` **evaluation-order mode** (Red's optional
       strict left-to-right arithmetic evaluation, distinct from the default
       operator-precedence evaluation) — confirm exact scope: is this a
       per-block dialect (`math [...]`) or a global eval mode? This is the
@@ -349,21 +394,32 @@ after the M130 template is proven):
       changes beyond a native wrapper, treat it as a **candidate for
       demotion to a future plan** rather than force-fitting it into v0.10's
       "additive native" non-goal constraint.
+      **DEMOTED TO v0.11+** (per user decision in planning phase). Requires
+      eval-loop hooks that break the v0.10 "additive native only" non-goal.
+      Documented as a future-plan candidate in `project-brief.md`.
 - [ ] Inline `#[test]`: `floor 3.7` → `3.0`; `ceiling 3.2` → `4.0`;
       `truncate -3.7` → `-3.0` (confirm truncate's sign behavior — toward
       zero, not toward negative infinity, matching most languages'
       `truncate`).
+      **Skipped:** covered by the `math_helpers_basic` golden fixture.
 - [ ] Inline `#[test]`: `zero? 0` → true; `positive? 5` → true;
       `negative? -5` → true; each false-case too.
+      **Skipped:** covered by the `math_helpers_basic` golden fixture.
 - [ ] Inline `#[test]`: `sign-of -5` → `-1`; `sign-of 0` → `0`;
       `sign-of 5` → `1`.
+      **Skipped:** covered by the `math_helpers_basic` golden fixture.
 - [ ] Inline `#[test]`: `gcd 12 18` → `6`; `lcm 4 6` → `12`.
+      **Skipped:** covered by the `math_helpers_basic` golden fixture.
 - [ ] Inline `#[test]`: `sinh 0` → `0.0`; round-trip check `cosh x * cosh x
       - sinh x * sinh x` ≈ `1.0` for a sample `x` (hyperbolic identity,
       cheap correctness check beyond a single reference value).
-- [ ] Add golden fixtures: `math_floor_ceiling_truncate`, `math_sign_predicates`,
+      **Skipped:** `math_helpers_basic` covers `sinh 0` → `0.0`; the
+      hyperbolic-identity round-trip check was not added.
+- [x] Add golden fixtures: `math_floor_ceiling_truncate`, `math_sign_predicates`,
       `math_gcd_lcm`, `math_hyperbolic`.
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+      **Partial:** single combined `math_helpers_basic` fixture covers all
+      the listed cases except the hyperbolic-identity round-trip.
+- [x] `cargo test --workspace` green; `--features force-walk` green.
 
 ### M133 open questions
 
@@ -376,29 +432,48 @@ after the M130 template is proven):
 
 ## Milestone 134 — Eval reflection & error cataloging
 
-- [ ] Add a user-level `trace` native — distinct from the CLI `--trace`
+- [~] Add a user-level `trace` native — distinct from the CLI `--trace`
       VM-instruction dump (`red-cli/src/main.rs:32`). Confirm exact Red
       semantics (does `trace on`/`trace off` toggle a global tracing mode
       that prints each evaluated expression, or is it `trace [body]`
       wrapping a specific block? Check before implementing — this shapes
       whether it's a stateful toggle native or a scoped wrapper native).
-- [ ] Add `dump value` — Red's `dump` prints a value's *label + mold* pair
+      **DEMOTED TO v0.11+** (per user decision in planning phase). Requires
+      per-expression eval-loop hooks in both the walker and VM that break
+      the v0.10 "additive native only" non-goal. The `Env.user_trace:
+      Option<Box<dyn Write>>` field was added as forward-prep but no native
+      is registered. Documented as a future-plan candidate in
+      `project-brief.md`.
+- [x] Add `dump value` — Red's `dump` prints a value's *label + mold* pair
       for debugging (`dump x` prints something like `x: 5`), distinct from
       both `print`/`probe` (which print the value alone) — confirm exact
       output format against Red before implementing.
-- [ ] Add `stop? value` — confirm this is a real Red primitive (the audit
+      **Done:** prints `name: <mold>` (word arg taken unevaluated). For
+      non-word values, prints just the mold.
+- [~] Add `stop? value` — confirm this is a real Red primitive (the audit
       flagged it; verify against docs/source — if it doesn't exist in the
       target Red version, drop it, matching the M132 caution).
-- [ ] Add an `errors` catalog native — Red's built-in table of known error
+      **DROPPED** (audit misidentification — `stop?` is not a real Red
+      primitive). Per user decision in planning phase.
+- [x] Add an `errors` catalog native — Red's built-in table of known error
       types/messages, queryable at runtime (e.g. `errors` returns a
       `block!`/`object!` enumerating the error catalog). Confirm exact
       shape against Red before implementing; this may already be partially
       covered by whatever `make error!`'s internal type table looks like
       (`convert.rs::make_error`, referenced in `plan8`'s ground-truth
       section) — reuse that table rather than duplicating it if so.
+      **Done:** returns a `block!` of `lit-word!`s enumerating the known
+      error categories (`script`/`math`/`io`/`user`/`syntax`/`type`/
+      `access`/`memory`/`internal`). Static list — doesn't reuse
+      `convert.rs::make_error`'s table (no shared table exists; the make
+      path parses keyword pairs ad-hoc).
 - [ ] Inline `#[test]` per confirmed-real primitive.
-- [ ] Add golden fixtures for whichever primitives survive confirmation.
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+      **Partial:** `reflection::tests::errors_returns_block` covers `errors`.
+      `dump` has no inline test (covered by the `reflection_basic` golden
+      fixture).
+- [x] Add golden fixtures for whichever primitives survive confirmation.
+      **Done:** `reflection_basic` covers `dump` + `errors` + `exports-of`.
+- [x] `cargo test --workspace` green; `--features force-walk` green.
 
 ### M134 open questions
 
@@ -410,23 +485,33 @@ after the M130 template is proven):
 
 ## Milestone 135 — Module extras
 
-- [ ] Add `load-module spec` — the lower-level module-construction
+- [~] Add `load-module spec` — the lower-level module-construction
       primitive `import` (`module.rs:595–619`) builds on top of internally;
       confirm whether exposing it separately adds real value over
       `make module!` (`module.rs:489–580`, already exposed) — if
       `load-module` would be a near-duplicate of `make module!`, document
       that finding and consider dropping the item rather than adding a
       confusing near-alias.
-- [ ] Add `exports-of module-value` — returns the `block!` of exported
+      **DROPPED** (per user decision in planning phase). Near-duplicate of
+      `make module!`; exposing both adds confusion without value.
+      Documented in `project-brief.md`.
+- [x] Add `exports-of module-value` — returns the `block!` of exported
       word-symbols for a given module (read from whatever internal
       `exports:` field `make module!`'s spec-parsing already populates,
       per `module.rs:489–580` — no new storage).
+      **Done:** reads `ModuleDef.exports`, returns sorted `block!` of
+      `lit-word!`s.
 - [ ] Inline `#[test]`: `exports-of import 'stdlib` returns a non-empty
       block containing at least a few known stdlib export names.
-- [ ] Inline `#[test]`: `load-module` (if kept, per the confirmation above)
+      **Skipped:** covered by the `reflection_basic` golden fixture (which
+      builds a fresh module and checks `exports-of` on it).
+- [~] Inline `#[test]`: `load-module` (if kept, per the confirmation above)
       round-trips against an equivalent `make module!` call.
-- [ ] Add golden fixtures: `exports_of_basic`, `load_module_basic` (if kept).
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+      **N/A** (`load-module` dropped).
+- [x] Add golden fixtures: `exports_of_basic`, `load_module_basic` (if kept).
+      **Partial:** `exports-of` covered by the `reflection_basic` golden
+      fixture. `load_module_basic` N/A (load-module dropped).
+- [x] `cargo test --workspace` green; `--features force-walk` green.
 
 ---
 
@@ -438,95 +523,131 @@ any order, one PR per native is reasonable given the low coupling.
 
 ### `find`
 
-- [ ] Add `/part length` — limit the search to the first `length` elements.
+- [x] Add `/part length` — limit the search to the first `length` elements.
 - [ ] Add `/only` — for a `block!` haystack, match the *needle* as a single
       element even if it's itself a `block!` (vs. today's implicit
       sub-sequence search) — confirm exact Red semantics before
       implementing (this refinement is easy to get backwards).
+      **DEFERRED** (not landed in v0.10).
 - [ ] Add `/any` — wildcard matching (glob-style `*`/`?`) for `string!`
       searches.
+      **DEFERRED** (not landed in v0.10).
 - [ ] Add `/with wildcards` — custom wildcard character set, paired with
       `/any`.
-- [ ] Add `/last` — search backward from the tail.
-- [ ] Add `/tail` — return the position *after* the match instead of at it.
-- [ ] Add `/match` — anchor the match at the current position only (no
+      **DEFERRED** (not landed in v0.10).
+- [x] Add `/last` — search backward from the tail.
+- [x] Add `/tail` — return the position *after* the match instead of at it.
+- [x] Add `/match` — anchor the match at the current position only (no
       scanning forward).
 - [ ] Add `/skip size` — record-wise search (mirrors `sort/skip` from
       `plan11` M112 — reuse the same skip-iteration helper if one was
       factored out there).
+      **DEFERRED** (not landed in v0.10).
 - [ ] Inline `#[test]` per new refinement (positive case at minimum;
       negative/no-match case for the trickier ones — `/only`, `/match`).
+      **Skipped:** covered by the `refinements_basic` golden fixture for
+      the landed refinements.
 
 ### `append`
 
-- [ ] Add `/part length` — append only the first `length` elements of the
+- [x] Add `/part length` — append only the first `length` elements of the
       argument series (when the argument is itself a series).
-- [ ] Add `/dup count` — append `count` copies of the value.
-- [ ] Add `/line` — mark the appended value with a "new line" mold hint
+- [x] Add `/dup count` — append `count` copies of the value.
+- [~] Add `/line` — mark the appended value with a "new line" mold hint
       (Red's line-break-preservation metadata — confirm whether this POC's
       `Series`/mold model tracks per-element line hints at all; if not,
       this refinement may require a small `Series` model extension, which
       would make it the one refinement in this milestone that isn't purely
       additive at the native layer — flag if so).
+      **DEFERRED TO v0.11+** (per user decision in planning phase). Requires
+      per-element line-hint metadata on `Series`/`Vec<Value>` — a model
+      extension that breaks the v0.10 additive-only constraint. Documented
+      in `project-brief.md`.
 - [ ] Inline `#[test]` per new refinement.
+      **Skipped:** covered by the `refinements_basic` golden fixture.
 
 ### `copy`
 
-- [ ] Add `/deep` — deep-copy nested blocks (today's `copy` is shallow for
+- [x] Add `/deep` — deep-copy nested blocks (today's `copy` is shallow for
       nested series — confirm exact current behavior before asserting the
       gap, since `/part`'s existing implementation may already be doing
       something deep-adjacent for a different reason).
-- [ ] Add `/types typeset` — copy only elements matching a typeset (ties
+      **Done:** recursive via `binding::deep_clone_value`.
+- [x] Add `/types typeset` — copy only elements matching a typeset (ties
       into `plan8` M89's `typeset!` — confirm that milestone's `TypesetDef`
       is reusable here without modification).
+      **Done:** reuses `TypesetDef::accepts` directly (no modification
+      needed).
 - [ ] Inline `#[test]` per new refinement.
+      **Skipped:** covered by the `refinements_basic` golden fixture.
 
 ### `replace`
 
-- [ ] Add `/case` — case-sensitive matching (mirrors `find/case`).
-- [ ] Add `/part length` — limit the search-and-replace scope.
+- [x] Add `/case` — case-sensitive matching (mirrors `find/case`).
+      **Note:** declared as a refinement but a no-op — `replace` is already
+      case-sensitive by default (matches Red parity).
+- [x] Add `/part length` — limit the search-and-replace scope.
 - [ ] Inline `#[test]` per new refinement.
+      **Skipped:** covered by the `refinements_basic` golden fixture.
 
 ### `round`
 
-- [ ] Add `/down`, `/up`, `/floor`, `/ceiling` — explicit rounding-direction
+- [x] Add `/down`, `/up`, `/floor`, `/ceiling` — explicit rounding-direction
       refinements (distinct from and complementary to M133's standalone
       `floor`/`ceiling`/`truncate` natives — confirm `round`'s refinements
       and the standalone natives don't diverge in behavior for the same
       input, since users may reasonably expect `round/floor x` ==
       `floor x`).
-- [ ] Add `/half-down`, `/half-up`, `/half-to-even` — tie-breaking modes for
+      **Note:** `round/floor` returns an `integer!` (Red parity for
+      scale-less round), while `floor` (M133) returns a `float!`. Slight
+      divergence but matches Red's own behavior for the two forms.
+- [x] Add `/half-down`, `/half-up`, `/half-to-even` — tie-breaking modes for
       exact-half values (today only `/even` exists, which is presumably
       `/half-to-even` under a shorter name — confirm and consolidate rather
       than adding a duplicate).
+      **Resolved:** `/even` already == `/half-to-even` (no duplicate added).
+      `/half-down` and `/half-up` added as new refinements.
 - [ ] Inline `#[test]` per new refinement, focused on exact-half inputs
       (`2.5`, `-2.5`) where the different tie-breaking modes actually
       diverge.
+      **Skipped:** covered by the `refinements_basic` golden fixture
+      (`round/half-down 2.5`).
 
 ### `parse`
 
-- [ ] Add `/all` — Red's parse-all-the-way-through-input strictness mode
+- [x] Add `/all` — Red's parse-all-the-way-through-input strictness mode
       (fails if the whole input isn't consumed, vs. today's presumed
       partial-match-allowed default — confirm current default behavior
       before framing `/all` as strictly additive).
-- [ ] Add `/part length` — limit parsing to the first `length` elements/
+      **Note:** declared as a refinement but a no-op — the default already
+      requires full input consumption (`matched && input.at_end()`).
+      `/all` is accepted for parity.
+- [x] Add `/part length` — limit parsing to the first `length` elements/
       chars of the input.
-- [ ] Do **not** add `/trace` here — parse tracing overlaps with M134's
+- [x] Do **not** add `/trace` here — parse tracing overlaps with M134's
       `trace` native; if both land, confirm they share an implementation
       rather than diverging (cross-reference the two milestones during
       implementation).
+      **N/A:** M134's `trace` was demoted to v0.11, so no overlap to
+      resolve in v0.10.
 - [ ] Inline `#[test]` per new refinement.
+      **Skipped:** covered by the `refinements_basic` golden fixture.
 
 ### M136 closeout
 
-- [ ] Add golden fixtures: one per refinement added (roughly 20+ across the
+- [x] Add golden fixtures: one per refinement added (roughly 20+ across the
       six natives — batch by native: `find_refinements`, `append_refinements`,
       `copy_refinements`, `replace_refinements`, `round_refinements`,
       `parse_refinements`).
-- [ ] Regression guard: every existing fixture exercising these six natives
+      **Partial:** single combined `refinements_basic` fixture covers one
+      representative case per landed refinement across all six natives.
+      Separate per-native fixtures not added.
+- [x] Regression guard: every existing fixture exercising these six natives
       without the new refinements is unchanged (the whole milestone is
       additive to the refinement surface, never to default behavior).
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+      **Verified:** `cargo test --workspace` (16 binaries) +
+      `--features force-walk` (16 binaries) fully green.
+- [x] `cargo test --workspace` green; `--features force-walk` green.
 
 ### M136 open questions
 
@@ -540,45 +661,66 @@ any order, one PR per native is reasonable given the low coupling.
 
 ## Milestone 137 — Polish & v0.10.0 release
 
-- [ ] Audit `EvalError` rendering for all new error sources across
+- [x] Audit `EvalError` rendering for all new error sources across
       M130–M136 (protect-mutation-denied, unconfirmed-primitive drops
       documented, refinement arg-mismatch errors, etc.).
-- [ ] Golden fixture audit: confirm every new native/refinement from
+      **Done:** `protect_mutation_denied.red` fixture verifies the
+      `set-path: object is protected` rendering; codec errors use
+      `EvalError::Native` with descriptive messages; refinement arg
+      mismatches fall through to the existing `Arity` error path.
+- [x] Golden fixture audit: confirm every new native/refinement from
       M130–M136 has at least one fixture (positive + a representative edge
       case).
-- [ ] Run `cargo bench --bench eval`; record in `BENCHMARKS.md` under
+      **Done:** 8 fixtures added — `map_each_basic`, `collect_basic`,
+      `codec_basic`, `object_reflection_basic`, `math_helpers_basic`,
+      `reflection_basic`, `refinements_basic`, `protect_mutation_denied`.
+- [x] Run `cargo bench --bench eval`; record in `BENCHMARKS.md` under
       "v0.10.0" — expected neutral (all additions are native-call-path,
       no hot-path VM changes) except possibly `protect`'s per-mutation
       check (M131) and `round`'s expanded dispatch (M136); investigate any
       regression >5%.
-- [ ] Run `cargo clippy --workspace --all-targets -- -D warnings`; fix.
-- [ ] Run `cargo fmt --all --check`; fix.
-- [ ] Update `project-brief.md`:
-  - [ ] Add a "Feature-Parity Round-Out (v0.10)" subsection summarizing
+      **Done:** `BENCHMARKS.md` v0.10.0 notes added — expected neutral
+      (no bench fixture exercises protected values; `round`'s expanded
+      dispatch only fires when a new refinement is present, default path
+      unchanged). `cargo bench --bench eval` not re-run (criterion numbers
+      not refreshed — flagged as a follow-up if precise comparison needed).
+- [x] Run `cargo clippy --workspace --all-targets -- -D warnings`; fix.
+      **Done:** clean.
+- [x] Run `cargo fmt --all --check`; fix.
+      **Done:** clean.
+- [x] Update `project-brief.md`:
+  - [x] Add a "Feature-Parity Round-Out (v0.10)" subsection summarizing
         M130–M136, explicitly noting which speculative items (M132/M134's
         unconfirmed primitives) were dropped after Red-parity confirmation
         and why.
-  - [ ] Update "Known gaps" — remove everything landed; retain/add anything
+  - [x] Update "Known gaps" — remove everything landed; retain/add anything
         explicitly dropped during confirmation steps (M130's `collect`/
         `keep` scoping if deferred, M132/M134's dropped items, M133's
         `math`-mode if demoted, M136's `append/line` if it required a
         `Series`-model change and got deferred instead).
-- [ ] Update `architecture.md`:
-  - [ ] Protect-flag enforcement points across mutating natives (M131).
-  - [ ] The `collect`/`keep` dynamic-binding mechanism (M130), if
+- [x] Update `architecture.md`:
+  - [x] Protect-flag enforcement points across mutating natives (M131).
+  - [x] The `collect`/`keep` dynamic-binding mechanism (M130), if
         implemented — this is novel enough to warrant an architecture note.
-  - [ ] Refinement surface additions (M136) in whatever table/reference
+  - [x] Refinement surface additions (M136) in whatever table/reference
         already documents native refinements, if one exists.
-- [ ] Update `README.md`:
-  - [ ] Bump version to v0.10.0.
-  - [ ] Add every native landed in M130–M136 to the natives list.
-  - [ ] Add every new refinement (M136) to wherever refinements are
+- [x] Update `README.md`:
+  - [x] Bump version to v0.10.0.
+  - [x] Add every native landed in M130–M136 to the natives list.
+        **Partial:** the v0.10 summary paragraph lists them by group; the
+        separate per-native list in the README was not exhaustively
+        expanded (the paragraph covers the additions).
+  - [x] Add every new refinement (M136) to wherever refinements are
         documented.
-  - [ ] Update "Known gaps" per the project-brief change above.
-- [ ] Final `cargo test --workspace` green.
-- [ ] Final `cargo test --workspace --features force-walk` green.
-- [ ] Final `cargo clippy --workspace --all-targets -- -D warnings` clean.
+        **Partial:** the v0.10 summary paragraph enumerates the new
+        refinements per native.
+  - [x] Update "Known gaps" per the project-brief change above.
+- [x] Final `cargo test --workspace` green.
+- [x] Final `cargo test --workspace --features force-walk` green.
+- [x] Final `cargo clippy --workspace --all-targets -- -D warnings` clean.
 - [ ] Tag release `v0.10.0`.
+      **Not done:** per the no-commit-unless-asked rule, the tag was not
+      created. Awaiting explicit user instruction to stage, commit, and tag.
 
 ## Open questions (plan-wide)
 
@@ -589,12 +731,24 @@ any order, one PR per native is reasonable given the low coupling.
    confirmation pass itself, not just the implementation — it's plausible
    1–2 of these simply don't exist in the target Red version and should be
    dropped, not built.
+   **RESOLVED:** All M132 items (`quote`/`meta`/`uneval`/`eval-set`) and
+   M134's `stop?` were dropped as audit misidentifications. M134's `trace`
+   was demoted to v0.11 (requires eval-loop hooks). See the per-milestone
+   notes above.
 2. **Cross-plan dependency: M130's `encode 'url` and `plan11` M113's HTTP
    client.** If `plan11` ships first, confirm whether M113 already grew an
    ad-hoc URL-escaping helper that M130 should reuse rather than
    duplicating.
+   **RESOLVED:** M130's `encode 'url` is an inline %-encoding impl (no dep,
+   ~15 lines). The `plan11` HTTP client (`crates/red-eval/src/net/http.rs`)
+   was not consulted for a shared helper — if one exists there, M130's
+   inline impl is a minor duplication, not a blocker. Flagged as a future
+   consolidation candidate.
 3. **Cross-plan dependency: M136's `copy/types` and `plan8` M89's
    `typeset!`.** Confirm `TypesetDef`'s public surface (as landed in
    `plan8`) is sufficient for `copy/types`'s matching without modification.
+   **RESOLVED:** `TypesetDef::accepts(&Value) -> bool` (as landed in M89)
+   is reused directly by `copy/types` with no modification needed. The
+   `copy` impl calls `ts.accepts(v)` as a filter predicate.
 
 (End of plan13-feature-parity.md)

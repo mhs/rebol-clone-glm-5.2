@@ -1380,7 +1380,22 @@ fn collect_args(
     let arity = fd.params.len();
     let uneval_first = matches!(
         sym.as_str(),
-        "repeat" | "foreach" | "forall" | "for" | "forskip" | "make" | "to" | "default" | "module"
+        "repeat"
+            | "foreach"
+            | "forall"
+            | "for"
+            | "forskip"
+            | "map-each"
+            | "remove-each"
+            | "make"
+            | "to"
+            | "default"
+            | "module"
+            | "bound?"
+            | "bind?"
+            | "context-of"
+            | "bind-of"
+            | "dump"
     );
 
     // M61: `module` variable-arity peek — 2 args if the next value is a

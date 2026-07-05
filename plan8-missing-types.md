@@ -831,135 +831,240 @@ wires the type-check into the call path.
   type-checks args at call time): **in scope** (the headline feature).
 - The `typeset!` *algebra* (`union`/`intersect`/`complement` of typesets): **deferred to v0.8**.
 
-- [ ] Add `struct TypesetDef { types: RefCell<HashSet<Symbol>> }` in `value.rs`
+- [x] Add `struct TypesetDef { types: RefCell<HashSet<Symbol>> }` in `value.rs`
       (a set of type-word symbols like `'integer!`/`'float!`/`'string!`).
-- [ ] Add `Value::Typeset(Rc<TypesetDef>)` variant (synthetic, no span).
-- [ ] Add `Value::typeset(words: &[Symbol])` constructor.
-- [ ] Add `TypesetDef::matches(&Value) -> bool` — checks `type_name(v)` is
+- [x] Add `Value::Typeset(Rc<TypesetDef>)` variant (synthetic, no span).
+- [x] Add `Value::typeset(words: &[Symbol])` constructor.
+- [x] Add `TypesetDef::matches(&Value) -> bool` — checks `type_name(v)` is
       in the set (handles `any-word?`/`any-path?`/`number!` etc. by checking
       the appropriate group words).
-- [ ] Extend `printer.rs`:
-  - [ ] `mold`: `make typeset! [integer! float!]` (reparseable).
-  - [ ] `form`: same as mold.
-- [ ] Extend `interp_walker.rs`/`vm/compiler.rs` self-evaluating arms.
-- [ ] Add `typeset?` predicate.
-- [ ] Add `make typeset! <block-of-type-words>` constructor.
-- [ ] Add `to-typeset` converter.
-- [ ] Extend `FuncDef` (`value.rs`):
-  - [ ] Add `pub param_types: Vec<Option<Rc<TypesetDef>>>` parallel to
+      *(Actual method name: `TypesetDef::accepts(&Value) -> bool`. Group
+      words resolved via the `group_members(group: &str)` table in `value.rs`
+      — returns the sub-type list for `any-word!`/`any-path!`/`any-string!`/
+      `any-block!`/`any-object!`/`any-function!`/`number!`/`series!`/
+      `any-type!`.)*
+- [x] Extend `printer.rs`:
+  - [x] `mold`: `make typeset! [integer! float!]` (reparseable).
+  - [x] `form`: same as mold.
+- [x] Extend `interp_walker.rs`/`vm/compiler.rs` self-evaluating arms.
+- [x] Add `typeset?` predicate.
+- [x] Add `make typeset! <block-of-type-words>` constructor.
+- [x] Add `to-typeset` converter.
+- [x] Extend `FuncDef` (`value.rs`):
+  - [x] Add `pub param_types: Vec<Option<Rc<TypesetDef>>>` parallel to
         `params`. `None` = unchecked (back-compat with all existing funcs).
-  - [ ] Default to `vec![None; params.len()]` in existing constructors.
-- [ ] Extend `func`/`function`/`closure` natives (`natives/func.rs`):
-  - [ ] When a param spec entry is a block (`[integer! float!]`), build a
+  - [x] Default to `vec![None; params.len()]` in existing constructors.
+        *(All existing `FuncDef { ... }` literals use `..Default::default()`
+        — `Vec` defaults to empty, so no per-site edits needed except the
+        three explicit-field sites in `vm/vm.rs` + `vm/compiler.rs` which
+        were updated.)*
+- [x] Extend `func`/`function`/`closure` natives (`natives/func.rs`):
+  - [x] When a param spec entry is a block (`[integer! float!]`), build a
         `TypesetDef` and store it in `param_types[i]`.
-  - [ ] When the entry is a bare word, `param_types[i] = None` (back-compat).
-- [ ] Wire the type-check into the call path:
-  - [ ] **Walker** (`interp_walker.rs` call shim): before binding args, if
+        *(Implemented in `extract_spec`: a `Block` immediately following a
+        positional param word in the `Params` section is parsed via
+        `crate::typeset::parse_typeset_block`.)*
+  - [x] When the entry is a bare word, `param_types[i] = None` (back-compat).
+- [x] Wire the type-check into the call path:
+  - [x] **Walker** (`interp_walker.rs` call shim): before binding args, if
         `param_types[i].is_some()`, check `typeset.matches(&args[i])`; on
         failure, raise `EvalError::TypeError` with the expected typeset
         (mold the typeset for the message).
-  - [ ] **VM** (`vm/vm.rs` `CallUser`/`prepare_call`): same check at frame
-        push.
-- [ ] Update `type_name` → `"typeset!"`.
-- [ ] Update `same?` (`Rc::ptr_eq`); `equal?` (deep on the type-word sets).
-- [ ] Inline `#[test]`: `make typeset! [integer! float!]` molds back.
-- [ ] Inline `#[test]`: `typeset? make typeset! []` → true.
-- [ ] Inline `#[test]`: a func with `[x [integer!]]` rejects a string arg.
-- [ ] Inline `#[test]`: a func with `[x [integer! float!]]` accepts both.
-- [ ] Inline `#[test]`: existing funcs (no type spec) still accept any
-        type (back-compat regression guard).
-- [ ] Add golden fixtures: `typeset_construct`, `func_typed_args`,
-        `func_typed_args_error`.
-- [ ] Add `programs_errors/func_bad_arg_type.red`.
-- [ ] Update `property.rs` for `Typeset` round-trip.
-- [ ] `cargo test --workspace` green; `--features force-walk` green.
+        *(Implemented as `check_param_types(fd, &args)` shared helper,
+        called from `call_user_func` and `call_closure_func`. Type errors
+        surface as `EvalError::Native` with a `"type error: arg N expected
+        [ts], got <found>"` message — the `EvalError::TypeError.expected:
+        &'static str` field is too narrow for a dynamic typeset label, so
+        `Native` with a formatted message is used, matching the v0.7
+        pattern for M80/M84/M85 rich errors. Documented in M90's error-
+        rendering audit.)*
+  - [x] **VM** (`vm/vm.rs` `CallUser`/`prepare_call`): same check at frame
+        push. *(Inline in `prepare_call`'s arg-copy loop; uses the same
+        message format byte-for-byte so `--features force-walk` parity holds.)*
+- [x] Update `type_name` → `"typeset!"`.
+- [x] Update `same?` (`Rc::ptr_eq`); `equal?` (deep on the type-word sets).
+- [x] Inline `#[test]`: `make typeset! [integer! float!]` molds back.
+- [x] Inline `#[test]`: `typeset? make typeset! []` → true.
+- [x] Inline `#[test]`: a func with `[x [integer!]]` rejects a string arg.
+- [x] Inline `#[test]`: a func with `[x [integer! float!]]` accepts both.
+- [x] Inline `#[test]`: existing funcs (no type spec) still accept any
+      type (back-compat regression guard).
+- [x] Add golden fixtures: `typeset_construct`, `func_typed_args`,
+      `func_typed_args_error`. *(Plus `programs_errors/func_bad_arg_type.red`.
+      `func_typed_args_error` is covered by `func_bad_arg_type` instead.)*
+- [x] Add `programs_errors/func_bad_arg_type.red`.
+- [x] Update `property.rs` for `Typeset` round-trip.
+      *(Stable-string `typeset_mold_is_stable` proptest — mirrors
+      `vector_mold_is_stable`/`image_mold_is_stable`. `Typeset` is
+      synthetic so it's excluded from `gen_value`'s round-trip pool.)*
+- [x] `cargo test --workspace` green; `--features force-walk` green.
 
 ### M89 open questions
 
 1. **Type-check cost.** A `HashSet` lookup per arg per call — negligible for
    non-typed funcs (the `None` fast path skips the lookup). Confirm with a
-   bench in M90.
+   bench in M90. *(The `param_types.is_empty()` early-out means pre-M89
+   funcs pay only one `Vec::is_empty` check per call. The `accepts` path
+   does a `HashSet::iter` + string-compare per group word — acceptable for
+   the POC; v0.8 may bit-pack the type set for O(1) lookup.)*
 2. **`any-*` family in typesets.** `make typeset! [any-word!]` — does the
-   typeset match all word kinds? Decision: yes — `TypesetDef::matches`
+   typeset match all word kinds? Decision: yes — `TypesetDef::accepts`
    recognizes the `any-word!`/`any-path!`/`any-object!`/`any-function!`/
    `number!`/`series!` group words by checking the appropriate sub-types.
    Add a `GROUP_TYPES` const table mapping group word → predicate fn.
+   *(Implemented as `group_members(group: &str) -> Option<&'static [&'static str]>`
+   in `value.rs`, returning the sub-type list for 9 group words:
+   `any-word!`/`any-path!`/`any-string!`/`any-block!`/`any-object!`/
+   `any-function!`/`number!`/`series!`/`any-type!`. `accepts` consults
+   this table for any group word in the set.)*
 3. **`type?` of a typeset.** Returns `typeset!`; `types-of` of a value
    should *not* include `typeset!` (a value is never itself a typeset).
-   Confirm.
+   Confirm. *(Confirmed — `types-of` returns `[typeset!]` with no umbrella
+   word for a `Typeset` value; no edit was needed since the existing
+   `types-of` umbrella conditions don't match `Value::Typeset`.)*
 
 ---
 
 ## Milestone 90 — Polish & v0.7.0 release
 
-- [ ] Audit `EvalError` rendering for all new error sources:
-  - [ ] `InvalidPercent` / `InvalidMoney` / `InvalidIssue` / `InvalidEmail`
-        / `UnterminatedTag` / `InvalidRegex` (M80–M82 lexer errors).
-  - [ ] `TypeError` messages for typed-func arg mismatches (M89) — render the
-        expected `typeset!` mold in the message.
-  - [ ] Money currency mismatch (M80).
-  - [ ] Vector kind mismatch / image dim mismatch (M84/M85).
-- [ ] Add spans to all source-origin new variants (`Percent`/`Money`/
+> **Scope decision (v0.7.0 release):** M82 (`regex!`) and M88 (`struct!`/
+> `handle!`) were **skipped** in this release — they remain deferred to
+> v0.8 (alongside the `routine!` FFI binding layer). The M90 polish layer
+> covers only the landed types (M80/M81/M83/M84/M85/M86/M87/M89). Items
+> below that reference M82/M88 are marked `[ ]` (skipped) with a note;
+> everything else is `[x]`.
+
+- [x] Audit `EvalError` rendering for all new error sources:
+  - [x] `InvalidPercent` / `InvalidMoney` / `InvalidIssue` / `InvalidEmail`
+        / `UnterminatedTag` (M80/M81 lexer errors — `render_error` in
+        `red-core/src/error.rs` produces `*** Error: [file:line:col: ]<msg>`
+        via the existing `LexError::span()`/`Display` arms; verified).
+  - [ ] `InvalidRegex` (M82 lexer error) — **skipped (M82 deferred to v0.8).**
+  - [x] `TypeError` messages for typed-func arg mismatches (M89) — render the
+        expected `typeset!` mold in the message (via `typeset_label(ts)` in
+        `red-eval/src/typeset.rs`; produces `"type error: arg N expected
+        [w1 | w2 | ...], got <found>"`).
+  - [x] Money currency mismatch (M80) — `"money error: currency mismatch
+        (CCA vs CCB)"` (`math.rs`/`compare.rs`).
+  - [x] Vector kind mismatch / image dim mismatch (M84/M85) — `"image:
+        byte buffer length N does not match width × height × 4 (W × H × 4
+        = ...)"` (`image.rs`); vector kind mismatch via `infer_vector_kind`
+        error path (`vector.rs`).
+- [x] Add spans to all source-origin new variants (`Percent`/`Money`/
       `Issue`/`Email`/`Tag` already struct-with-span; confirm synthetic
-      variants use `Span::default()`).
-- [ ] Golden fixture per new error case (one per error kind added in
-      M80–M89).
-- [ ] Property test: extend `mold(parse(mold(v)))` to cover `Percent`/
-      `Money`/`Issue`/`Email`/`Tag`/`Hash`/`Vector`/`Image`/`Struct`/
-      `Typeset` (the reparseable ones). `Regex`/`Handle`/`Unset`/`Closure`/
-      `Module` get stable-string assertions instead.
-- [ ] Extend `red-core/tests/golden/` to cover all new literals.
-- [ ] Expand `red-eval/tests/programs/` to 30+ new fixtures (one per new
-      type × positive + error case).
-- [ ] Run `cargo bench --bench eval`; record in `BENCHMARKS.md` under
-      "v0.7.0".
-  - [ ] Expected neutral on existing benches (no new hot-path work).
-  - [ ] The M89 type-check adds a per-call `Option::is_some` check; expected
+      variants use `Span::default()`). *(Verified: `Hash`/`Vector`/`Image`/
+      `Unset`/`Typeset` are all synthetic, no span; error rendering falls
+      back to the call-site span.)*
+- [x] Golden fixture per new error case (one per error kind added in
+      M80–M89). *(Existing fixtures: `email_bad_form`/`issue_bad_form`/
+      `tag_unterminated`/`money_currency_mismatch`/`func_bad_arg_type`/
+      `hash_unhashable_key`/`image_bad_dims`/`image_poke_bad_value`/
+      `image_append_unsupported`/`vector_kind_mismatch`. Added in M90:
+      `percent_bad_form` + `money_bad_form`. The lex-error cases
+      (`InvalidPercent`/`InvalidMoney`/`InvalidIssue`/`InvalidEmail`/
+      `UnterminatedTag`) are also covered by inline `lexer.rs` unit tests
+      (`lexer.rs:2159-2368`). `regex_bad_pattern`/`struct_*` **skipped**
+      (M82/M88 deferred).)*
+- [x] Property test: extend `mold(parse(mold(v)))` to cover `Percent`/
+      `Money`/`Issue`/`Email`/`Tag`/`Hash`/`Vector`/`Image`/`Typeset`
+      (the reparseable ones — `Percent`/`Money`/`Issue`/`Email`/`Tag` are
+      in `gen_value`'s round-trip pool; `Hash`/`Vector`/`Image`/`Typeset`
+      get `*_mold_is_stable` stable-string assertions since they're
+      synthetic). `Unset`/`Closure`/`Module` get stable-string assertions
+      instead. *(`Regex`/`Handle`/`Struct` **skipped** — M82/M88 deferred.)*
+- [x] Extend `red-core/tests/golden/` to cover all new literals.
+      *(`percent.red`/`money.red`/`issue.red`/`email.red`/`tag.red` all
+      present.)*
+- [x] Expand `red-eval/tests/programs/` to 30+ new fixtures (one per new
+      type × positive + error case). *(Audit confirmed 58 files matching
+      the new-type keywords across `programs/` + `programs_errors/`.)*
+- [x] Run `cargo bench --bench eval`; record in `BENCHMARKS.md` under
+      "v0.7.0". *(Recorded — new "Current status (v0.7.0, native arm64)"
+      section at the top of `BENCHMARKS.md` with end-to-end fixture table,
+      v0.5.0→v0.7.0 deltas, and the M89 type-check cost note.)*
+  - [x] Expected neutral on existing benches (no new hot-path work).
+        *(Confirmed: no new `Instr` variants; `fib 30` ~3.21× faster than
+        walker, within noise of v0.5.0's 3×; `func_call_heavy` 0.85×
+        regression persists from v0.3.3 — Tier 3 candidate.)*
+  - [x] The M89 type-check adds a per-call `Option::is_some` check; expected
         negligible. If any bench regresses >5%, investigate the
-        `param_types` vec access in `prepare_call`.
-- [ ] Run `cargo clippy --workspace --all-targets -- -D warnings`; fix.
-- [ ] Run `cargo fmt --all --check`; fix.
-- [ ] Update `project-brief.md`:
-  - [ ] Add a "Type Completeness (v0.7)" subsection under "Value model":
-        list the ten new variants, the `regex` crate dep, the `unset!`
-        gated-fallback behavior change, the `native!`/`op!` split, the
-        `typeset!` func-spec integration.
-  - [ ] Update the value-model code block (add `Percent`/`Money`/`Issue`/
-        `Email`/`Tag`/`Regex`/`Hash`/`Vector`/`Image`/`Unset`/`Struct`/
-        `Handle`/`Typeset`).
-  - [ ] Update "Deferred" — remove the items now landed; add v0.8 candidates
+        `param_types` vec access in `prepare_call`. *(The
+        `param_types.is_empty()` fast path means pre-M89 funcs pay only
+        one `Vec::is_empty` check per call; no bench fixture uses typed
+        args, so the `accepts` path is never exercised. No regression
+        attributable to M89.)*
+- [x] Run `cargo clippy --workspace --all-targets -- -D warnings`; fix.
+      *(Clean.)*
+- [x] Run `cargo fmt --all --check`; fix. *(Clean.)*
+- [x] Update `project-brief.md`:
+  - [x] Add a "Type Completeness (v0.7)" subsection under "Value model":
+        list the nine landed variants, the `unset!` gated-fallback behavior
+        change, the `native!`/`op!` split, the `typeset!` func-spec
+        integration. *(The `regex` crate dep is NOT added — M82 skipped.)*
+  - [x] Update the value-model code block (add `Percent`/`Money`/`Issue`/
+        `Email`/`Tag`/`Unset`; `Hash`/`Vector`/`Image`/`Typeset` already
+        present. `Regex`/`Struct`/`Handle` **not added** — M82/M88 deferred.)
+  - [x] Update "Deferred" — remove the items now landed; add v0.8 candidates
         (reactivity, concurrency, port model, routine! FFI binding layer,
-        typeset algebra, shared-cell closures).
-- [ ] Update `architecture.md`:
-  - [ ] New value variants in the value-model section.
-  - [ ] `RegexDef`/`HashDef`/`VectorDef`/`ImageDef`/`StructDef`/
-        `HandleDef`/`TypesetDef` struct definitions.
-  - [ ] The `unset!` fallback gate (`Env::unset_on_unbound`).
-  - [ ] The `FuncDef.param_types` parallel vec and the call-time type-check.
-  - [ ] Path resolution rules for `email!`/`image!`.
-  - [ ] Series-model rules for `hash!`/`vector!` (which series ops apply).
-- [ ] Update `README.md`:
-  - [ ] Bump version to v0.7.0.
-  - [ ] Remove `tag!`/`ref!`¹/`image!`/`vector!`/`hash!`/`regex!` from
-        "Known gaps" (now landed).
-  - [ ] Add the ten new types to the "Value types" list.
-  - [ ] Add `percent?`/`money?`/`issue?`/`email?`/`tag?`/`regex?`/`hash?`/
-        `vector?`/`image?`/`unset?`/`struct?`/`handle?`/`typeset?`/
-        `native?`/`op?`/`any-function?` to the type predicates list.
-  - [ ] Add `to-percent`/`to-money`/`to-issue`/`to-email`/`to-tag`/
-        `to-regex`/`to-hash`/`to-vector`/`to-image`/`to-typeset` to the
-        conversions list.
-  - [ ] Add `--unset-on-unbound` to the CLI section.
-  - [ ] Update "Known gaps" with the new deferrals (reactivity, concurrency,
+        typeset algebra, shared-cell closures, `regex!`/`struct!`/`handle!`).
+- [x] Update `architecture.md`:
+  - [x] New value variants in the value-model section. *(Enum relabeled
+        "v0.7"; added `Percent`/`Money`/`Issue`/`Email`/`Tag`/`Unset`;
+        `Func` arm annotated with the M87 type-split note.)*
+  - [x] `HashDef`/`MoneyValue`/`VectorDef`/`ImageDef`/`TypesetDef` struct
+        definitions. *(Added `MoneyValue` + `HashDef` blocks to the Shared
+        types section; `VectorDef`/`ImageDef`/`TypesetDef` were already
+        documented. `RegexDef`/`StructDef`/`HandleDef` **not added** —
+        M82/M88 deferred.)*
+  - [x] The `unset!` fallback gate (`Env::unset_on_unbound`). *(Added to
+        the `Env` struct block; the `resolve_word` pseudocode + walker
+        note updated with the gated branch.)*
+  - [x] The `FuncDef.param_types` parallel vec and the call-time type-check.
+        *(Already documented at `architecture.md:80`/`:175-185`; M90 added
+        the "M89 typed-func arg type-check" + "M87 native!/op! split"
+        paragraphs to the Native dispatch section.)*
+  - [x] Path resolution rules for `email!`/`image!`. *(Added
+        Email-headed/Vector-headed/Image-headed rules to the Path
+        resolution section; Hash-headed rule added too.)*
+  - [x] Series-model rules for `hash!`/`vector!` (which series ops apply).
+        *(Added "hash! series model", "vector! series model", and
+        "image! (limited)" subsections to the Series natives section.)*
+- [x] Update `README.md`:
+  - [x] Bump version to v0.7.0. *(Lines 8/32/55; `--version` output
+        auto-picks up `env!("CARGO_PKG_VERSION")`.)*
+  - [x] Remove `tag!`/`image!`/`vector!`/`hash!` from "Known gaps" (now
+        landed). *(`ref!`/`regex!` remain as gaps — M82 skipped; `image!`
+        removed.)*
+  - [x] Add the nine landed new types to the "Value types" list
+        (`Percent`/`Money`/`Issue`/`Email`/`Tag`/`Unset`/`Hash`/`Vector`/
+        `Image`/`Typeset`). *(Regex/Struct/Handle not added — M82/M88
+        deferred.)*
+  - [x] Add `percent?`/`money?`/`issue?`/`email?`/`tag?`/`unset?`/`hash?`/
+        `vector?`/`image?`/`typeset?`/`native?`/`op?`/`any-function?` to
+        the type predicates list. *(`regex?`/`struct?`/`handle?` not
+        added — M82/M88 deferred.)*
+  - [x] Add `to-percent`/`to-money`/`to-issue`/`to-email`/`to-tag`/
+        `to-hash`/`to-vector`/`to-image`/`to-typeset` to the conversions
+        list. *(`to-regex`/`to-struct` not added — M82/M88 deferred.)*
+  - [x] Add `--unset-on-unbound` to the CLI section. *(Added to the
+        build/run examples block + the CLI flags paragraph.)*
+  - [x] Update "Known gaps" with the new deferrals (reactivity, concurrency,
         port model, `routine!` FFI binding, typeset algebra, shared-cell
-        closures).
-  - [ ] Note: `ref!` is **not** landed in v0.7 — see "ref! deferral" below.
-- [ ] Final `cargo test --workspace` green.
-- [ ] Final `cargo test --workspace --features force-walk` green.
-- [ ] Final `cargo test --workspace` with `--unset-on-unbound` (M86 new mode)
-      green.
-- [ ] Final `cargo clippy --workspace --all-targets -- -D warnings` clean.
-- [ ] Tag release `v0.7.0`.
+        closures, `regex!`/`struct!`/`handle!`). *(Renamed section to
+        "Known gaps (v0.7)".)*
+  - [x] Note: `ref!` is **not** landed in v0.7 — see "ref! deferral" below.
+        *(Documented in the new Known gaps section.)*
+- [x] Final `cargo test --workspace` green. *(VM default mode — all suites
+      pass including the 9-test `unset_on_unbound.rs` driver.)*
+- [x] Final `cargo test --workspace --features force-walk` green. *(Walker
+      parity mode — all suites pass.)*
+- [x] Final `cargo test --workspace` with `--unset-on-unbound` (M86 new mode)
+      green. *(Covered by `crates/red-eval/tests/unset_on_unbound.rs` —
+      9 tests, runtime-gated via `Env.unset_on_unbound` (no cargo feature).)*
+- [x] Final `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- [ ] Tag release `v0.7.0`. *(**Deferred to explicit user request** — not
+      tagged yet; the version bump in `Cargo.toml` + the docs sync above
+      are the release-polish layer.)*
 
 ¹ `ref!` is deliberately **not** in this plan. See "ref! deferral" below.
 

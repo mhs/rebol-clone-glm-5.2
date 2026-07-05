@@ -1391,6 +1391,8 @@ fn write_path_slot(
     env: &mut Env,
     path_span: Span,
 ) -> Result<(), EvalError> {
+    // M131: protect check for object/series set-path writes.
+    crate::object::check_protected(current, env, "set-path")?;
     match part {
         Value::Word { sym, .. } | Value::GetWord { sym, .. } | Value::LitWord { sym, .. } => {
             match current {
@@ -1945,7 +1947,22 @@ fn collect_call_args(
     let mut args: Vec<Value> = Vec::with_capacity(arity);
     let uneval_first = matches!(
         sym.as_str(),
-        "repeat" | "foreach" | "forall" | "for" | "forskip" | "make" | "to" | "default" | "module"
+        "repeat"
+            | "foreach"
+            | "forall"
+            | "for"
+            | "forskip"
+            | "map-each"
+            | "remove-each"
+            | "make"
+            | "to"
+            | "default"
+            | "module"
+            | "bound?"
+            | "bind?"
+            | "context-of"
+            | "bind-of"
+            | "dump"
     );
 
     // M61: `module` has variable arity (1 for `module [body]`, 2 for

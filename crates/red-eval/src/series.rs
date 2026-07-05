@@ -30,7 +30,7 @@ use std::rc::Rc;
 use crate::interp::{active_captures, dispatch_block, resolve_compiled_block};
 use crate::interp_walker::call_user_func;
 use crate::natives::num_cmp;
-use crate::natives::{type_name, values_equal};
+use crate::natives::{truthy, type_name, values_equal};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -545,10 +545,11 @@ fn pick(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eva
 
 /// `poke series n value` — mutate the value at 1-based index (negative from
 /// tail). Returns the written value. Errors if out of range.
-fn poke(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+fn poke(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 3 {
         return Err(arity(args, "poke", 3, args.len()));
     }
+    crate::object::check_protected(&args[0], env, "poke")?;
     if let Value::String8 { bytes, span } = &args[0] {
         let n = as_int(&args[1], "poke")?;
         let len = bytes.len() as i64;
@@ -917,12 +918,54 @@ fn find(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eval
         let (mut series, span, is_paren) = extract_series(&args[0])?;
         let needle = &args[1];
         let case_sensitive = refs.has(&Symbol::new("case"));
+        let want_last = refs.has(&Symbol::new("last"));
+        let want_tail = refs.has(&Symbol::new("tail"));
+        let want_match = refs.has(&Symbol::new("match"));
+        // `/part length` — limit the search to `length` elements from cursor.
+        let part_limit = if let Some(vals) = refs.get(&Symbol::new("part")) {
+            match vals.first() {
+                Some(Value::Integer { n, .. }) => Some(*n as isize),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let data = series.data.borrow();
-        let mut i = series.index;
-        while i < data.len() {
+        let total = data.len() as isize;
+        let start = series.index as isize;
+        let end = match part_limit {
+            Some(n) => (start + n).min(total).max(start),
+            None => total,
+        };
+        if want_match {
+            // `/match` — anchor at the current position only (no scan).
+            if start < end && find_match(needle, &data[start as usize], case_sensitive) {
+                let hit = start as usize;
+                drop(data);
+                series.index = if want_tail { hit + 1 } else { hit };
+                return Ok(mk_series(series, span, is_paren));
+            }
+            return Ok(Value::None);
+        }
+        if want_last {
+            // `/last` — search backward from the tail.
+            let mut i = end - 1;
+            while i >= start {
+                if find_match(needle, &data[i as usize], case_sensitive) {
+                    let hit = i as usize;
+                    drop(data);
+                    series.index = if want_tail { hit + 1 } else { hit };
+                    return Ok(mk_series(series, span, is_paren));
+                }
+                i -= 1;
+            }
+            return Ok(Value::None);
+        }
+        let mut i = start as usize;
+        while (i as isize) < end {
             if find_match(needle, &data[i], case_sensitive) {
                 drop(data);
-                series.index = i;
+                series.index = if want_tail { i + 1 } else { i };
                 return Ok(mk_series(series, span, is_paren));
             }
             i += 1;
@@ -962,10 +1005,11 @@ fn find_match(needle: &Value, candidate: &Value, case_sensitive: bool) -> bool {
 /// whole in both cases since splicing wasn't in scope before, and `/only`
 /// makes the single-element intent explicit and reserved for future default
 /// behavior changes).
-fn append(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+fn append(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity(args, "append", 2, args.len()));
     }
+    crate::object::check_protected(&args[0], env, "append")?;
     // M83: hash! append — append a key/value pair. The value must be a 2-element
     // block `[key value]` (with `/only`, a single value is treated as a value
     // keyed by `none` — uncommon but consistent). Returns the hash.
@@ -1027,11 +1071,37 @@ fn append(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Ev
     }
     let (series, span, is_paren) = extract_series(&args[0])?;
     let only = refs.has(&Symbol::new("only"));
-    if only {
-        series.data.borrow_mut().push(args[1].clone());
+    // `/part length` — append only the first `length` elements of a series
+    // value; for a non-series value, appends it once (part ignored).
+    let part = if let Some(vals) = refs.get(&Symbol::new("part")) {
+        match vals.first() {
+            Some(Value::Integer { n, .. }) => Some(*n as usize),
+            _ => None,
+        }
     } else {
-        append_value(&series, &args[1]);
+        None
+    };
+    // `/dup count` — append `count` copies of the value.
+    let dup = if let Some(vals) = refs.get(&Symbol::new("dup")) {
+        match vals.first() {
+            Some(Value::Integer { n, .. }) => (*n).max(0) as usize,
+            _ => 1,
+        }
+    } else {
+        1
+    };
+    let mut to_append: Vec<Value> = Vec::new();
+    for _ in 0..dup {
+        match (&args[1], only, part) {
+            (Value::Block { series: s, .. } | Value::Paren { series: s, .. }, false, _) => {
+                let d = s.data.borrow();
+                let take = part.unwrap_or(usize::MAX);
+                to_append.extend(d.iter().skip(s.index).take(take).cloned());
+            }
+            _ => to_append.push(args[1].clone()),
+        }
     }
+    series.data.borrow_mut().extend(to_append);
     Ok(mk_series(series, span, is_paren))
 }
 
@@ -1090,22 +1160,6 @@ fn append_to_string(out: &mut String, value: &Value, only: bool) -> Result<(), E
     Ok(())
 }
 
-/// Append `value` to `series`'s shared storage. A block value is spliced
-/// (its elements appended one-by-one, Red's default `append` semantics);
-/// any other value is pushed whole.
-fn append_value(series: &Series, value: &Value) {
-    match value {
-        Value::Block { series: inner, .. } | Value::Paren { series: inner, .. } => {
-            let inner_data = inner.data.borrow();
-            let mut storage = series.data.borrow_mut();
-            for v in inner_data.iter().skip(inner.index) {
-                storage.push(v.clone());
-            }
-        }
-        _ => series.data.borrow_mut().push(value.clone()),
-    }
-}
-
 /// M83: append/insert a key/value pair into a hash!. The `value` must be a
 /// 2-element block `[key value]` (with `/only`, a single non-block value is
 /// keyed by `none`). The key must be hashable. Returns the hash.
@@ -1153,10 +1207,11 @@ fn append_hash_pair(
 
 /// `insert series value` — insert `value` at the cursor. For strings (no
 /// cursor in POC), inserts at the head.
-fn insert(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+fn insert(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity(args, "insert", 2, args.len()));
     }
+    crate::object::check_protected(&args[0], env, "insert")?;
     // M83: hash! insert — hash! has no cursor, so insert == append (the
     // key/value pair is added at the tail of `key_order`). The value must be
     // a 2-element block `[key value]`.
@@ -1254,10 +1309,11 @@ fn insert(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, E
 }
 
 /// `change series value` — replace the value at the cursor.
-fn change(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+fn change(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity(args, "change", 2, args.len()));
     }
+    crate::object::check_protected(&args[0], env, "change")?;
     // M84: vector! change — narrow on write.
     if let Value::Vector(v) = &args[0] {
         let cursor = v.borrow().cursor();
@@ -1296,9 +1352,12 @@ fn change(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, E
 }
 
 /// `remove series` — remove the value at the cursor.
-fn remove(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+fn remove(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if !args.is_empty() && args.len() != 1 {
         return Err(arity(args, "remove", 1, args.len()));
+    }
+    if !args.is_empty() {
+        crate::object::check_protected(&args[0], env, "remove")?;
     }
     // M84: vector! remove at the cursor.
     if let Value::Vector(v) = &args[0] {
@@ -1320,7 +1379,10 @@ fn remove(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, E
 
 /// `clear series|map` — truncate the series from cursor to tail, or remove
 /// all entries from a map. Returns the emptied value.
-fn clear(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+fn clear(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    if !args.is_empty() {
+        crate::object::check_protected(&args[0], env, "clear")?;
+    }
     // M43: map! clear.
     if let Value::Map(m) = &args[0] {
         m.borrow().clear();
@@ -1347,7 +1409,10 @@ fn clear(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, Ev
 
 /// `take series` — remove and return the value at the cursor; `none` if at
 /// tail.
-fn take(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+fn take(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    if !args.is_empty() {
+        crate::object::check_protected(&args[0], env, "take")?;
+    }
     // M84: vector! take at the cursor.
     if let Value::Vector(v) = &args[0] {
         let cursor = v.borrow().cursor();
@@ -1489,7 +1554,32 @@ fn copy(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eval
         let data = series.data.borrow();
         data[series.index.min(data.len())..end].to_vec()
     };
-    let fresh = Series::new(cloned);
+    let want_deep = refs.has(&Symbol::new("deep"));
+    // `/types typeset` — keep only elements the typeset accepts.
+    let types_filter = refs
+        .get(&Symbol::new("types"))
+        .and_then(|v| v.first())
+        .and_then(|t| {
+            if let Value::Typeset(ts) = t {
+                Some(Rc::clone(ts))
+            } else {
+                None
+            }
+        });
+    let filtered: Vec<Value> = if let Some(ts) = &types_filter {
+        cloned.into_iter().filter(|v| ts.accepts(v)).collect()
+    } else {
+        cloned
+    };
+    let final_vals: Vec<Value> = if want_deep {
+        filtered
+            .into_iter()
+            .map(|v| crate::binding::deep_clone_value(&v))
+            .collect()
+    } else {
+        filtered
+    };
+    let fresh = Series::new(final_vals);
     Ok(mk_series(fresh, Span::default(), is_paren))
 }
 
@@ -1697,6 +1787,234 @@ fn forskip(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, E
         series.index = series.index.saturating_add(size);
     }
     Ok(last)
+}
+
+// ---------------------------------------------------------------------------
+// M130: map-each / remove-each
+// ---------------------------------------------------------------------------
+
+/// `map-each word series body` — evaluates `body` once per element of
+/// `series` with `word` bound to the element, collecting each body result
+/// into a new `block!`. Distinct from `foreach` (which discards body
+/// results). Also supports the `[w1 w2 ...]` word-list form over a block
+/// (mirrors `foreach`): one iteration per `n`-sized chunk.
+fn map_each(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(arity(args, "map-each", 3, args.len()));
+    }
+    let body = body_block(args, 2, "map-each")?;
+    let compiled = resolve_compiled_block(&body, env);
+    let mut out: Vec<Value> = Vec::new();
+
+    // Word-list form: iterate chunks of `n` values per iteration.
+    if let Value::Block { series: ws, .. } | Value::Paren { series: ws, .. } = &args[0] {
+        let wdata = ws.data.borrow();
+        let words: Vec<Value> = wdata.iter().skip(ws.index).cloned().collect();
+        drop(wdata);
+        if words.is_empty() {
+            return Err(EvalError::Native {
+                message: "map-each: word list is empty".into(),
+                span: args[0].span_or_default(),
+            });
+        }
+        let slots: Vec<LoopSlot> = words
+            .iter()
+            .map(|w| resolve_loop_slot(w, env))
+            .collect::<Result<Vec<_>, _>>()?;
+        let n = slots.len();
+        let values: Vec<Value> = match &args[1] {
+            Value::Block { series: s, .. } | Value::Paren { series: s, .. } => {
+                let d = s.data.borrow();
+                d.iter().skip(s.index).cloned().collect()
+            }
+            Value::Hash(h) => {
+                let b = h.borrow();
+                let keys: Vec<red_core::value::MapKey> =
+                    b.key_order.borrow().iter().cloned().collect();
+                let entries = b.entries.borrow();
+                let mut v: Vec<Value> = Vec::with_capacity(keys.len() * 2);
+                for k in &keys {
+                    v.push(k.to_value());
+                    v.push(entries.get(k).cloned().unwrap_or(Value::None));
+                }
+                v
+            }
+            Value::Vector(v) => v.borrow().elements(),
+            other => {
+                return Err(EvalError::TypeError {
+                    expected: "series!",
+                    found: type_name(other),
+                    span: other.span_or_default(),
+                })
+            }
+        };
+        let mut i = 0;
+        while i + n <= values.len() {
+            for (j, slot) in slots.iter().enumerate() {
+                write_loop_slot(slot, values[i + j].clone(), env);
+            }
+            let result = if let Some(ref c) = compiled {
+                let caps = active_captures(env);
+                crate::vm::run((**c).clone(), env, caps)
+            } else {
+                dispatch_block(&body, env)
+            };
+            match result {
+                Ok(v) => {
+                    if !matches!(v, Value::Unset) {
+                        out.push(v);
+                    }
+                }
+                Err(EvalError::Break(_)) => break,
+                Err(EvalError::Continue) => {}
+                Err(e) => return Err(e),
+            }
+            i += n;
+        }
+        return Ok(Value::Block {
+            series: Series::new(out),
+            span: args[1].span_or_default(),
+        });
+    }
+
+    let slot = resolve_loop_slot(&args[0], env)?;
+    let (series, _, _) = extract_series(&args[1])?;
+    let mut i = series.index;
+    loop {
+        let v = {
+            let data = series.data.borrow();
+            if i >= data.len() {
+                break;
+            }
+            data[i].clone()
+        };
+        write_loop_slot(&slot, v, env);
+        let result = if let Some(ref c) = compiled {
+            let caps = active_captures(env);
+            crate::vm::run((**c).clone(), env, caps)
+        } else {
+            dispatch_block(&body, env)
+        };
+        match result {
+            Ok(v) => {
+                if !matches!(v, Value::Unset) {
+                    out.push(v);
+                }
+            }
+            Err(EvalError::Break(_)) => break,
+            Err(EvalError::Continue) => {}
+            Err(e) => return Err(e),
+        }
+        i += 1;
+    }
+    Ok(Value::Block {
+        series: Series::new(out),
+        span: args[1].span_or_default(),
+    })
+}
+
+/// `remove-each word series body` — evaluates `body` once per element of
+/// `series` with `word` bound to the element; removes elements from
+/// `series` in place where `body` is truthy. Returns the mutated series.
+fn remove_each(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 3 {
+        return Err(arity(args, "remove-each", 3, args.len()));
+    }
+    let body = body_block(args, 2, "remove-each")?;
+    let compiled = resolve_compiled_block(&body, env);
+    let slot = resolve_loop_slot(&args[0], env)?;
+
+    // Collect the element stream first, evaluating keep/drop for each. We
+    // snapshot the elements from the cursor, then rewrite the backing store
+    // with the kept ones — simpler than in-place removal with index shifts.
+    let (series, span, is_paren) = extract_series(&args[1])?;
+    let start = series.index;
+    let elems: Vec<Value> = {
+        let data = series.data.borrow();
+        data[start..].to_vec()
+    };
+    let mut kept: Vec<Value> = Vec::with_capacity(elems.len());
+    for v in elems {
+        write_loop_slot(&slot, v.clone(), env);
+        let result = if let Some(ref c) = compiled {
+            let caps = active_captures(env);
+            crate::vm::run((**c).clone(), env, caps)
+        } else {
+            dispatch_block(&body, env)
+        };
+        match result {
+            Ok(r) => {
+                if !truthy(&r) {
+                    kept.push(v);
+                }
+            }
+            Err(EvalError::Break(_)) => {
+                kept.push(v);
+                break;
+            }
+            Err(EvalError::Continue) => kept.push(v),
+            Err(e) => return Err(e),
+        }
+    }
+    // Rewrite [.. start][kept..] back into the shared storage.
+    {
+        let mut data = series.data.borrow_mut();
+        data.truncate(start);
+        data.extend(kept);
+    }
+    Ok(mk_series(series, span, is_paren))
+}
+
+/// `collect body` — evaluates `body`; any `keep value` calls inside the
+/// dynamic scope append to a fresh accumulator, which `collect` returns as a
+/// `block!`. The accumulator lives on `Env::collect_stack` so `keep` works
+/// through nested control flow (`if`/`loop`/`repeat`/user funcs) so long as
+/// it executes under an active `collect`.
+fn collect_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity(args, "collect", 1, args.len()));
+    }
+    let body = body_block(args, 0, "collect")?;
+    env.collect_stack.push(Vec::new());
+    let depth = env.collect_stack.len();
+    let result = dispatch_block(&body, env);
+    // Always pop our frame, even on unwind, so the stack stays balanced.
+    let acc = env.collect_stack.pop().unwrap_or_default();
+    if depth == 0 {
+        // Defensive — pop above already handled; this branch is unreachable.
+    }
+    match result {
+        Ok(_) => Ok(Value::Block {
+            series: Series::new(acc),
+            span: body.span_or_default(),
+        }),
+        Err(EvalError::Break(bv)) => {
+            // `break` inside collect carries the accumulated values out.
+            let _ = bv;
+            Ok(Value::Block {
+                series: Series::new(acc),
+                span: body.span_or_default(),
+            })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// `keep value` — appends `value` to the topmost `collect` accumulator on
+/// `Env::collect_stack`. Errors if no `collect` is active.
+fn keep_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity(args, "keep", 1, args.len()));
+    }
+    let acc = env
+        .collect_stack
+        .last_mut()
+        .ok_or_else(|| EvalError::Native {
+            message: "keep: no active collect".into(),
+            span: Span::new(0, 0),
+        })?;
+    acc.push(args[0].clone());
+    Ok(args[0].clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -2294,21 +2612,49 @@ pub fn register_series_natives(env: &mut Env) {
     reg(env, "pick", pick as NF, 2);
     reg(env, "poke", poke as NF, 3);
     reg(env, "select", select as NF, 2);
-    reg_refined(env, "find", find as NF, 2, &[("case", 0)]);
+    reg_refined(
+        env,
+        "find",
+        find as NF,
+        2,
+        &[
+            ("case", 0),
+            ("part", 1),
+            ("last", 0),
+            ("tail", 0),
+            ("match", 0),
+        ],
+    );
 
     // Mutation
-    reg_refined(env, "append", append as NF, 2, &[("only", 0)]);
+    reg_refined(
+        env,
+        "append",
+        append as NF,
+        2,
+        &[("only", 0), ("part", 1), ("dup", 1)],
+    );
     reg(env, "insert", insert as NF, 2);
     reg(env, "change", change as NF, 2);
     reg(env, "remove", remove as NF, 1);
     reg(env, "clear", clear as NF, 1);
     reg(env, "take", take as NF, 1);
-    reg_refined(env, "copy", copy as NF, 1, &[("part", 1)]);
+    reg_refined(
+        env,
+        "copy",
+        copy as NF,
+        1,
+        &[("part", 1), ("deep", 0), ("types", 1)],
+    );
 
     // Iteration
     reg(env, "foreach", foreach as NF, 3);
     reg(env, "forall", forall as NF, 3);
     reg(env, "forskip", forskip as NF, 4);
+    reg(env, "map-each", map_each as NF, 3);
+    reg(env, "remove-each", remove_each as NF, 3);
+    reg(env, "collect", collect_native as NF, 1);
+    reg(env, "keep", keep_native as NF, 1);
 
     // M112: sort + series set operations. `sort` declares /case, /reverse,
     // /skip (1 arg), /compare (1 arg). The set-ops declare /case and /skip

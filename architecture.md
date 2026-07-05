@@ -1028,6 +1028,80 @@ by the function-call shim, not by `eval` itself. Span comes from the
 offending value (every `Value` reachable in eval has its span, either
 inline or via its `Series`'s token span).
 
+## v0.10 feature-parity additions (M130–M136)
+
+### collect / keep (M130)
+The general-purpose `collect`/`keep` pair (distinct from the parse-only
+`collect` keyword) uses a dynamic-scope accumulator stack on `Env`:
+
+```rust
+pub struct Env {
+    pub collect_stack: Vec<Vec<Value>>,
+    ...
+}
+```
+
+`collect [body]` pushes a fresh `Vec<Value>` onto `collect_stack`, evaluates
+`body`, then pops and returns it as a `block!`. `keep value` appends to the
+top entry (errors with `"keep: no active collect"` if the stack is empty).
+This works through nested control flow (`if`/`loop`/`repeat`/user funcs) so
+long as the `keep` executes under an active `collect`. No binding-pass
+involvement — `keep` is a plain native reading `Env.collect_stack`.
+
+### Codec natives (M130)
+`checksum` (`/method 'crc32`/`'sha256`), `compress`/`decompress` (flate2
+zlib), `enbase`/`debase` (base64 STDANDARD), `encode 'url`/`decode 'url`
+(inline %-encoding). Deps: `crc32fast`/`sha2`/`flate2`/`base64` in
+`red-eval/Cargo.toml`. `'sha1` errors (the `sha2` crate doesn't include it
+— documented known gap).
+
+### Object/context reflection + protect (M131)
+`set?` (alias of `value?`), `bound?`/`bind?` (word has any binding),
+`context-of`/`bind-of` (returns the object a word is bound into, else
+`none` — best-effort without a `context!` value type), `context?` (alias
+of `object?`), `spec-of`/`body-of` (re-mold from `FuncDef` fields — no new
+storage), `resolve target source` (overwrite-existing merge), `has`/
+`extend`. `bound?`/`bind?`/`context-of`/`bind-of` take their word arg
+unevaluated (added to `uneval_first` in both walker and VM compiler).
+
+**Protect flag:** `ObjectDef.protected: RefCell<bool>` (field) +
+`Env.protected_series: HashSet<*const ()>` (side-set of series data
+pointers — pragmatic deviation from the "field on Series backing cell"
+plan note; avoids a sweeping `Series.data` type change, identical
+behavior). `check_protected(v, env, native)` is the single helper,
+consulted at every mutating native's entry: `append`/`insert`/`change`/
+`remove`/`clear`/`take`/`poke` (series.rs) and `write_path_slot`
+(SetPath writes in interp_walker.rs). On a protected target it raises
+`EvalError::Native` with a `"<native>: <object|series> is protected"`
+message.
+
+### Math helpers (M133)
+`floor`/`ceiling`/`truncate` (float-returning), `zero?`/`positive?`/
+`negative?` (predicates on int/float), `sign-of`/`sign?` (→ integer),
+`gcd`/`lcm` (promoted from stdlib — removed from the stdlib export list so
+the native versions win), `sinh`/`cosh`/`tanh` (`f64` stdlib methods),
+`square-root`/`absolute` (aliases of `sqrt`/`abs`).
+
+### Eval reflection + module extras (M134–M135)
+`dump value` (prints `name: <mold>`, word arg unevaluated), `errors`
+(returns `block!` of lit-words enumerating the known error categories),
+`exports-of module` (sorted `block!` of exported lit-words). The user-level
+`trace` toggle is demoted to v0.11 (needs eval-loop hooks).
+
+### Refinement expansion (M136)
+Widened the refinement surface of six natives (additive to default
+behavior — every existing fixture stays green):
+- `find`: `/part`/`/last`/`/tail`/`/match` (block + string).
+- `append`: `/part`/`/dup` (block series).
+- `copy`: `/deep` (recursive `deep_clone_value`) + `/types` (filter by
+  `TypesetDef::accepts` — reuses M89's typeset).
+- `replace`: `/case` (declared, no-op — already case-sensitive) + `/part`.
+- `round`: `/floor`/`/ceiling`/`/down`/`/up` (absolute rounding modes) +
+  `/half-down` (tie toward zero) + `/half-up`. `/even` remains half-to-even
+  (== `/half-to-even` — no duplicate refinement added).
+- `parse`: `/all` (declared, no-op — default already requires full
+  consumption) + `/part` (limits input to first `length` elements/chars).
+
 ## Performance (v0.3.3 VM, M30 + M30.1 + M30.2 + M30.3)
 
 The bytecode VM (M22–M29) is the default evaluator. M30 added hot-path

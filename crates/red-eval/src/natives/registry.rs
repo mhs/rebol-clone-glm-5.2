@@ -38,7 +38,7 @@ use super::words::{
 // Native-wrapping helpers
 // ---------------------------------------------------------------------------
 
-fn fixed_native(f: NativeFn, arity: usize) -> Rc<FuncDef> {
+pub(crate) fn fixed_native(f: NativeFn, arity: usize) -> Rc<FuncDef> {
     let params: Vec<Symbol> = (0..arity)
         .map(|i| Symbol::new(&format!("__arg{i}")))
         .collect();
@@ -51,7 +51,7 @@ fn fixed_native(f: NativeFn, arity: usize) -> Rc<FuncDef> {
     })
 }
 
-fn infix_native(f: NativeFn, arity: usize) -> Rc<FuncDef> {
+pub(crate) fn infix_native(f: NativeFn, arity: usize) -> Rc<FuncDef> {
     let params: Vec<Symbol> = (0..arity)
         .map(|i| Symbol::new(&format!("__arg{i}")))
         .collect();
@@ -66,7 +66,7 @@ fn infix_native(f: NativeFn, arity: usize) -> Rc<FuncDef> {
 
 /// Build a variadic native: collects all remaining expressions up to the next
 /// native word. Used by `make` (which accepts 2 or 3 args depending on form).
-fn variadic_native(f: NativeFn) -> Rc<FuncDef> {
+pub(crate) fn variadic_native(f: NativeFn) -> Rc<FuncDef> {
     Rc::new(FuncDef {
         params: Vec::new(),
         native: Some(f),
@@ -81,7 +81,13 @@ fn variadic_native(f: NativeFn) -> Rc<FuncDef> {
 /// are synthetic placeholders (the count drives dispatch). Mirrors the
 /// `reg_refined` closures in `series.rs`/`strings.rs`; lifted here so M16's
 /// `switch`/`case` can use the same pattern without re-defining it.
-fn reg_refined(env: &mut Env, name: &str, f: NativeFn, arity: usize, refines: &[(&str, usize)]) {
+pub(crate) fn reg_refined(
+    env: &mut Env,
+    name: &str,
+    f: NativeFn,
+    arity: usize,
+    refines: &[(&str, usize)],
+) {
     let params: Vec<Symbol> = (0..arity)
         .map(|i| Symbol::new(&format!("__arg{i}")))
         .collect();
@@ -351,7 +357,7 @@ pub fn register_natives(env: &mut Env) {
         "parse",
         crate::parse::parse_native as NativeFn,
         2,
-        &[("case", 0)],
+        &[("case", 0), ("all", 0), ("part", 1)],
     );
 
     // Type conversions + make/to/form (M14)
@@ -365,6 +371,9 @@ pub fn register_natives(env: &mut Env) {
 
     // Trig + transcendental natives (M40)
     crate::math::register_transcendental_natives(env);
+
+    // Math helper natives (M133)
+    crate::math::register_math_helper_natives(env);
 
     // Objects & contexts (M18)
     crate::object::register_object_natives(env);
@@ -381,8 +390,17 @@ pub fn register_natives(env: &mut Env) {
     // Images (M85)
     crate::image::register_image_natives(env);
 
+    // Typesets (M89)
+    crate::typeset::register_typeset_natives(env);
+
     // Bitsets (M46)
     crate::bitset::register_bitset_natives(env);
+
+    // Codec natives (M130): checksum/compress/decompress/enbase/debase/encode/decode
+    crate::codec::register_codec_natives(env);
+
+    // Eval reflection natives (M134): dump/errors
+    crate::reflection::register_reflection_natives(env);
 
     // Modules (M61)
     crate::module::register_module_natives(env);

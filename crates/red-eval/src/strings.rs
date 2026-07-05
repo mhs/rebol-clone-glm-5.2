@@ -299,7 +299,34 @@ fn replace(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, E
     }
 
     let all = refs.has(&Symbol::new("all"));
-    let out = if all {
+    // `/part length` — limit the search-and-replace scope to the first
+    // `length` chars of the source; the rest is appended verbatim.
+    let part = refs
+        .get(&Symbol::new("part"))
+        .and_then(|a| a.first())
+        .and_then(|v| {
+            if let Value::Integer { n, .. } = v {
+                Some(*n as usize)
+            } else {
+                None
+            }
+        });
+    // `/case` is accepted for parity (replace is already case-sensitive).
+    let out = if let Some(n) = part {
+        let (head, tail) = if n < src.len() {
+            src.split_at(n)
+        } else {
+            (src.as_ref(), "")
+        };
+        let replaced = if all {
+            head.replace(search.as_ref(), repl.as_ref())
+        } else {
+            head.replacen(search.as_ref(), repl.as_ref(), 1)
+        };
+        let mut out = replaced;
+        out.push_str(tail);
+        out
+    } else if all {
         src.replace(search.as_ref(), repl.as_ref())
     } else {
         src.replacen(search.as_ref(), repl.as_ref(), 1)
@@ -473,7 +500,13 @@ pub fn register_string_natives(env: &mut Env) {
         1,
         &[("auto", 0), ("with", 1), ("lines", 0), ("all", 0)],
     );
-    reg_refined(env, "replace", replace as NF, 3, &[("all", 0)]);
+    reg_refined(
+        env,
+        "replace",
+        replace as NF,
+        3,
+        &[("all", 0), ("case", 0), ("part", 1)],
+    );
     reg_refined(env, "uppercase", uppercase as NF, 1, &[("part", 1)]);
     reg_refined(env, "lowercase", lowercase as NF, 1, &[("part", 1)]);
     reg_refined(

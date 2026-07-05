@@ -617,6 +617,46 @@ pub fn register_module_natives(env: &mut Env) {
     // without `uneval_first`.
     env.natives
         .insert(Symbol::new("import"), fixed(import_native as NativeFn, 1));
+    env.natives.insert(
+        Symbol::new("exports-of"),
+        fixed(exports_of_native as NativeFn, 1),
+    );
+}
+
+/// `exports-of module` — returns a `block!` of lit-words naming the module's
+/// exported words (read from `ModuleDef.exports`, no new storage).
+fn exports_of_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "exports-of", 1, args.len()));
+    }
+    let m = match &args[0] {
+        Value::Module(m) => Rc::clone(m),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "module!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            })
+        }
+    };
+    let mut exports = m.borrow().exports.borrow().clone();
+    let mut names: Vec<Symbol> = exports.drain().collect();
+    names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    let items: Vec<Value> = names
+        .iter()
+        .map(|s| Value::LitWord {
+            sym: s.clone(),
+            span: Span::new(0, 0),
+        })
+        .collect();
+    Ok(Value::Block {
+        series: Series::new(items),
+        span: Span::new(0, 0),
+    })
 }
 
 #[cfg(test)]

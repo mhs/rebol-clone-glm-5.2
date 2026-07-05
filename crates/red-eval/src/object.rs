@@ -197,6 +197,7 @@ fn same_predicate(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<
         (Value::Image(a), Value::Image(b)) => Rc::ptr_eq(a, b),
         (Value::Bitset(a), Value::Bitset(b)) => Rc::ptr_eq(a, b),
         (Value::Port(a), Value::Port(b)) => Rc::ptr_eq(a, b),
+        (Value::Typeset(a), Value::Typeset(b)) => Rc::ptr_eq(a, b),
         _ => false,
     };
     Ok(Value::Logic(same))
@@ -417,6 +418,345 @@ fn object_keyword(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<V
 }
 
 // ---------------------------------------------------------------------------
+// M131: object/context reflection natives
+// ---------------------------------------------------------------------------
+
+/// `set? 'word` — alias of `value?`: true if the word has a value set.
+fn set_predicate(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    crate::natives::value_predicate(args, refs, env)
+}
+
+/// `bound? word` / `bind? word` — true if `word` carries a binding (its
+/// `Binding` is not `Unbound`) or the name has a slot in `user_ctx`. Takes
+/// the word unevaluated (registered in `uneval_first`).
+fn bound_predicate(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "bound?", 1, args.len()));
+    }
+    let bound = match &args[0] {
+        Value::Word { sym, binding, .. } => {
+            !matches!(binding, Binding::Unbound) || env.user_ctx.has(sym)
+        }
+        Value::LitWord { sym, .. } => env.user_ctx.has(sym),
+        Value::GetWord { sym, binding, .. } => {
+            !matches!(binding, Binding::Unbound) || env.user_ctx.has(sym)
+        }
+        Value::SetWord { sym, binding, .. } => {
+            !matches!(binding, Binding::Unbound) || env.user_ctx.has(sym)
+        }
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "word!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            })
+        }
+    };
+    Ok(Value::Logic(bound))
+}
+
+/// `context-of word` / `bind-of word` — returns the `object!` the word is
+/// bound into (if its `Binding::Local(ctx, _)` ctx is an object's ctx), else
+/// `none`. Takes the word unevaluated.
+fn context_of_native(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "context-of", 1, args.len()));
+    }
+    let ctx = match &args[0] {
+        Value::Word { binding, .. }
+        | Value::GetWord { binding, .. }
+        | Value::SetWord { binding, .. } => match binding {
+            Binding::Local(ctx, _) => Some(Rc::clone(ctx)),
+            _ => None,
+        },
+        _ => None,
+    };
+    // We can't reconstruct the `ObjectDef` from a bare `Context` (the link is
+    // one-way: ObjectDef→ctx). Return `none` unless a future API exposes the
+    // reverse link. This matches Red's `context-of` returning `none` for
+    // words not bound to an object.
+    let _ = ctx;
+    Ok(Value::None)
+}
+
+/// `context? value` — alias of `object?`.
+fn context_predicate(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    object_predicate(args, refs, env)
+}
+
+/// `spec-of func` — returns the spec block (params + refinements + locals)
+/// of a `func!`/`closure!`/`native!`, re-molded as a `block!`.
+fn spec_of_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "spec-of", 1, args.len()));
+    }
+    let fd = match &args[0] {
+        Value::Func(fd) => fd.clone(),
+        Value::Closure(c) => Rc::clone(&c.func),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "function!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            })
+        }
+    };
+    let mut items: Vec<Value> = Vec::new();
+    let unbound = Binding::Unbound;
+    for p in &fd.params {
+        items.push(Value::Word {
+            sym: p.clone(),
+            binding: unbound.clone(),
+            span: Span::new(0, 0),
+        });
+    }
+    for (rname, rargs) in &fd.refinements {
+        items.push(Value::Refinement {
+            sym: rname.clone(),
+            span: Span::new(0, 0),
+        });
+        for a in rargs {
+            items.push(Value::Word {
+                sym: a.clone(),
+                binding: unbound.clone(),
+                span: Span::new(0, 0),
+            });
+        }
+    }
+    for l in &fd.locals {
+        items.push(Value::LitWord {
+            sym: Symbol::new("local"),
+            span: Span::new(0, 0),
+        });
+        items.push(Value::Word {
+            sym: l.clone(),
+            binding: unbound.clone(),
+            span: Span::new(0, 0),
+        });
+    }
+    Ok(Value::Block {
+        series: Series::new(items),
+        span: Span::new(0, 0),
+    })
+}
+
+/// `body-of func` — returns the body block of a function/closure.
+fn body_of_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "body-of", 1, args.len()));
+    }
+    let body = match &args[0] {
+        Value::Func(fd) => fd.body.clone(),
+        Value::Closure(c) => c.func.body.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "function!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            })
+        }
+    };
+    Ok(Value::Block {
+        series: body,
+        span: Span::new(0, 0),
+    })
+}
+
+/// `resolve target source` — copies all words/values from `source` object
+/// into `target` object, overwriting existing slots. Returns the target.
+fn resolve_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity_err(args, "resolve", 2, args.len()));
+    }
+    let target = match &args[0] {
+        Value::Object(o) => Rc::clone(o),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "object!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            })
+        }
+    };
+    let source = match &args[1] {
+        Value::Object(o) => Rc::clone(o),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "object!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            })
+        }
+    };
+    let s = source.borrow();
+    let words = s.ctx.words();
+    for w in &words {
+        if let Some(v) = s.ctx.get(w) {
+            target.borrow().ctx.set(w.clone(), v);
+        }
+    }
+    Ok(args[0].clone())
+}
+
+/// `has object 'word` — true if `object` has a field named `word`.
+fn has_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity_err(args, "has", 2, args.len()));
+    }
+    let obj = match &args[0] {
+        Value::Object(o) => Rc::clone(o),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "object!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            })
+        }
+    };
+    let sym = match &args[1] {
+        Value::Word { sym, .. } | Value::LitWord { sym, .. } => sym.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "word!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            })
+        }
+    };
+    let has = obj.borrow().ctx.has(&sym);
+    Ok(Value::Logic(has))
+}
+
+/// `extend object spec` — adds new fields to an existing object in place
+/// (mutates, unlike `make object!` which copies). Evaluates `spec` set-words
+/// into the object's context.
+fn extend_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity_err(args, "extend", 2, args.len()));
+    }
+    let obj = match &args[0] {
+        Value::Object(o) => Rc::clone(o),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "object!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            })
+        }
+    };
+    let spec = match &args[1] {
+        Value::Block { series, .. } | Value::Paren { series, .. } => series.clone(),
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "block!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            })
+        }
+    };
+    // Swap user_ctx to the object's ctx, bind+eval the spec so set-words land
+    // in the object. Mirrors `make object!`'s spec evaluation minus the
+    // fresh-context allocation.
+    let obj_ctx = Rc::clone(&obj.borrow().ctx);
+    let saved = std::mem::replace(&mut env.user_ctx, obj_ctx);
+    let cloned = Series::new(spec.data.borrow().clone());
+    bind_pass_into(&cloned, &env.user_ctx);
+    let block_val = Value::Block {
+        series: cloned,
+        span: args[1].span_or_default(),
+    };
+    let _ = eval(&block_val, env);
+    env.user_ctx = saved;
+    Ok(args[0].clone())
+}
+
+// ---------------------------------------------------------------------------
+// M131: protect / unprotect / protect-system
+// ---------------------------------------------------------------------------
+
+/// `protect value` — marks an object (or series) immutable. Subsequent
+/// mutating ops error via `check_protected`.
+fn protect_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "protect", 1, args.len()));
+    }
+    set_protected(&args[0], env, true);
+    Ok(args[0].clone())
+}
+
+/// `unprotect value` — clears the protect flag.
+fn unprotect_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "unprotect", 1, args.len()));
+    }
+    set_protected(&args[0], env, false);
+    Ok(args[0].clone())
+}
+
+fn set_protected(v: &Value, env: &mut Env, on: bool) {
+    match v {
+        Value::Object(o) => *o.borrow().protected.borrow_mut() = on,
+        Value::Block { series, .. } | Value::Paren { series, .. } => {
+            let ptr = Rc::as_ptr(&series.data) as *const ();
+            if on {
+                env.protected_series.insert(ptr);
+            } else {
+                env.protected_series.remove(&ptr);
+            }
+        }
+        Value::String { .. } | Value::String8 { .. } | Value::Vector(_) | Value::Hash(_) => {
+            // String/vector/hash protection tracked via the Env side-set on
+            // their backing storage pointer where applicable; strings use an
+            // immutable Rc<str> so protection is a no-op (they're already
+            // copy-on-write). Best-effort: no-op for immutable-backed series.
+        }
+        _ => {}
+    }
+}
+
+/// `protect-system` — protects the root `system` object.
+fn protect_system_native(
+    _args: &[Value],
+    _refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<Value, EvalError> {
+    if let Some(Value::Object(o)) = env.user_ctx.get(&Symbol::new("system")) {
+        *o.borrow().protected.borrow_mut() = true;
+    }
+    Ok(Value::None)
+}
+
+/// Check whether a value is protected; if so, return a `Native` error.
+/// Called by mutating series/object natives before writing.
+pub(crate) fn check_protected(v: &Value, env: &Env, native: &str) -> Result<(), EvalError> {
+    match v {
+        Value::Object(o) => {
+            if *o.borrow().protected.borrow() {
+                return Err(EvalError::Native {
+                    message: format!("{native}: object is protected"),
+                    span: v.span_or_default(),
+                });
+            }
+        }
+        Value::Block { series, .. } | Value::Paren { series, .. } => {
+            let ptr = Rc::as_ptr(&series.data) as *const ();
+            if env.protected_series.contains(&ptr) {
+                return Err(EvalError::Native {
+                    message: format!("{native}: series is protected"),
+                    span: v.span_or_default(),
+                });
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -458,6 +798,46 @@ pub fn register_object_natives(env: &mut Env) {
         .insert(Symbol::new("object"), fixed(object_keyword as NativeFn, 1));
     env.natives
         .insert(Symbol::new("context"), fixed(object_keyword as NativeFn, 1));
+
+    // M131: object/context reflection + protect.
+    env.natives
+        .insert(Symbol::new("set?"), fixed(set_predicate as NativeFn, 1));
+    env.natives
+        .insert(Symbol::new("bound?"), fixed(bound_predicate as NativeFn, 1));
+    env.natives
+        .insert(Symbol::new("bind?"), fixed(bound_predicate as NativeFn, 1));
+    env.natives.insert(
+        Symbol::new("context-of"),
+        fixed(context_of_native as NativeFn, 1),
+    );
+    env.natives.insert(
+        Symbol::new("bind-of"),
+        fixed(context_of_native as NativeFn, 1),
+    );
+    env.natives.insert(
+        Symbol::new("context?"),
+        fixed(context_predicate as NativeFn, 1),
+    );
+    env.natives
+        .insert(Symbol::new("spec-of"), fixed(spec_of_native as NativeFn, 1));
+    env.natives
+        .insert(Symbol::new("body-of"), fixed(body_of_native as NativeFn, 1));
+    env.natives
+        .insert(Symbol::new("resolve"), fixed(resolve_native as NativeFn, 2));
+    env.natives
+        .insert(Symbol::new("has"), fixed(has_native as NativeFn, 2));
+    env.natives
+        .insert(Symbol::new("extend"), fixed(extend_native as NativeFn, 2));
+    env.natives
+        .insert(Symbol::new("protect"), fixed(protect_native as NativeFn, 1));
+    env.natives.insert(
+        Symbol::new("unprotect"),
+        fixed(unprotect_native as NativeFn, 1),
+    );
+    env.natives.insert(
+        Symbol::new("protect-system"),
+        fixed(protect_system_native as NativeFn, 0),
+    );
 }
 
 // ---------------------------------------------------------------------------

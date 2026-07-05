@@ -182,6 +182,9 @@ module 'stdlib [
     gcd: func [a b] [either b = 0 [either a < 0 [0 - a] [a]] [gcd b (a // b)]]
     lcm: func [a b] [either (a * b) = 0 [0] [((either a < 0 [0 - a] [a]) * (either b < 0 [0 - b] [b])) / gcd a b]]
     sign-of: func [n] [either n < 0 [-1] [either n > 0 [1] [0]]]
+    ; NOTE: gcd/lcm/sign-of are also registered as natives (M133). The native
+    ; versions win when the stdlib is not auto-imported (--no-stdlib) or once
+    ; these stdlib defs are shadowed; left here as fallbacks for back-compat.
     clamp: func [n lo hi] [
         either n < lo [lo] [either n > hi [hi] [n]]
     ]
@@ -220,7 +223,9 @@ module 'stdlib [
         repeat-str pad-left pad-right
         block-sum block-product block-len block-mean mean reverse-of
         flatten min-of max-of intersperse chunk
-        gcd lcm sign-of clamp factorial-iter
+        clamp factorial-iter
         range-of
+        ; NOTE: gcd/lcm/sign-of removed from exports — M133 promotes them to
+        ; natives. They remain defined above as unexported fallbacks.
     ]
 ]

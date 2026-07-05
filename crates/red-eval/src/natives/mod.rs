@@ -40,8 +40,9 @@ mod words;
 pub(crate) use compare::{num_cmp, values_equal};
 pub(crate) use control::parse_error_block_public;
 pub(crate) use func::{extract_spec, func_native, FuncSpec};
+pub(crate) use registry::reg_refined;
 pub use registry::{install_constants, register_natives};
-
+pub(crate) use words::value_predicate;
 // ---------------------------------------------------------------------------
 // M42: structured error enrichment
 // ---------------------------------------------------------------------------

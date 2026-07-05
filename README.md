@@ -5,7 +5,7 @@ language, implemented in Rust. Red is a homoiconic, block-structured
 descendant of Rebol — code is data, evaluation is prefix-style and eager,
 and "dialects" are blocks interpreted by custom mini-interpreters.
 
-This repo is a **Red subset interpreter** (`v0.7.0`). It implements a usable slice of
+This repo is a **Red subset interpreter** (`v0.10.0`). It implements a usable slice of
 Red — lexer, parser, **bytecode compiler + stack VM** (the default since
 v0.3), tree-walking evaluator (retained as the `--walk` fallback), full
 series model, real word binding, functions, **first-class closures**
@@ -26,11 +26,12 @@ performance), [`plan5.md`](./plan5.md) (v0.4 — language completeness),
 [`plan6-closures-modules.md`](./plan6-closures-modules.md) (v0.5 —
 closures & modules), [`plan11-functional-gaps.md`](./plan11-functional-gaps.md)
 (v0.6 — core functional gaps), and [`plan8-missing-types.md`](./plan8-missing-types.md)
-(v0.7 — type completeness).
+(v0.7 — type completeness), and [`plan13-feature-parity.md`](./plan13-feature-parity.md)
+(v0.10 — feature-parity round-out).
 
 ## Status
 
-- **Tagged:** `v0.7.0`
+- **Tagged:** `v0.10.0`
 - **Workspace:** three crates — `red-core` (value model + lexer + parser + printer + VM IR types),
   `red-eval` (compiler + VM + tree-walker + natives + `parse`), `red-cli` (binary + REPL).
   A `fuzz/` crate (nightly-only, `libfuzzer-sys`) is excluded from the default workspace.
@@ -53,7 +54,7 @@ cargo test  --workspace
 cargo run  -p red-cli -- examples/hello.red     # → Hello, World!
 cargo run  -p red-cli                            # → REPL (no args)
 cargo run  -p red-cli -- --help
-cargo run  -p red-cli -- --version               # → red 0.7.0
+cargo run  -p red-cli -- --version               # → red 0.10.0
 cargo run  -p red-cli -- --allow-shell examples/call.red   # enable call/shell
 cargo run  -p red-cli -- --allow-network http://example.com/  # enable read url!/open url!
 cargo run  -p red-cli -- --walk examples/fib.red          # force tree-walker
@@ -67,6 +68,8 @@ cargo run  -p red-cli -- --unset-on-unbound examples/arith.red  # evaluate unbou
 ```
 
 v0.3 was a **performance release**: the bytecode VM delivers 2–4× speedups on compute-heavy programs (deep recursion, tight loops) over the v0.2 tree-walker, while preserving exact observable behavior (golden parity, error parity). v0.4 re-opens the language surface on top of the unchanged VM — new value types (`char!`/`binary!`/`map!`/`pair!`/`tuple!`/`date!`/`bitset!`), `compose`, trig math, the full `error!` model, and the completed `parse` dialect. v0.5 adds **first-class closures** (`closure!` with snapshot freevar capture, fixing the v0.3 escaping-closure bug) and **modules** (`module`/`export`/`import`, with named-module caching, file-based import, and `system/options/module-path` search), plus a small auto-imported stdlib. v0.5.1 closes the **control-flow vocabulary gap** — `unless`, `forever`, `for` (direction-aware counted loop over int/float/char), `forskip` (record-wise series iteration). v0.6 closes four **core functional gaps**: `parse` **named-rule recursion** (a bound word resolving to a `block!` is a sub-rule, with a depth guard); `mold` exposed as a callable native (`/only`); series **`sort`** (native, shadowing the stdlib version) + set operations `unique`/`intersect`/`union`/`difference`/`exclude` on `block!`/`string!`; and a synchronous **`port!` abstraction** with minimal HTTP/HTTPS GET networking via the existing `ureq` dep (TLS on by default — no new dependency), gated behind `--allow-network`. v0.7 is a **type-completeness release**: nine new `Value` variants (`percent!`/`money!`/`issue!`/`email!`/`tag!`/`unset!`/`hash!`/`vector!`/`image!`/`typeset!`), the `native!`/`op!`/`any-function?` type split, a gated `--unset-on-unbound` fallback (default off), and `typeset!`-backed runtime type-checking of typed-func args (`func [x [integer! float!]]` rejects a string arg at call time). `regex!`/`struct!`/`handle!` deferred to v0.8. All additions are additive: they compile through the existing VM const-pool + native-call path with no new hot-path instrs. See `BENCHMARKS.md` for measurements.
+
+v0.10 is a **feature-parity round-out**: closes the remaining native-surface gaps flagged by the post-v0.8 audit. **M130** adds series/string DSL natives (`map-each`/`remove-each`/`collect`+`keep` via a dynamic-scope accumulator on `Env`) and codec natives (`checksum` with CRC32+SHA-256 via `crc32fast`/`sha2`; `compress`/`decompress` via `flate2`; `enbase`/`debase` via `base64`; `encode`/`decode` for `'url`). **M131** adds object/context reflection (`set?`/`bound?`/`bind?`/`context-of`/`context?`/`spec-of`/`body-of`/`resolve`/`has`/`extend`) plus `protect`/`unprotect`/`protect-system` with a `protected` flag on `ObjectDef` and an `Env.protected_series` side-set enforced at every mutating native (`append`/`insert`/`change`/`remove`/`clear`/`take`/`poke` + `SetPath`). **M133** adds math helpers (`floor`/`ceiling`/`truncate`/`zero?`/`positive?`/`negative?`/`sign-of`/`sign?`/`gcd`/`lcm`/`sinh`/`cosh`/`tanh`/`square-root`/`absolute`), promoting `gcd`/`lcm`/`sign-of` from the stdlib to natives. **M134** adds `dump` and an `errors` catalog. **M135** adds `exports-of`. **M136** widens `find` (`/part`/`/last`/`/tail`/`/match`), `append` (`/part`/`/dup`), `copy` (`/deep`/`/types`), `replace` (`/case`/`/part`), `round` (`/floor`/`/ceiling`/`/down`/`/up`/`/half-down`/`/half-up`), and `parse` (`/all`/`/part`). The speculative M132 primitives (`quote`/`meta`/`uneval`/`eval-set`) and M134's `stop?` were **dropped after Red-parity confirmation** as audit misidentifications; the `trace` user-level toggle and the `math` evaluation-order mode were **demoted to v0.11** (both require eval-loop hooks that break the v0.10 "additive native only" non-goal). `append/line` deferred (needs `Series` per-element line-hint metadata). See `plan13-feature-parity.md`.
 
 ## What's implemented
 

@@ -40,6 +40,7 @@ pub(crate) fn function_native(
         params: spec.params,
         refinements: spec.refinements,
         locals: spec.locals,
+        param_types: spec.param_types,
         body: body_series,
         native: None,
         variadic: false,
@@ -77,6 +78,7 @@ pub(crate) fn func_native(
     let mut fd = FuncDef {
         params: spec.params,
         refinements: spec.refinements,
+        param_types: spec.param_types,
         body: body_series,
         native: None,
         variadic: false,
@@ -118,32 +120,43 @@ pub(crate) fn does_native(
 
 /// Result of parsing a `func`/`does`/`function` spec block: positional
 /// parameter names, declared refinements (each a name + its argument-word
-/// names), and explicit `<local>` words (recognized by `function` — `func`
-/// ignores them).
+/// names), explicit `<local>` words (recognized by `function` — `func`
+/// ignores them), and per-param runtime typesets (M89 — `None` = unchecked).
 pub(crate) struct FuncSpec {
     pub params: Vec<Symbol>,
     pub refinements: Vec<(Symbol, Vec<Symbol>)>,
     pub locals: Vec<Symbol>,
+    /// M89: parallel to `params`. `param_types[i] = Some(ts)` iff the spec
+    /// block has a `[type! ...]` annotation block immediately following
+    /// `params[i]`. Refinement-arg types are not checked in v0.7 (entries
+    /// for refinement args stay `None` — the vec is sized only for params).
+    pub param_types: Vec<Option<Rc<red_core::value::TypesetDef>>>,
 }
 
 /// Extract parameter symbols and refinements from a func spec block.
 ///
 /// Spec grammar (POC subset):
 ///   spec := item*
-///   item := word | lit-word | refinement | <local>
-///   refinement := `/name` word*    — `/name` introduces a refinement; the
-///                                     following words (until the next
-///                                     refinement, `<local>`, or end) are
-///                                     its argument words.
-///   <local> := `<local>` word*     — the `<local>` marker (a Word whose
-///                                     symbol is `<local>`) introduces
-///                                     function-local words; following words
-///                                     (until the next refinement, another
-///                                     `<local>`, or end) are collected as
-///                                     locals.
+///   item := word | lit-word | refinement | <local> | type-annotation
+///   refinement := `/name` word*     — `/name` introduces a refinement; the
+///                                       following words (until the next
+///                                       refinement, `<local>`, or end) are
+///                                       its argument words.
+///   <local> := `<local>` word*      — the `<local>` marker (a Word whose
+///                                       symbol is `<local>`) introduces
+///                                       function-local words; following words
+///                                       (until the next refinement, another
+///                                       `<local>`, or end) are collected as
+///                                       locals.
+///   type-annotation := block        — a `[type! ...]` block immediately
+///                                       following a positional param word
+///                                       (M89) becomes the param's runtime
+///                                       typeset. Skipped in refinement/local
+///                                       sections (refinement-arg types
+///                                       deferred to v0.8).
 ///
 /// Words become positional params (in order) unless inside a refinement or
-/// `<local>` section. Type annotations are skipped.
+/// `<local>` section.
 pub(crate) fn extract_spec(spec_block: &Value) -> Result<FuncSpec, EvalError> {
     let series = match spec_block {
         Value::Block { series, .. } => series.clone(),
@@ -159,6 +172,7 @@ pub(crate) fn extract_spec(spec_block: &Value) -> Result<FuncSpec, EvalError> {
     let mut params = Vec::new();
     let mut refinements: Vec<(Symbol, Vec<Symbol>)> = Vec::new();
     let mut locals: Vec<Symbol> = Vec::new();
+    let mut param_types: Vec<Option<Rc<red_core::value::TypesetDef>>> = Vec::new();
     // Section state: which collector following words go into.
     #[derive(Clone, Copy)]
     enum Section {
@@ -184,7 +198,10 @@ pub(crate) fn extract_spec(spec_block: &Value) -> Result<FuncSpec, EvalError> {
                 section = Section::Refinement;
             }
             Value::Word { sym, .. } | Value::LitWord { sym, .. } => match section {
-                Section::Params => params.push(sym.clone()),
+                Section::Params => {
+                    params.push(sym.clone());
+                    param_types.push(None);
+                }
                 Section::Refinement => {
                     if let Some(last) = refinements.last_mut() {
                         last.1.push(sym.clone());
@@ -192,8 +209,17 @@ pub(crate) fn extract_spec(spec_block: &Value) -> Result<FuncSpec, EvalError> {
                 }
                 Section::Local => locals.push(sym.clone()),
             },
+            // M89: a `block!` immediately following a param word in the
+            // Params section is the param's runtime typeset annotation
+            // (`[integer! float!]`). Refinement/local-section blocks stay
+            // skipped (refinement-arg types deferred to v0.8).
+            Value::Block { .. } if matches!(section, Section::Params) => {
+                if let Some(last) = param_types.last_mut() {
+                    *last = Some(crate::typeset::parse_typeset_block(v)?);
+                }
+            }
             _ => {
-                // Skip type annotations / other markers.
+                // Skip type annotations / other markers in other sections.
             }
         }
     }
@@ -201,6 +227,7 @@ pub(crate) fn extract_spec(spec_block: &Value) -> Result<FuncSpec, EvalError> {
         params,
         refinements,
         locals,
+        param_types,
     })
 }
 
@@ -330,6 +357,7 @@ pub(crate) fn closure_native(
     let mut fd = FuncDef {
         params: spec.params,
         refinements: spec.refinements,
+        param_types: spec.param_types,
         body: body_series,
         native: None,
         variadic: false,

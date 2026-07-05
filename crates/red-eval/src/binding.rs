@@ -246,7 +246,7 @@ pub(crate) fn collect_loop_vars(series: &Series, ctx: &Context) {
                 ..
             } if matches!(
                 sym.as_str(),
-                "repeat" | "foreach" | "forall" | "for" | "forskip"
+                "repeat" | "foreach" | "forall" | "for" | "forskip" | "map-each" | "remove-each"
             ) =>
             {
                 if i + 1 < n {

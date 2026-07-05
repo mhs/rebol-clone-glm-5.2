@@ -28,6 +28,25 @@
 > reflects the v0.7 execution model; `architecture.md` covers the
 > compiler/VM/dispatch/path/object/closure/module internals.
 >
+> **Feature-Parity Round-Out (v0.10):** closes the remaining native-surface
+> gaps flagged by the post-v0.8 audit. M130 adds `map-each`/`remove-each`/
+> `collect`+`keep` (dynamic-scope accumulator on `Env.collect_stack`) and
+> codec natives (`checksum`/`compress`/`decompress`/`enbase`/`debase`/
+> `encode`/`decode`). M131 adds object/context reflection (`set?`/`bound?`/
+> `bind?`/`context-of`/`context?`/`spec-of`/`body-of`/`resolve`/`has`/
+> `extend`) plus `protect`/`unprotect`/`protect-system` enforced at every
+> mutating native. M133 adds `floor`/`ceiling`/`truncate`/`zero?`/`positive?`/
+> `negative?`/`sign-of`/`gcd`/`lcm`/`sinh`/`cosh`/`tanh`/`square-root`/
+> `absolute`. M134 adds `dump` + `errors`s catalog. M135 adds `exports-of`.
+> M136 widens `find`/`append`/`copy`/`replace`/`round`/`parse` refinements.
+> **Dropped after Red-parity confirmation:** M132 (`quote`/`meta`/`uneval`/
+> `eval-set`) and M134's `stop?` — audit misidentifications of Red primitives
+> that don't exist in the target parity version. **Demoted to v0.11:** the
+> `math` evaluation-order mode and the user-level `trace` toggle (both need
+> eval-loop hooks that break the v0.10 "additive native only" non-goal);
+> `append/line` (needs `Series` per-element line-hint metadata). See
+> `plan13-feature-parity.md`.
+>
 > **Execution model (v0.3+, unchanged in v0.7):**
 > - **Bytecode compiler + stack VM** (`EvalMode::Vm`, the default): blocks
 >   compile to a flat `Vec<Instr>` with a constant pool; the VM dispatches
@@ -479,6 +498,16 @@ binding, not just dynamic lookup.
   model backed by `Channel` (concurrency), and shared-cell closures
   (proper SetWord capture). The `--unset-on-unbound` fallback is default
   off (opt-in); revisit the default in v0.8. See `plan8-missing-types.md`.
+- Known gap (v0.10): the speculative M132 primitives (`quote`/`meta`/
+  `uneval`/`eval-set`) and M134's `stop?` were dropped after Red-parity
+  confirmation — they don't exist in the target parity version. The `math`
+  evaluation-order mode and the user-level `trace` toggle are demoted to
+  v0.11 (both require eval-loop hooks that break the "additive native only"
+  v0.10 non-goal). `append/line` deferred (needs `Series` per-element
+  line-hint metadata). `find/only`/`/any`/`/with`/`/skip` refinements not
+  yet implemented (M136 landed `/part`/`/last`/`/tail`/`/match`). `checksum`
+  exposes CRC32 + SHA-256 only (`'sha1` errors — `sha2` crate doesn't
+  include it). See `plan13-feature-parity.md`.
 - Known gap (v0.6): the `port!`/networking surface is a **synchronous,
   GET-only subset** — `read http://`/`read https://` (via `ureq`, TLS on by
   default) and `open`/`close`/`create`/`read port`/`write port` for files.
@@ -582,6 +611,18 @@ for `bind` to report unbound words with a location.
   gate (default off), `typeset!`-backed typed-func arg type-checking.
   `regex!`/`struct!`/`handle!` deferred to v0.8. See
   `plan8-missing-types.md`.
+  v0.10 (M130–M136): **feature-parity round-out** — series/string DSL
+  (`map-each`/`remove-each`/`collect`/`keep`); codec (`checksum`/`compress`/
+  `decompress`/`enbase`/`debase`/`encode`/`decode`); object/context
+  reflection (`set?`/`bound?`/`bind?`/`context-of`/`context?`/`spec-of`/
+  `body-of`/`resolve`/`has`/`extend`/`protect`/`unprotect`/`protect-system`);
+  math helpers (`floor`/`ceiling`/`truncate`/`zero?`/`positive?`/`negative?`/
+  `sign-of`/`sign?`/`gcd`/`lcm`/`sinh`/`cosh`/`tanh`/`square-root`/
+  `absolute`); eval reflection (`dump`/`errors`); module extras (`exports-of`);
+  refinement expansion on `find`/`append`/`copy`/`replace`/`round`/`parse`.
+  `quote`/`meta`/`uneval`/`eval-set`/`stop?` dropped (audit
+  misidentifications); `math` eval-order mode + user-level `trace` demoted
+  to v0.11. See `plan13-feature-parity.md`.
 - Optional/deferred: shared-cell closures, `unimport`, reactivity (v0.8);
   concurrency (v0.8); `regex!`/`struct!`/`handle!` (v0.8, alongside
   `routine!` FFI); `ref!` (internal C-level reference, no script surface);

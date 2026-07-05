@@ -581,6 +581,10 @@ pub struct ObjectDef {
     pub ctx: Rc<Context>,
     pub parent: Option<Rc<RefCell<ObjectDef>>>,
     pub self_word: Symbol,
+    /// M131: `protect` flag — when true, mutating ops (`poke`/`append`/`insert`
+    /// /`change`/`remove`/`clear`/`take` + `SetPath` field writes) error cleanly
+    /// via `check_protected` instead of mutating. `unprotect` clears it.
+    pub protected: RefCell<bool>,
 }
 
 impl Default for ObjectDef {
@@ -595,6 +599,7 @@ impl ObjectDef {
             ctx: Rc::new(Context::new()),
             parent: None,
             self_word: Symbol::new("self"),
+            protected: RefCell::new(false),
         }
     }
 }

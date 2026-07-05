@@ -13,6 +13,7 @@
 
 pub mod binding;
 pub mod bitset;
+pub mod codec;
 pub mod convert;
 pub mod hash;
 pub mod image;
@@ -28,9 +29,11 @@ pub mod net;
 pub mod object;
 pub mod parse;
 pub mod path;
+pub mod reflection;
 pub mod series;
 pub mod stdlib;
 pub mod strings;
+pub mod typeset;
 pub mod vector;
 pub mod vm;
 

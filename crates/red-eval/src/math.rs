@@ -1600,6 +1600,7 @@ fn round_native(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Val
         None => return Err(num_type_err(&args[0])),
     };
     let even = refs.has(&Symbol::new("even"));
+    let mode = round_mode(refs);
 
     // `/to scale` — round to the nearest multiple of `scale`. Returns a value
     // of the same numeric kind as the input.
@@ -1620,7 +1621,7 @@ fn round_native(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Val
         if scale == 0.0 {
             return Err(native_err(&args[0], "round: /to scale must not be zero"));
         }
-        let n = round_half(x / scale, even);
+        let n = round_with_mode(x / scale, mode, even);
         let result = n * scale;
         return Ok(match &args[0] {
             Value::Integer { .. } => Value::integer(result as i64),
@@ -1629,8 +1630,67 @@ fn round_native(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Val
     }
 
     // No scale: round to the nearest integer (Red returns an integer here).
-    let n = round_half(x, even) as i64;
+    let n = round_with_mode(x, mode, even) as i64;
     Ok(Value::integer(n))
+}
+
+#[derive(Clone, Copy)]
+enum RoundMode {
+    HalfUp, // default
+    Floor,
+    Ceiling,
+    Down, // toward zero
+    Up,   // away from zero
+    HalfDown,
+}
+
+fn round_mode(refs: &RefineArgs) -> RoundMode {
+    if refs.has(&Symbol::new("floor")) {
+        RoundMode::Floor
+    } else if refs.has(&Symbol::new("ceiling")) {
+        RoundMode::Ceiling
+    } else if refs.has(&Symbol::new("down")) {
+        RoundMode::Down
+    } else if refs.has(&Symbol::new("up")) {
+        RoundMode::Up
+    } else if refs.has(&Symbol::new("half-down")) {
+        RoundMode::HalfDown
+    } else {
+        RoundMode::HalfUp
+    }
+}
+
+fn round_with_mode(x: f64, mode: RoundMode, even: bool) -> f64 {
+    match mode {
+        RoundMode::Floor => x.floor(),
+        RoundMode::Ceiling => x.ceil(),
+        RoundMode::Down => x.trunc(),
+        RoundMode::Up => {
+            if x >= 0.0 {
+                x.ceil()
+            } else {
+                x.floor()
+            }
+        }
+        RoundMode::HalfDown => {
+            let frac = x - x.trunc();
+            if frac.abs() < 0.5 {
+                x.trunc()
+            } else if frac.abs() > 0.5 {
+                x.round()
+            } else {
+                // exact half → toward zero
+                x.trunc()
+            }
+        }
+        RoundMode::HalfUp => {
+            if even {
+                round_half(x, true)
+            } else {
+                round_half(x, false)
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2065,13 +2125,22 @@ pub fn register_math_natives(env: &mut Env) {
     reg(env, "min", min_native as NF, 2, false);
     reg(env, "max", max_native as NF, 2, false);
 
-    // round (+ /to + /even).
+    // round (+ /to + /even + M136 /down /up /floor /ceiling /half-down /half-up).
     reg_refined(
         env,
         "round",
         round_native as NF,
         1,
-        &[("to", 1), ("even", 0)],
+        &[
+            ("to", 1),
+            ("even", 0),
+            ("down", 0),
+            ("up", 0),
+            ("floor", 0),
+            ("ceiling", 0),
+            ("half-down", 0),
+            ("half-up", 0),
+        ],
     );
 
     // random (+ /seed + /only + /secure). `/seed` reuses the positional value
@@ -2097,6 +2166,177 @@ pub fn register_math_natives(env: &mut Env) {
     reg(env, "complement", complement_native as NF, 1, false);
     reg(env, "shift-left", shift_left as NF, 2, false);
     reg(env, "shift-right", shift_right as NF, 2, false);
+}
+
+// ---------------------------------------------------------------------------
+// M133: math helper natives
+// ---------------------------------------------------------------------------
+
+fn floor_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "floor")?;
+    Ok(Value::float(x.floor()))
+}
+fn ceiling_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "ceiling")?;
+    Ok(Value::float(x.ceil()))
+}
+fn truncate_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "truncate")?;
+    Ok(Value::float(x.trunc()))
+}
+
+fn num_sign(v: &Value) -> Option<i64> {
+    match as_number(v)? {
+        Num::Int(n) => Some(n.signum()),
+        Num::Float(f) => Some(if f > 0.0 {
+            1
+        } else if f < 0.0 {
+            -1
+        } else {
+            0
+        }),
+    }
+}
+
+fn zero_predicate(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "zero?", 1, args.len()));
+    }
+    let zero = match as_number(&args[0]) {
+        Some(Num::Int(n)) => n == 0,
+        Some(Num::Float(f)) => f == 0.0,
+        None => return Err(num_type_err(&args[0])),
+    };
+    Ok(Value::Logic(zero))
+}
+fn positive_predicate(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "positive?", 1, args.len()));
+    }
+    let pos = match as_number(&args[0]) {
+        Some(Num::Int(n)) => n > 0,
+        Some(Num::Float(f)) => f > 0.0,
+        None => return Err(num_type_err(&args[0])),
+    };
+    Ok(Value::Logic(pos))
+}
+fn negative_predicate(
+    args: &[Value],
+    _refs: &RefineArgs,
+    _env: &mut Env,
+) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "negative?", 1, args.len()));
+    }
+    let neg = match as_number(&args[0]) {
+        Some(Num::Int(n)) => n < 0,
+        Some(Num::Float(f)) => f < 0.0,
+        None => return Err(num_type_err(&args[0])),
+    };
+    Ok(Value::Logic(neg))
+}
+
+fn sign_of(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "sign-of", 1, args.len()));
+    }
+    match num_sign(&args[0]) {
+        Some(s) => Ok(Value::integer(s)),
+        None => Err(num_type_err(&args[0])),
+    }
+}
+
+fn gcd_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity_err(args, "gcd", 2, args.len()));
+    }
+    let a = match as_number(&args[0]) {
+        Some(Num::Int(n)) => n.abs(),
+        _ => return Err(num_type_err(&args[0])),
+    };
+    let b = match as_number(&args[1]) {
+        Some(Num::Int(n)) => n.abs(),
+        _ => return Err(num_type_err(&args[1])),
+    };
+    Ok(Value::integer(gcd_u64(a as u64, b as u64) as i64))
+}
+fn lcm_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity_err(args, "lcm", 2, args.len()));
+    }
+    let a = match as_number(&args[0]) {
+        Some(Num::Int(n)) => n.abs(),
+        _ => return Err(num_type_err(&args[0])),
+    };
+    let b = match as_number(&args[1]) {
+        Some(Num::Int(n)) => n.abs(),
+        _ => return Err(num_type_err(&args[1])),
+    };
+    if a == 0 || b == 0 {
+        return Ok(Value::integer(0));
+    }
+    Ok(Value::integer((a / gcd_u64(a as u64, b as u64) as i64) * b))
+}
+
+fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+fn sinh_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "sinh")?;
+    Ok(Value::float(x.sinh()))
+}
+fn cosh_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "cosh")?;
+    Ok(Value::float(x.cosh()))
+}
+fn tanh_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let x = as_float_arg(args, "tanh")?;
+    Ok(Value::float(x.tanh()))
+}
+
+/// Register M133 math helpers.
+pub fn register_math_helper_natives(env: &mut Env) {
+    use std::rc::Rc;
+    let reg = |env: &mut Env, name: &str, f: NF, arity: usize| {
+        let params: Vec<Symbol> = (0..arity)
+            .map(|i| Symbol::new(&format!("__arg{i}")))
+            .collect();
+        env.natives.insert(
+            Symbol::new(name),
+            Rc::new(FuncDef {
+                params,
+                native: Some(f),
+                variadic: false,
+                infix: false,
+                ..Default::default()
+            }),
+        );
+    };
+    reg(env, "floor", floor_native as NF, 1);
+    reg(env, "ceiling", ceiling_native as NF, 1);
+    reg(env, "truncate", truncate_native as NF, 1);
+    reg(env, "zero?", zero_predicate as NF, 1);
+    reg(env, "positive?", positive_predicate as NF, 1);
+    reg(env, "negative?", negative_predicate as NF, 1);
+    reg(env, "sign-of", sign_of as NF, 1);
+    reg(env, "sign?", sign_of as NF, 1);
+    reg(env, "gcd", gcd_native as NF, 2);
+    reg(env, "lcm", lcm_native as NF, 2);
+    reg(env, "sinh", sinh_native as NF, 1);
+    reg(env, "cosh", cosh_native as NF, 1);
+    reg(env, "tanh", tanh_native as NF, 1);
+    reg(env, "square-root", sqrt_native as NF, 1);
+    reg(env, "absolute", abs_native as NF, 1);
 }
 
 /// Register the M40 trig + transcendental natives. All prefix-only, arity 1

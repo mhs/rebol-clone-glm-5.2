@@ -1,0 +1,3 @@
+make typeset! [float! integer!]
+true
+false

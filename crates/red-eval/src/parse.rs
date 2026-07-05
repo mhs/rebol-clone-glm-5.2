@@ -459,21 +459,58 @@ pub fn parse_native(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<
 
     let case_sensitive = refs.has(&Symbol::new("case"));
 
+    // M136: `/part length` — limit the input to the first `length` elements
+    // (chars for string!, values for block!). `/all` is declared for parity
+    // but a no-op: the default already requires full input consumption.
+    let part_len = refs
+        .get(&Symbol::new("part"))
+        .and_then(|a| a.first())
+        .and_then(|v| {
+            if let Value::Integer { n, .. } = v {
+                Some(*n as usize)
+            } else {
+                None
+            }
+        });
+
     let mut input = match &args[0] {
-        Value::String { s, .. } => Input::Str {
-            src: Rc::clone(s),
-            cursor: 0,
-        },
-        Value::Block { series, span } => Input::Series {
-            series: series.clone(),
-            is_paren: false,
-            span: *span,
-        },
-        Value::Paren { series, span } => Input::Series {
-            series: series.clone(),
-            is_paren: true,
-            span: *span,
-        },
+        Value::String { s, .. } => {
+            let src = if let Some(n) = part_len {
+                let end = n.min(s.chars().count());
+                Rc::from(s.chars().take(end).collect::<String>().as_str())
+            } else {
+                Rc::clone(s)
+            };
+            Input::Str { src, cursor: 0 }
+        }
+        Value::Block { series, span } => {
+            let s = if let Some(n) = part_len {
+                let d = series.data.borrow();
+                let end = (series.index + n).min(d.len());
+                Series::new(d[series.index..end].to_vec())
+            } else {
+                series.clone()
+            };
+            Input::Series {
+                series: s,
+                is_paren: false,
+                span: *span,
+            }
+        }
+        Value::Paren { series, span } => {
+            let s = if let Some(n) = part_len {
+                let d = series.data.borrow();
+                let end = (series.index + n).min(d.len());
+                Series::new(d[series.index..end].to_vec())
+            } else {
+                series.clone()
+            };
+            Input::Series {
+                series: s,
+                is_paren: true,
+                span: *span,
+            }
+        }
         other => {
             return Err(EvalError::TypeError {
                 expected: "string! or block!",
