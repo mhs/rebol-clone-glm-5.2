@@ -20,9 +20,10 @@ pub use source::LineMap;
 pub use value::{
     Binding, BitsetDef, ClosureDef, DateValue, ErrorValue, FuncDef, HashDef, ImageDef, MapDef,
     MapKey, ModuleDef, MoneyValue, ObjectDef, PortDef, PortScheme, PortState, Series, Span, Symbol,
-    Value, VectorDef,
+    TypesetDef, Value, VectorDef,
 };
 // M45: re-export the chrono types used in `DateValue` so downstream crates
 // (red-eval) can construct/inspect dates without a direct chrono dependency.
-pub use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+// M140: also re-export `chrono::Duration` for the `duration!` value type.
+pub use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
 pub use vm_ir::{disasm, disasm_with_spans, CompiledBlock, Frame, Instr};

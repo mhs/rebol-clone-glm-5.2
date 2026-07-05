@@ -414,6 +414,16 @@ pub(crate) fn date_predicate(
     pred1(args, "date?", |v| matches!(v, Value::Date { .. }))
 }
 
+/// `duration?` — true for `duration!` (`Value::Duration`). M140. A distinct
+/// scalar type; NOT a member of `number!` (mirrors `money!`'s precedent).
+pub(crate) fn duration_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "duration?", |v| matches!(v, Value::Duration { .. }))
+}
+
 /// `bitset?` — true for `bitset!` (`Value::Bitset`). M46.
 pub(crate) fn bitset_predicate(
     args: &[Value],
@@ -686,6 +696,7 @@ pub(crate) fn register_word_predicate_natives(env: &mut Env) {
     reg(env, "pair?", pair_predicate);
     reg(env, "tuple?", tuple_predicate);
     reg(env, "date?", date_predicate);
+    reg(env, "duration?", duration_predicate);
     reg(env, "time?", time_predicate);
     reg(env, "bitset?", bitset_predicate);
     reg(env, "error?", error_predicate);

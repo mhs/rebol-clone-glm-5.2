@@ -684,6 +684,7 @@ fn compile_prefix(
         | Value::Tuple { .. }
         | Value::String8 { .. }
         | Value::Date { .. }
+        | Value::Duration { .. }
         | Value::LitWord { .. }
         | Value::Block { .. }
         | Value::Func(_)
@@ -699,7 +700,8 @@ fn compile_prefix(
         | Value::Vector(_)
         | Value::Image(_)
         | Value::Bitset(_)
-        | Value::Port(_) => {
+        | Value::Port(_)
+        | Value::Typeset(_) => {
             let idx = c.push_const(cur.clone());
             c.emit(Instr::Const(idx));
         }
@@ -1304,6 +1306,7 @@ fn compile_user_call(
         refinements: Vec::new(),
         locals: Vec::new(),
         freevars: Vec::new(),
+        param_types: Vec::new(),
         compiled: None,
         body: Series::empty(),
         ctx: Context::new(),
@@ -1536,6 +1539,7 @@ fn compile_make_func(
             params: Vec::new(),
             refinements: Vec::new(),
             locals: Vec::new(),
+            param_types: Vec::new(),
         }
     } else {
         extract_spec(&spec_val).map_err(|_| CompileError {

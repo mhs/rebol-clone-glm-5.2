@@ -420,6 +420,7 @@ fn math_err(from: &Value, msg: impl Into<String>) -> EvalError {
 // ---------------------------------------------------------------------------
 
 /// `date + integer` → date + N days (zone preserved).
+/// `date + duration` → date + duration (M141, zone preserved).
 /// `date + date` (time-shaped) → date+time (the second date contributes its
 /// time component). `date + date` (full date) → TypeError.
 /// Returns `Some(result)` if either operand is a `date!`; `None` otherwise.
@@ -440,6 +441,14 @@ fn date_add(args: &[Value]) -> Result<Option<Value>, EvalError> {
         (Value::Integer { n, .. }, Value::Date { dt, .. }) => {
             Ok(Some(Value::date(dt.add_days(*n))))
         }
+        // M141: `date + duration` → date (zone preserved).
+        (Value::Date { dt, .. }, Value::Duration { d, .. }) => {
+            Ok(Some(Value::date(dt.add_duration(*d))))
+        }
+        // M141: `duration + date` → date (commutative).
+        (Value::Duration { d, .. }, Value::Date { dt, .. }) => {
+            Ok(Some(Value::date(dt.add_duration(*d))))
+        }
         // `date + date` → only valid if the second is time-shaped (epoch date).
         // The result is the first date with the second's time component.
         (Value::Date { dt: da, .. }, Value::Date { dt: db, .. }) => {
@@ -449,7 +458,7 @@ fn date_add(args: &[Value]) -> Result<Option<Value>, EvalError> {
                 Ok(Some(Value::date(da.with_time(db.dt.time()))))
             } else {
                 Err(EvalError::TypeError {
-                    expected: "integer! or time! (date + date not supported)",
+                    expected: "integer!, duration!, or time! (date + date not supported)",
                     found: "date!",
                     span: b.span_or_default(),
                 })
@@ -459,21 +468,24 @@ fn date_add(args: &[Value]) -> Result<Option<Value>, EvalError> {
     }
 }
 
-/// `date - date` → integer (day difference, zone-adjusted on the absolute
-/// instant). Returns `Some(result)` if both operands are `date!`; `None`
+/// `date - date` → duration! (M141 behavior change: was `integer!` day count;
+/// now full nanosecond precision, zone-adjusted). `date - duration` → date.
+/// Returns `Some(result)` if at least one operand is a `date!`; `None`
 /// otherwise.
 fn date_subtract(args: &[Value]) -> Result<Option<Value>, EvalError> {
     let a = &args[0];
     let b = &args[1];
     match (a, b) {
+        // M141: `date - date` → duration! (full precision, zone-adjusted).
         (Value::Date { dt: da, .. }, Value::Date { dt: db, .. }) => {
-            // Compute the day difference on the absolute instant (zone-adjusted).
             let a_utc = da.to_offset_utc();
             let b_utc = db.to_offset_utc();
-            let a_date = a_utc.date_naive();
-            let b_date = b_utc.date_naive();
-            let diff = (a_date - b_date).num_days();
-            Ok(Some(Value::integer(diff)))
+            let diff = a_utc.signed_duration_since(b_utc);
+            Ok(Some(Value::duration(diff)))
+        }
+        // M141: `date - duration` → date (zone preserved).
+        (Value::Date { dt, .. }, Value::Duration { d, .. }) => {
+            Ok(Some(Value::date(dt.sub_duration(*d))))
         }
         _ => Ok(None),
     }
@@ -748,6 +760,133 @@ fn money_binop(args: &[Value], op: &str) -> Result<Option<Value>, EvalError> {
     }
 }
 
+/// M141: `duration!` binary arithmetic dispatcher. Returns `Some(value)`
+/// when at least one operand is a `duration!`; `None` otherwise (so non-
+/// duration operands fall through to the next dispatcher in the chain).
+///
+/// - `duration ± duration → duration` (chrono `Duration + Duration`).
+/// - `duration * integer` / `duration * float → duration` (scaled).
+/// - `duration / integer` / `duration / float → duration`.
+/// - `duration / duration → float` (the ratio — "how many times does X fit").
+/// - `duration * duration` → TypeError (meaningless).
+/// - `duration ± integer`/`float` → TypeError (strict-typed; require explicit
+///   `to-duration`).
+fn duration_binop(args: &[Value], op: &str) -> Result<Option<Value>, EvalError> {
+    use red_core::Duration;
+    let a = &args[0];
+    let b = &args[1];
+    let a_d = matches!(a, Value::Duration { .. });
+    let b_d = matches!(b, Value::Duration { .. });
+    if !a_d && !b_d {
+        return Ok(None);
+    }
+    let dur = |v: &Value| -> Duration {
+        match v {
+            Value::Duration { d, .. } => *d,
+            _ => unreachable!(),
+        }
+    };
+    let as_scalar = |v: &Value| -> Result<f64, EvalError> {
+        match v {
+            Value::Integer { n, .. } => Ok(*n as f64),
+            Value::Float { f, .. } => Ok(*f),
+            _ => Err(EvalError::TypeError {
+                expected: "integer! or float!",
+                found: type_name(v),
+                span: v.span_or_default(),
+            }),
+        }
+    };
+
+    // duration OP duration.
+    if a_d && b_d {
+        let da = dur(a);
+        let db = dur(b);
+        return Ok(Some(match op {
+            "add" => Value::duration(da + db),
+            "subtract" | "subtraction" => Value::duration(da - db),
+            "divide" => {
+                let db_ns = db.num_nanoseconds().unwrap_or(0) as f64;
+                if db_ns == 0.0 {
+                    return Err(EvalError::Native {
+                        message: "duration error: divide by zero".into(),
+                        span: a.span_or_default(),
+                    });
+                }
+                let da_ns = da.num_nanoseconds().unwrap_or(0) as f64;
+                Value::float(da_ns / db_ns)
+            }
+            "multiply" => {
+                return Err(EvalError::TypeError {
+                    expected: "scalar (duration * duration is not supported)",
+                    found: "duration!",
+                    span: a.span_or_default(),
+                });
+            }
+            _ => return Ok(None),
+        }));
+    }
+
+    // duration OP scalar, or scalar OP duration (only * and / are commutative;
+    // + and - with a scalar are type errors).
+    let (dur_val, scalar_val, dur_first) = if a_d {
+        (dur(a), b, true)
+    } else {
+        (dur(b), a, false)
+    };
+    match op {
+        "add" | "subtract" | "subtraction" => Err(EvalError::TypeError {
+            expected: "duration! (strict-typed; use to-duration for scalars)",
+            found: type_name(scalar_val),
+            span: scalar_val.span_or_default(),
+        }),
+        "multiply" => {
+            // Commutative: duration * scalar == scalar * duration.
+            let s = as_scalar(scalar_val)?;
+            let ns = dur_val.num_nanoseconds().unwrap_or(0) as f64;
+            let r = ns * s;
+            let nanos = r as i128;
+            let saturated = if nanos > i64::MAX as i128 {
+                i64::MAX
+            } else if nanos < i64::MIN as i128 {
+                i64::MIN
+            } else {
+                nanos as i64
+            };
+            Ok(Some(Value::duration(Duration::nanoseconds(saturated))))
+        }
+        "divide" => {
+            // Only duration / scalar (scalar / duration is a type error).
+            if !dur_first {
+                return Err(EvalError::TypeError {
+                    expected: "duration!",
+                    found: type_name(a),
+                    span: a.span_or_default(),
+                });
+            }
+            let s = as_scalar(scalar_val)?;
+            if s == 0.0 {
+                return Err(EvalError::Native {
+                    message: "duration error: divide by zero".into(),
+                    span: a.span_or_default(),
+                });
+            }
+            let ns = dur_val.num_nanoseconds().unwrap_or(0) as f64;
+            let r = ns / s;
+            let nanos = r as i128;
+            let saturated = if nanos > i64::MAX as i128 {
+                i64::MAX
+            } else if nanos < i64::MIN as i128 {
+                i64::MIN
+            } else {
+                nanos as i64
+            };
+            Ok(Some(Value::duration(Duration::nanoseconds(saturated))))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// M84: vector! binary arithmetic dispatcher. Returns `Some(value)` when at
 /// least one operand is a `vector!`; `None` otherwise (so non-vector operands
 /// fall through to the next dispatcher in the chain).
@@ -947,6 +1086,10 @@ pub(crate) fn add(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<
     if let Some(r) = money_binop(args, "add")? {
         return Ok(r);
     }
+    // M141: duration arithmetic (duration + duration → duration).
+    if let Some(r) = duration_binop(args, "add")? {
+        return Ok(r);
+    }
     // M84: vector arithmetic (componentwise; broadcast scalar).
     if let Some(r) = vector_binop(args, "add")? {
         return Ok(r);
@@ -996,6 +1139,10 @@ pub(crate) fn subtract(
     if let Some(r) = money_binop(args, "subtract")? {
         return Ok(r);
     }
+    // M141: duration arithmetic (duration - duration → duration).
+    if let Some(r) = duration_binop(args, "subtract")? {
+        return Ok(r);
+    }
     // M84: vector subtraction (componentwise; broadcast scalar).
     if let Some(r) = vector_binop(args, "subtract")? {
         return Ok(r);
@@ -1021,6 +1168,10 @@ pub(crate) fn multiply(
     }
     // M80: money * integer → money (integer * money → money).
     if let Some(r) = money_binop(args, "multiply")? {
+        return Ok(r);
+    }
+    // M141: duration * scalar → duration.
+    if let Some(r) = duration_binop(args, "multiply")? {
         return Ok(r);
     }
     // M84: vector multiplication (componentwise; broadcast scalar).
@@ -1064,6 +1215,10 @@ pub(crate) fn divide(
     }
     // M80: money / money → float (ratio); money / integer → money.
     if let Some(r) = money_binop(args, "divide")? {
+        return Ok(r);
+    }
+    // M141: duration / scalar → duration; duration / duration → float.
+    if let Some(r) = duration_binop(args, "divide")? {
         return Ok(r);
     }
     // M84: vector division (componentwise; broadcast scalar; int-kind `/`
@@ -1143,6 +1298,8 @@ fn abs_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Valu
         Value::Money { amount, .. } => {
             Ok(Value::money(amount.cents.abs(), amount.currency.clone()))
         }
+        // M142: abs on a duration → the magnitude (preserves the duration type).
+        Value::Duration { d, .. } => Ok(Value::duration(d.abs())),
         // M44: abs on a pair → componentwise abs.
         Value::Pair { x, y, .. } => {
             let nx = abs_one(x)?;
@@ -1181,6 +1338,8 @@ fn negate_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<V
             amount.cents.wrapping_neg(),
             amount.currency.clone(),
         )),
+        // M142: negate on a duration → negation.
+        Value::Duration { d, .. } => Ok(Value::duration(-*d)),
         // M44: negate on a pair → componentwise negate.
         Value::Pair { x, y, .. } => {
             let nx = negate_one(x)?;

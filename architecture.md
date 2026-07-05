@@ -76,6 +76,8 @@ pub struct FuncDef {
     pub params: Vec<Symbol>,
     pub refinements: Vec<(Symbol, Vec<Symbol>)>,  // (refinement word, its arg words) — M13
     pub locals: Vec<Symbol>,                      // explicit `<local>` words for `function` — M16
+    pub freevars: Vec<Symbol>,                    // M23 lexical capture list
+    pub param_types: Vec<Option<Rc<TypesetDef>>>, // M89 per-param runtime type-check; None = unchecked
     pub body: Series,
     pub ctx: Context,            // definition context (owned; cloned per call)
     pub native: Option<NativeFn>,
@@ -117,6 +119,28 @@ pub struct MapDef {                             // M43 — insertion-ordered, he
 }
 // API: new(), get(&MapKey), set(MapKey, Value), remove(&MapKey), len(),
 //      keys() -> Vec<Value>, values() -> Vec<Value>
+
+pub struct MoneyValue {                          // M80 — fixed-point currency (integer cents + 3-letter code)
+    pub cents: i64,                              // $10.00 ⇒ 1000 (no floating point)
+    pub currency: Rc<str>,                        // default "USD"; mold appends `:EUR` etc. for non-USD
+}
+// API: new(cents, currency), MoneyValue::parse("$1,234.56:EUR") (lexer)
+//      → strips commas, accepts ≥2 fractional digits, 3-letter ccy suffix.
+//      Arithmetic: same-ccy `+`/`-` preserves money!; cross-ccy → EvalError::Native
+//      ("money error: currency mismatch (CCA vs CCB)"). `money / money` → float (ratio).
+
+pub struct HashDef {                             // M83 — unordered key→value table (HashMap-backed)
+    pub entries: RefCell<HashMap<MapKey, Value>>, // real HashMap, NOT indexmap (unspecified order — Red parity)
+    pub key_order: RefCell<Vec<MapKey>>,         // insertion-order side vec for `keys-of`/mold
+                                                  // determinism in tests only (documented deviation
+                                                  // from Red's unspecified `keys-of hash!`)
+}
+// API: new(), get(&MapKey), set(MapKey, Value), remove(&MapKey), len(),
+//      keys() -> Vec<Value> (via key_order), values() -> Vec<Value> (via key_order),
+//      pick(idx)/poke(idx, value) — alternating key/value series access (see below).
+//      Distinct from `map!`: (1) `series?` true; (2) iteration order unspecified
+//      (Red parity — `hash!` is the perf table, `map!` is the ordered one);
+//      (3) `=` is order-independent (deep equality on entries).
 
 pub struct BitsetDef {                          // M46 — bit-packed byte set
     pub bits: RefCell<Vec<u64>>,
@@ -161,6 +185,27 @@ pub struct ImageDef {                           // M85 — fixed-size 2D RGBA8 p
 //      (the lexer only supports `word:`/`digit:` set-path tails); use
 //      `poke img n tuple` for pixel writes.
 
+pub struct TypesetDef {                          // M89 — set of type-word symbols for runtime type-checking
+    pub types: RefCell<HashSet<Symbol>>,         // 'integer!/'float!/'any-word!/'number!/...
+}
+// API: new(syms), from_words(&[&str]), is_known_type_word(&Symbol) -> bool,
+//      accepts(&Value) -> bool (the runtime type-check — true iff
+//      `type_name_for(v)` is in the set literally OR a group word
+//      (`any-word!`/`any-path!`/`any-string!`/`any-block!`/`any-object!`/
+//      `any-function!`/`number!`/`series!`/`any-type!`) in the set covers
+//      `v`), sorted_words() -> Vec<Symbol> (stable mold order), len()/is_empty().
+//      Stored on `FuncDef.param_types: Vec<Option<Rc<TypesetDef>>>`
+//      (parallel to `params`; `None` = unchecked, back-compat). The func
+//      spec parser (`extract_spec` in `natives/func.rs`) recognizes a
+//      `[type! ...]` block immediately following a positional param word
+//      and builds a `Rc<TypesetDef>` for that slot. Both walker and VM
+//      call paths check `param_types[i].accepts(arg)` before binding; on
+//      failure they raise `EvalError::Native` with a
+//      `"type error: arg N expected [ts], got <found>"` message (the
+//      `TypeError.expected: &'static str` field is too narrow for a dynamic
+//      typeset label). Typeset *algebra* (`union`/`intersect`/`complement`)
+//      deferred to v0.8.
+
 pub struct DateValue {                          // M45 — single variant covers date-only / date+time / date+time+zone
     pub dt: chrono::NaiveDateTime,
     pub zone: Option<i32>,                      // minutes east of UTC; None = zone-naive (matches Red's date!/zone)
@@ -204,17 +249,23 @@ pub struct PortDef {                               // M113 — synchronous port!
 // API: new(scheme, target) -> Rc<RefCell<PortDef>>
 ```
 
-### Value variants (v0.5)
+### Value variants (v0.7)
 
 ```rust
 pub enum Value {
-    None, Logic(bool),
+    None, Unset,                                            // unset! — M86 (synthetic, no span)
+    Logic(bool),
     Integer { n: i64, span: Span },
     Float { f: f64, span: Span },
+    Percent { value: f64, span: Span },                     // 50% — M80 (stored fractional)
+    Money { amount: Rc<MoneyValue>, span: Span },            // $10.00 — M80 (int cents + ccy)
+    Issue { s: Rc<str>, span: Span },                       // #ABC — M80
+    Email { addr: Rc<str>, span: Span },                   // foo@bar.com — M80
+    Tag { text: Rc<str>, span: Span },                      // <b> — M81
     String { s: Rc<str>, span: Span },
     Word { sym, binding, span }, SetWord { .. }, GetWord { .. }, LitWord { .. },
     Block { series: Series, span: Span }, Paren { series: Series, span: Span },
-    Func(Rc<FuncDef>),                                    // synthetic — no span
+    Func(Rc<FuncDef>),                                    // synthetic — no span; `type?` → native!/op!/function! (M87)
     Path { parts: Vec<Value>, span: Span },              // foo/bar      — M19
     GetPath { parts: Vec<Value>, span: Span },           // :foo/bar     — M19
     LitPath { parts: Vec<Value>, span: Span },           // 'foo/bar     — M19
@@ -230,6 +281,7 @@ pub enum Value {
     Pair { x: Rc<Value>, y: Rc<Value>, span: Span },     // 100x200     — M44
     Tuple { bytes: Rc<[u8]>, span: Span },               // 255.0.0     — M44 (3 or 4 bytes)
     Date { dt: Rc<DateValue>, span: Span },              // 29-Jun-2024/12:30:00+5:30 — M45
+    Duration { d: chrono::Duration, span: Span },        // 30s / 1d1h — M140 (signed i64 nanos)
     Bitset(Rc<RefCell<BitsetDef>>),                      // charset "ABC" — M46 (synthetic, no span)
     Closure(Rc<ClosureDef>),                             // closure! — M60 (synthetic, no span)
     Module(Rc<RefCell<ModuleDef>>),                      // module! — M61 (synthetic, no span)
@@ -237,17 +289,20 @@ pub enum Value {
     Hash(Rc<RefCell<HashDef>>),                         // hash! — M83 (synthetic, no span)
     Vector(Rc<RefCell<VectorDef>>),                      // vector! — M84 (synthetic, no span)
     Image(Rc<RefCell<ImageDef>>),                        // image! — M85 (synthetic, no span)
+   Typeset(Rc<TypesetDef>),                            // typeset! — M89 (synthetic, no span)
 }
 ```
 
-Every source-origin variant (`Integer`/`Float`/`String`/word-family/`Block`/`Paren`/
-`Path`/`GetPath`/`LitPath`/`SetPath`/`Refinement`/`File`/`Url`/`Char`/`String8`/
-`Pair`/`Tuple`/`Date`) carries the byte-offset `Span` of its originating token so
-eval-time errors can render `file:line:col:`. Synthetic variants (`None`/`Logic`/
-`Func`/`Error`/`Object`/`Map`/`Bitset`/`Closure`/`Module`/`Port`/`Hash`/`Vector`/`Image`)
-are produced at runtime and carry no span; error rendering falls back to the
-call-site span (the originating `closure`/`module`/`open`/`make` native call's
-span, attached to the `EvalError`).
+Every source-origin variant (`Integer`/`Float`/`Percent`/`Money`/`Issue`/
+`Email`/`Tag`/`String`/word-family/`Block`/`Paren`/`Path`/`GetPath`/`LitPath`/
+`SetPath`/`Refinement`/`File`/`Url`/`Char`/`String8`/`Pair`/`Tuple`/`Date`)
+carries the byte-offset `Span` of its originating token so eval-time errors
+can render `file:line:col:`. Synthetic variants (`None`/`Unset`/`Logic`/
+`Func`/`Error`/`Object`/`Map`/`Bitset`/`Closure`/`Module`/`Port`/`Hash`/
+`Vector`/`Image`/`Typeset`) are produced at runtime and carry no span;
+error rendering falls back to the call-site span (the originating
+`closure`/`module`/`open`/`make` native call's span, attached to the
+`EvalError`).
 
 `Value`, `Context`, `Env`, `EvalError` defined as in the brief. Span flow is
 covered above — synthetic variants omit the span and fall back to `Span::new(0,0)`
@@ -274,6 +329,12 @@ pub enum TokenKind {
     Pair(i64, i64),        // 100x200 — M44 (also Float×Float via scan_pair)
     Tuple(Rc<[u8]>),       // 255.0.0 / 128.64.32.128 — M44
     Date(Rc<DateValue>),   // 29-Jun-2024[/12:30:00[+5:30]] / 12:30:00-04:00 — M45
+    Duration(chrono::Duration), // 30s / 1.5h / 250ms / 1d1h — M140 (signed i64 nanos)
+    Percent(f64),          // 50% — M80 (stored fractional: 50% ⇒ 0.5)
+    Money(MoneyValue),     // $10.00 / $1,234.56:EUR — M80 (int cents + ccy)
+    Issue(Rc<str>),        // #ABC — M80 (`#`-led run; `#"`/`#{` dispatch first)
+    Email(Rc<str>),        // foo@bar.com — M80 (word run with `@` + host dot)
+    Tag(Rc<str>),          // <b> / <img src="x"> — M81 (raw body between <…>)
     LBracket, RBracket,
     LParen,  RParen,
 }
@@ -289,6 +350,11 @@ pub enum LexError {
     InvalidTuple { span: Span, chars: String },       // M44 — malformed R.G.B
     InvalidDate { span: Span, chars: String },        // M45 — bad DD-Mon-YYYY / out-of-range
     InvalidZone { span: Span, chars: String },        // M45 — bad ±HH:MM suffix
+    InvalidPercent { span: Span, chars: String },      // M80 — `NN%` overflow (raw f64 not finite)
+    InvalidMoney { span: Span, chars: String },       // M80 — malformed `$…` (non-digit, >2 frac, bad ccy)
+    InvalidIssue { span: Span, chars: String },       // M80 — `#` followed by whitespace/delimiter
+    InvalidEmail { span: Span, chars: String },       // M80 — `@` with empty local/host or no host dot
+    UnterminatedTag { span: Span, chars: String },    // M81 — `<…` hit EOF before `>`
 }
 
 pub struct Token {
@@ -545,6 +611,12 @@ pub struct Env {
     pub out: Box<dyn Write>,                   // stdout sink; tests inject a buffer
     pub allow_shell: bool,                     // M20: gates `call`/`shell`
     pub allow_network: bool,                   // M113: gates `open url!`/`read url!`/HTTP-port reads (default off)
+    pub unset_on_unbound: bool,                // M86: when true, an unbound word evaluates to `Value::Unset`
+                                               //   instead of raising `EvalError::UnboundWord`. Default false
+                                               //   (back-compat — all existing unbound-word fixtures stay green).
+                                               //   Toggled by the `--unset-on-unbound` CLI flag. Both the
+                                               //   walker's `resolve_word` `Unbound` arm and the VM's
+                                               //   `LoadDynamic` arm consult this gate.
     pub cwd: PathBuf,                          // M20: base dir for file I/O
     pub mode: EvalMode,                        // M29: `Vm` (default) or `Walk`
     // VM compiled-block caches (M27) + scratch Vec pools (M30.1.C/M30.3.2) —
@@ -649,9 +721,11 @@ fn resolve_word(sym, binding, env, span) -> Result<Value, EvalError>:
     Closure(idx)     => Ok(env.call_stack.last().unwrap().captures.as_ref().unwrap()[idx].borrow().clone()),
     Unbound          =>
       // M62 behavior change: consult user_ctx *first* (so `import`/`set`
-      // aliases resolve), then the native registry, then error.
+      // aliases resolve), then the native registry, then error (or
+      // M86-gated: return `Value::Unset` instead of erroring).
       if let Some(v) = env.user_ctx.get(sym): Ok(v)
       else if let Some(fd) = env.natives.get(sym): Ok(Value::Func(fd.clone()))
+      else if env.unset_on_unbound: Ok(Value::Unset)   // M86 — gated, default off
       else: Err(UnboundWord { sym, span })
 ```
 
@@ -659,7 +733,12 @@ fn resolve_word(sym, binding, env, span) -> Result<Value, EvalError>:
 required so `import`-aliased words resolve without AST re-walking. The
 VM's `LoadDynamic` already consulted `user_ctx`; the walker now matches.
 The walker bounds-checks `captures[idx]` (M65 parity with the VM's
-`LoadCapture`/`SetCapture` guards).)
+`LoadCapture`/`SetCapture` guards). **M86** adds the gated
+`unset_on_unbound` branch: when `Env.unset_on_unbound` is true (set by the
+`--unset-on-unbound` CLI flag, default false), a truly-unbound word
+evaluates to `Value::Unset` instead of raising `EvalError::UnboundWord`.
+The VM's `LoadDynamic` arm has the same gate. Default-off preserves
+back-compat — all existing unbound-word error fixtures stay green.)
 
 ### Native dispatch
 The `Env.natives` map stores `Rc<FuncDef>` (not bare `NativeFn`) so the
@@ -675,6 +754,34 @@ When a `Word` resolves to a `Value::Func(fd)` whose `native` is `Some(f)`:
   - Pop frame.
 - `return` native: `Err(EvalError::Return(value))` caught by the function
   call shim and converted to the return value.
+
+**M89 typed-func arg type-check:** `FuncDef.param_types: Vec<Option<Rc<TypesetDef>>>`
+is a parallel vec to `params` (`None` = unchecked, back-compat with all
+pre-M89 funcs). The func spec parser (`extract_spec` in `natives/func.rs`)
+recognizes a `[type! ...]` block immediately following a positional param
+word and builds a `Rc<TypesetDef>` for that slot. Both walker (`call_user_func`/
+`call_closure_func`) and VM (`prepare_call`) call paths run
+`check_param_types(fd, &args)` (walker) or inline the check (VM) before
+binding args: for each `i` where `param_types[i].is_some()`, they call
+`ts.accepts(&args[i])`; on failure they raise `EvalError::Native` with a
+`"type error: arg N expected [ts], got <found>"` message (the
+`TypeError.expected: &'static str` field is too narrow for a dynamic
+typeset label, so `Native` with a formatted message is used — the v0.7
+pattern for M80/M84/M85 rich errors). `typeset_label(ts)` molds the
+expected set as `[w1 | w2 | ...]`. The `param_types.is_empty()` fast path
+means pre-M89 funcs pay only one `Vec::is_empty` check per call.
+`TypesetDef::accepts` recognizes the `any-*` family (`any-word!`/`any-path!`/
+`any-string!`/`any-block!`/`any-object!`/`any-function!`/`number!`/`series!`/
+`any-type!`) via a `group_members(group)` table in `value.rs`.
+
+**M87 `native!`/`op!` split:** `Value::Func` keeps its `FuncDef.native`/
+`FuncDef.infix` flags (no sweeping match-arm refactor), but `type?`/
+`native?`/`op?`/`any-function?`/`types-of` report them as distinct types:
+a `Func` with `native.is_some() && !infix` is `native!`; with `infix` is
+`op!`; otherwise `function!`. `Value::Closure` is `closure!`.
+`native?`/`op?` are disjoint (`+` is `op!` not `native!`); `function?`/
+`any-function?` cover all four. `types-of` lists the umbrella
+`any-function!` alongside the specific word.
 
 ### Refinement dispatch (M13)
 A function spec may declare refinements: `func [x /with y]` populates
@@ -715,6 +822,11 @@ parser when a word is immediately followed by `/word` tokens. Evaluation:
   `Str`, `Char`→`Char`) and `MapDef::get` is called. Word keys also try the
   string form if the `Sym` lookup misses (so `m/foo` finds a `Str("foo")`
   key). `SetPath` (`m/word: value`) calls `MapDef::set`.
+- **Hash-headed** (`h/word`, `h/2`, `h/"str"` — M83) — mirrors the map-headed
+  rule: tail → `MapKey`, `HashDef::get`/`set`. `SetPath` (`h/key: value`)
+  calls `HashDef::set` (inserts/replaces the entry, appends to `key_order`
+  on first insertion). Order-independent `=` (two hashes with the same
+  entries in different insertion order are `equal?`).
 - **Pair-headed** (`p/x`, `p/y` — M44) — returns the `x`/`y` component.
   `SetPath` rebuilds an immutable `Pair` with the new component.
 - **Tuple-headed** (`t/r`/`t/g`/`t/b`/`t/a` — M44) — returns the byte at
@@ -724,6 +836,23 @@ parser when a word is immediately followed by `/word` tokens. Evaluation:
   for `time`/`zone` on a date-only value). `date/zone:` **relabels** the
   offset only (does not shift `dt`); accepts a time-shaped date, integer
   (minutes), or `none`. `to-utc` is the shift-and-relabel convenience.
+- **Email-headed** (`em/user`, `em/host` — M80) — returns the local part
+  (`user`) or host part (`host`) as a `string!`. `email/other` →
+  `EvalError::Native` ("email! has no field other (only /user and /host)").
+  No `SetPath` (email! is immutable).
+- **Vector-headed** (`v/integer`/`v/float`, `v/N` — M84) — `v/integer`
+  returns the kind word as a `word!` value (`'integer!`/`'float!`); `v/N`
+  is 1-based `pick` (returns `Integer`/`Float`, not a length-1 vector!).
+  `v/N: value` is path-as-poke (narrows to the vector's kind: clamp ints,
+  round floats).
+- **Image-headed** (`img/width`/`height`/`size`, `img/N`, `img/XxY` — M85)
+  — `img/width`/`img/height` → integer; `img/size` → pair (`width x
+  height`); `img/N` → flat 1-based pixel pick (returns a 4-byte
+  `tuple!`); `img/XxY` → coord pick (1-based coords, via `Word("/")` +
+  `Pair` parser folding). Integer `SetPath` (`img/N: tuple`) writes the
+  pixel; Pair `SetPath` (`img/2x1:`) is NOT supported (the lexer only
+  supports `word:`/`digit:` set-path tails); use `poke img n tuple` for
+  pixel writes.
 - **Literal-headed** (`100x200/x`, `255.0.0/r` — M44) — `parse_value` calls
   `assemble_path` for `Pair`/`Tuple` heads (and `Block` heads); the head
   value is the data itself (no word resolution), the tail walks via
@@ -797,6 +926,46 @@ operate on `block!`/`string!` (first-occurrence-order-preserving). The same
 native names dispatch on `bitset!` operands to the M46 implementations in
 `bitset.rs`. `sort`/`unique`/`intersect`/`union`/`difference`/`exclude` all
 support `/case` (string case-sensitivity) and `/skip size` (record-wise).
+
+**`hash!` series model (M83):** `hash!` IS a `series!` (unlike `map!`).
+`extract_series(&Value::Hash)` returns a positioned `Block` view over the
+flat alternating key/value pair sequence (`[k1 v1 k2 v2 ...]`). Series ops
+behave accordingly:
+- `length? h` → `2 * entry_count` (alternating).
+- `pick h N` → key at index `2n`, value at index `2n+1` (1-based).
+- `poke h N value` → writes at the corresponding slot (key slot if even
+  index, value slot if odd — the key slot poke updates `key_order` too).
+- `foreach [k v] h [...]` works (series iteration).
+- `select`/`find` (by key) — same as `map!`.
+- `append`/`insert` (as a series — append a key/value pair).
+- `clear`/`empty?`.
+Iteration order in `keys-of`/`values-of`/`mold` uses the side `key_order`
+vec for test determinism (documented deviation from Red's unspecified order).
+`same?` is `Rc::ptr_eq`; `=` is deep on entries, **order-independent**
+(unlike `map!`).
+
+**`vector!` series model (M84):** `vector!` IS a `series!`. `extract_series`
+returns a positioned `Block` view over the `Vec<Value>` element storage
+(`cursor`-aware). Cursored navigation (`next`/`back`/`at`/`skip`/`head`/
+`tail`/`index?`) returns positioned `Block` views via `extract_series` —
+**documented deviation from Red**, where these return a positioned series
+over the vector's own storage (mutations through the Block view's `poke`
+propagate via `Rc<RefCell<...>>` sharing; other mutations on the view do
+not propagate). `pick` returns the value as `Integer`/`Float` (not a
+length-1 vector!) — matches Red. `poke` accepts `Integer`/`Float` and
+**narrows to the vector's kind** (clamp ints on overflow; round floats).
+`length?`, `first`/`last`/`append`/`insert`/`change`/`remove`/`clear`/
+`take`/`copy` all work (as a series of typed elements). Arithmetic: `vec +
+vec` (same kind, componentwise; error on length mismatch), `vec + scalar`
+(broadcast), `vec * scalar`, `vec * vec`/`vec / vec` (componentwise;
+int-kind `/` promotes to float-kind — Red parity).
+
+**`image!` (limited) — M85:** `image!` is **NOT** a full `series!` (size is
+fixed). `extract_series` is unsupported: `append`/`insert`/`change`/`remove`
+fall through to `extract_series`'s `TypeError`. Only `length?` (→ `width *
+height`, the pixel count), `pick` (flat 1-based index → 4-byte `tuple!`),
+and `poke` (write a pixel from a `tuple!`/`binary!`) apply. Use the path
+rules above for `width`/`height`/`size`/coord access.
 
 ### `port!` + networking (M113)
 The `crates/red-eval/src/net/` module is a synchronous protocol facade

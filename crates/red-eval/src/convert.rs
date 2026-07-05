@@ -112,6 +112,8 @@ fn to_integer(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Valu
         Value::Char { c, .. } => Value::integer(*c as i64),
         // M80: money → its cents value (e.g. $10.00 → 1000).
         Value::Money { amount, .. } => Value::integer(amount.cents),
+        // M140: duration → total seconds, truncated.
+        Value::Duration { d, .. } => Value::integer(d.num_seconds()),
         other => {
             return Err(EvalError::TypeError {
                 expected: "integer!, float!, logic!, none!, char!, or string!",
@@ -190,6 +192,11 @@ fn to_float(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value,
         Value::Float { f, .. } => Value::float(*f),
         // M80: percent promotes to its fractional float value.
         Value::Percent { value, .. } => Value::float(*value),
+        // M140: duration → total seconds as f64.
+        Value::Duration { d, .. } => {
+            let ns = d.num_nanoseconds().unwrap_or(0);
+            Value::float(ns as f64 / 1e9)
+        }
         Value::String { s, .. } => Value::float(parse_f64(s, v)?),
         other => {
             return Err(EvalError::TypeError {
@@ -427,6 +434,7 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
         "pair!" | "pair" => make_pair(spec)?,
         "tuple!" | "tuple" => make_tuple(spec)?,
         "date!" | "date" => make_date(spec)?,
+        "duration!" | "duration" => make_duration(spec)?,
         "error!" | "error" => return make_error(spec),
         "object!" | "object" => return crate::object::make_object(spec, env),
         "module!" | "module" => return crate::module::make_module(spec, env),
@@ -435,6 +443,7 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
         "vector!" | "vector" => return crate::vector::make_vector(spec, env),
         "image!" | "image" => return crate::image::make_image(spec, env),
         "bitset!" | "bitset" => return crate::bitset::make_bitset(spec, env),
+        "typeset!" | "typeset" => return crate::typeset::make_typeset(spec, env),
         "function!" | "function" => {
             // Original behavior: spec is a packed `[[spec][body]]` block.
             let packed = expect_block(&[args[0].clone(), spec.clone()], 1, "make")?;
@@ -611,6 +620,93 @@ fn make_money(spec: &Value) -> Result<Value, EvalError> {
         }
         other => Err(EvalError::TypeError {
             expected: "integer!, float!, money!, string!, or block!",
+            found: type_name(other),
+            span: other.span_or_default(),
+        }),
+    }
+}
+
+/// M140: `make duration!` / `to-duration`. Forms accepted:
+/// - `integer!` → duration of N seconds (`make duration! 30` → `30s`).
+/// - `float!` → duration of N seconds (fractional; `make duration! 1.5` →
+///   `1.5s`, which molds as `1500ms`).
+/// - `string!` → parse the unit-suffix form (`"30s"`, `"1.5h"`, `"250ms"`,
+///   `"-5m"`, `"1d1h"` compound). Reuses the lexer's duration scanner.
+/// - `block!` → `[N]` (N seconds), `[h m s]`, `[h m s ms]`, or
+///   `[d h m s ms]` (positional; missing trailing components default to 0).
+///   All elements must be integers.
+/// - `duration!` → identity.
+fn make_duration(spec: &Value) -> Result<Value, EvalError> {
+    use red_core::Duration;
+    match spec {
+        Value::Duration { d, .. } => Ok(Value::duration(*d)),
+        Value::Integer { n, .. } => Ok(Value::duration(Duration::seconds(*n))),
+        Value::Float { f, .. } => {
+            let secs = *f;
+            if !secs.is_finite() {
+                return Err(native_err(spec, "float for duration is not finite"));
+            }
+            let nanos = (secs * 1e9) as i128;
+            let ns = if nanos > i64::MAX as i128 {
+                i64::MAX
+            } else if nanos < i64::MIN as i128 {
+                i64::MIN
+            } else {
+                nanos as i64
+            };
+            Ok(Value::duration(Duration::nanoseconds(ns)))
+        }
+        Value::String { s, .. } => {
+            let toks = lexer::lex(s).map_err(|e| native_err(spec, e.to_string()))?;
+            match toks.first() {
+                Some(t) => match &t.kind {
+                    lexer::TokenKind::Duration(d) => Ok(Value::duration(*d)),
+                    _ => Err(native_err(spec, format!("cannot parse {s:?} as duration"))),
+                },
+                None => Err(native_err(spec, "empty string for duration")),
+            }
+        }
+        Value::Block { series, .. } => {
+            let data = series.data.borrow();
+            let ints: Result<Vec<i64>, EvalError> = data
+                .iter()
+                .map(|v| match v {
+                    Value::Integer { n, .. } => Ok(*n),
+                    other => Err(EvalError::TypeError {
+                        expected: "integer!",
+                        found: type_name(other),
+                        span: other.span_or_default(),
+                    }),
+                })
+                .collect();
+            let v = ints?;
+            let d = match v.len() {
+                1 => Duration::seconds(v[0]),
+                3 => Duration::hours(v[0]) + Duration::minutes(v[1]) + Duration::seconds(v[2]),
+                4 => {
+                    Duration::hours(v[0])
+                        + Duration::minutes(v[1])
+                        + Duration::seconds(v[2])
+                        + Duration::milliseconds(v[3])
+                }
+                5 => {
+                    Duration::days(v[0])
+                        + Duration::hours(v[1])
+                        + Duration::minutes(v[2])
+                        + Duration::seconds(v[3])
+                        + Duration::milliseconds(v[4])
+                }
+                n => {
+                    return Err(native_err(
+                        spec,
+                        format!("duration block must have 1, 3, 4, or 5 elements (got {n})"),
+                    ));
+                }
+            };
+            Ok(Value::duration(d))
+        }
+        other => Err(EvalError::TypeError {
+            expected: "integer!, float!, duration!, string!, or block!",
             found: type_name(other),
             span: other.span_or_default(),
         }),
@@ -965,6 +1061,15 @@ fn to_money(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value,
     make_money(&args[0])
 }
 
+/// `to-duration value` — M140. Coerce to `duration!`. Same as
+/// `make duration!` for the non-block forms.
+fn to_duration(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "to-duration", 1, args.len()));
+    }
+    make_duration(&args[0])
+}
+
 /// `to-issue value` — M80. Coerce to `issue!`. Same as `make issue!`.
 /// - `string!` → `#<string>` (the string body becomes the issue body).
 /// - `integer!` → `#<decimal>` (e.g. `1234` ⇒ `#1234`).
@@ -1261,12 +1366,14 @@ fn to_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
         "pair!" | "pair" => to_pair(one, &RefineArgs::empty(), env),
         "tuple!" | "tuple" => to_tuple(one, &RefineArgs::empty(), env),
         "date!" | "date" => to_date(one, &RefineArgs::empty(), env),
+        "duration!" | "duration" => to_duration(one, &RefineArgs::empty(), env),
         "error!" | "error" => to_error(one, &RefineArgs::empty(), env),
         "map!" | "map" => crate::map::to_map(one, &RefineArgs::empty(), env),
         "hash!" | "hash" => crate::hash::to_hash(one, &RefineArgs::empty(), env),
         "vector!" | "vector" => crate::vector::to_vector(one, &RefineArgs::empty(), env),
         "image!" | "image" => crate::image::to_image(one, &RefineArgs::empty(), env),
         "bitset!" | "bitset" => crate::bitset::to_bitset(one, &RefineArgs::empty(), env),
+        "typeset!" | "typeset" => crate::typeset::to_typeset(one, &RefineArgs::empty(), env),
         other => Err(EvalError::Native {
             message: format!("to: {other:?} type not supported in POC"),
             span: args[0].span_or_default(),
@@ -1359,6 +1466,7 @@ pub fn register_convert_natives(env: &mut Env) {
     reg(env, "to-pair", to_pair as NF, 1);
     reg(env, "to-tuple", to_tuple as NF, 1);
     reg(env, "to-date", to_date as NF, 1);
+    reg(env, "to-duration", to_duration as NF, 1);
     reg(env, "to-error", to_error as NF, 1);
 
     // make / to (arity 2)

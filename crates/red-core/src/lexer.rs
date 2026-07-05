@@ -80,6 +80,14 @@ pub enum TokenKind {
     /// validates the structure + values). A single variant covers date-only,
     /// date+time, and date+time+zone; the parser wraps it as `Value::Date`.
     Date(DateValue),
+    /// `30s` / `1.5h` / `250ms` / `1d1h` — a `duration!` literal (M140).
+    /// Stored as a fully-accumulated `chrono::Duration` (signed i64
+    /// nanoseconds). The lexer accepts both single-unit (`30s`) and compound
+    /// (`1d1h`/`1h30m45s`) forms; compound rules: strict descending unit
+    /// order (`d`>`h`>`m`>`s`>`ms`>`us`>`ns`), no repeats, sub-component
+    /// overflow rejected (`1h70m` is an error). Leading sign negates the
+    /// whole literal (`-1d1h`); per-component negatives are not allowed.
+    Duration(chrono::Duration),
     LBracket,
     RBracket,
     LParen,
@@ -146,6 +154,12 @@ pub enum LexError {
     /// `+15:00`-style zone offset suffix with |minutes| > 14*60 or a malformed
     /// suffix shape.
     InvalidZone { span: Span, chars: String },
+    /// A `NNs`/`1d1h`-style duration! literal (M140) with a malformed body:
+    /// non-descending or repeated unit (`1h1d`/`1h1h`), sub-component
+    /// overflow (`1h70m`/`1d25h`/`1m60s`), or a non-numeric magnitude. The
+    /// run structurally matches a duration form (digit run + unit suffix)
+    /// but the values don't validate.
+    InvalidDuration { span: Span, chars: String },
 }
 
 impl LexError {
@@ -166,7 +180,8 @@ impl LexError {
             | LexError::InvalidPair { span, .. }
             | LexError::InvalidTuple { span, .. }
             | LexError::InvalidDate { span, .. }
-            | LexError::InvalidZone { span, .. } => *span,
+            | LexError::InvalidZone { span, .. }
+            | LexError::InvalidDuration { span, .. } => *span,
         }
     }
 }
@@ -216,6 +231,9 @@ impl std::fmt::Display for LexError {
             }
             LexError::InvalidZone { chars, .. } => {
                 write!(f, "invalid zone offset: {chars:?}")
+            }
+            LexError::InvalidDuration { chars, .. } => {
+                write!(f, "invalid duration literal: {chars:?}")
             }
         }
     }
@@ -852,6 +870,15 @@ fn scan_number(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError>
         return Ok((pct_end, TokenKind::Percent(raw)));
     }
 
+    // M140: a digit run immediately followed by a duration unit suffix is a
+    // duration! literal (`30s`/`1.5h`/`250ms`/`1d1h`). Both single-unit and
+    // compound forms are accepted. If no suffix matches or the collision
+    // guard rejects (the char after the suffix is a word-extending char),
+    // fall through to the Integer/Float assembly below.
+    if let Some((dur_end, duration)) = try_scan_duration(src, i, start, end, bytes)? {
+        return Ok((dur_end, TokenKind::Duration(duration)));
+    }
+
     let kind = if is_float {
         match text.parse::<f64>() {
             Ok(f) => TokenKind::Float(f),
@@ -875,6 +902,248 @@ fn scan_number(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError>
     };
 
     Ok((end, kind))
+}
+
+/// M140: unit info for a duration suffix.
+struct DurationUnit {
+    factor: i64,
+    rank: u8,
+}
+
+/// M140: match the longest duration unit suffix at `pos`. Returns
+/// `(unit, suffix_len, committed)`. `committed` is false when the collision
+/// guard rejects (the char after the suffix is a word-extending char — i.e.
+/// not a delimiter, not EOF, and not a digit). 2-char suffixes (`ms`/`us`/
+/// `ns`) are tried before 1-char (`s`/`m`/`h`/`d`).
+fn match_unit_suffix(bytes: &[u8], pos: usize) -> Option<(&DurationUnit, usize, bool)> {
+    const D: DurationUnit = DurationUnit {
+        factor: 86_400_000_000_000,
+        rank: 6,
+    };
+    const H: DurationUnit = DurationUnit {
+        factor: 3_600_000_000_000,
+        rank: 5,
+    };
+    const M: DurationUnit = DurationUnit {
+        factor: 60_000_000_000,
+        rank: 4,
+    };
+    const S: DurationUnit = DurationUnit {
+        factor: 1_000_000_000,
+        rank: 3,
+    };
+    const MS: DurationUnit = DurationUnit {
+        factor: 1_000_000,
+        rank: 2,
+    };
+    const US: DurationUnit = DurationUnit {
+        factor: 1_000,
+        rank: 1,
+    };
+    const NS: DurationUnit = DurationUnit { factor: 1, rank: 0 };
+    // 2-char suffixes first (longest match).
+    if pos + 2 <= bytes.len() {
+        let u = match &bytes[pos..pos + 2] {
+            b"ms" => Some(&MS),
+            b"us" => Some(&US),
+            b"ns" => Some(&NS),
+            _ => None,
+        };
+        if let Some(u) = u {
+            let after = pos + 2;
+            let committed =
+                after >= bytes.len() || is_delimiter(bytes[after]) || bytes[after].is_ascii_digit();
+            return Some((u, 2, committed));
+        }
+    }
+    // 1-char suffixes.
+    if pos < bytes.len() {
+        let u = match bytes[pos] {
+            b'd' => Some(&D),
+            b'h' => Some(&H),
+            b'm' => Some(&M),
+            b's' => Some(&S),
+            _ => None,
+        };
+        if let Some(u) = u {
+            let after = pos + 1;
+            let committed =
+                after >= bytes.len() || is_delimiter(bytes[after]) || bytes[after].is_ascii_digit();
+            return Some((u, 1, committed));
+        }
+    }
+    None
+}
+
+/// M140: try to scan a duration! literal from a digit run that `scan_number`
+/// already consumed. `start..end` is the first digit run (possibly including
+/// a leading `-`); `*i == end` (cursor just past the run). Returns
+/// `Some((token_end, duration))` if a unit suffix commits at `*i`; returns
+/// `None` if no suffix matches or the collision guard rejects (fall back to
+/// Integer/Float). Errors on structural validation failures (non-descending
+/// or repeated unit, sub-component overflow).
+///
+/// Compound rules: strict descending unit order (`d`>`h`>`m`>`s`>`ms`>`us`>
+/// `ns`), no repeats, sub-component overflow rejected (`1h70m` errors because
+/// 70m ≥ 1h). Leading sign negates the whole literal; per-component negatives
+/// are not allowed (the leading `-` was consumed by `scan_number`).
+fn try_scan_duration(
+    src: &str,
+    i: &mut usize,
+    start: usize,
+    end: usize,
+    bytes: &[u8],
+) -> Result<Option<(usize, chrono::Duration)>, LexError> {
+    // Try to match the first unit suffix at `end` (= `*i`).
+    let (first_unit, suffix_len, committed) = match match_unit_suffix(bytes, end) {
+        Some((u, sl, true)) => (u, sl, true),
+        _ => return Ok(None), // no suffix or collision guard rejected
+    };
+    let _ = committed; // already checked true
+
+    let negative = bytes.get(start) == Some(&b'-');
+    let mag_start = if negative { start + 1 } else { start };
+    let first_text = &src[mag_start..end];
+
+    let first_mag = match first_text.parse::<f64>() {
+        Ok(f) => f,
+        Err(_) => {
+            let err_end = end + suffix_len;
+            return Err(LexError::InvalidDuration {
+                span: Span::new(start, err_end),
+                chars: src[start..err_end].to_string(),
+            });
+        }
+    };
+
+    let mut total_nanos: i128 = (first_mag * first_unit.factor as f64) as i128;
+    let mut prev_rank = first_unit.rank;
+    let mut cursor = end + suffix_len;
+
+    loop {
+        // Peek the next char to decide: compound continuation, done, or break.
+        if cursor >= bytes.len() {
+            break; // EOF — done
+        }
+        let next = bytes[cursor];
+        if next.is_ascii_digit() {
+            // Compound continuation — scan the next number run + suffix.
+        } else if is_delimiter(next) {
+            break; // delimiter — done
+        } else {
+            // Word-extending char (operator, letter, etc.) — shouldn't happen
+            // for the first suffix (collision guard already rejected). For
+            // subsequent suffixes, the guard also checked before committing,
+            // so this branch is unreachable in normal flow.
+            break;
+        }
+
+        // Scan the next number run (digits + optional fractional + exponent).
+        let comp_start = cursor;
+        cursor += consume_digits(bytes, cursor);
+        // Fractional part.
+        if cursor < bytes.len()
+            && bytes[cursor] == b'.'
+            && cursor + 1 < bytes.len()
+            && bytes[cursor + 1].is_ascii_digit()
+        {
+            cursor += 1;
+            cursor += consume_digits(bytes, cursor);
+        }
+        // Exponent part.
+        if cursor < bytes.len() && (bytes[cursor] == b'e' || bytes[cursor] == b'E') {
+            let saved = cursor;
+            cursor += 1;
+            if cursor < bytes.len() && (bytes[cursor] == b'+' || bytes[cursor] == b'-') {
+                cursor += 1;
+            }
+            if cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                cursor += consume_digits(bytes, cursor);
+            } else {
+                cursor = saved + 1;
+            }
+        }
+        let comp_text = &src[comp_start..cursor];
+
+        // Match the unit suffix at `cursor`.
+        let (unit, sl, comm) = match match_unit_suffix(bytes, cursor) {
+            Some((u, sl, true)) => (u, sl, true),
+            _ => {
+                // No committed suffix — the digit run is standalone. Rewind
+                // to `comp_start` so the main loop emits it as Integer/Float.
+                // This handles `1d1hx` → Duration(1d) + Integer(1) + Word("hx").
+                cursor = comp_start;
+                break;
+            }
+        };
+        let _ = comm;
+
+        let comp_mag = match comp_text.parse::<f64>() {
+            Ok(f) => f,
+            Err(_) => {
+                let err_end = cursor + sl;
+                return Err(LexError::InvalidDuration {
+                    span: Span::new(start, err_end),
+                    chars: src[start..err_end].to_string(),
+                });
+            }
+        };
+
+        // Descending check: current rank must be strictly less than prev.
+        if unit.rank >= prev_rank {
+            let err_end = cursor + sl;
+            return Err(LexError::InvalidDuration {
+                span: Span::new(start, err_end),
+                chars: src[start..err_end].to_string(),
+            });
+        }
+
+        // Sub-component overflow check: current contribution must be strictly
+        // less than the prev (next-larger) unit's factor.
+        let prev_factor = unit_factor_by_rank(prev_rank);
+        let comp_contrib = comp_mag * unit.factor as f64;
+        if comp_contrib >= prev_factor as f64 {
+            let err_end = cursor + sl;
+            return Err(LexError::InvalidDuration {
+                span: Span::new(start, err_end),
+                chars: src[start..err_end].to_string(),
+            });
+        }
+
+        total_nanos += (comp_mag * unit.factor as f64) as i128;
+        prev_rank = unit.rank;
+        cursor += sl;
+    }
+
+    if negative {
+        total_nanos = -total_nanos;
+    }
+
+    // Saturate to i64 (~292-year range).
+    let ns = if total_nanos > i64::MAX as i128 {
+        i64::MAX
+    } else if total_nanos < i64::MIN as i128 {
+        i64::MIN
+    } else {
+        total_nanos as i64
+    };
+    let duration = chrono::Duration::nanoseconds(ns);
+
+    *i = cursor;
+    Ok(Some((cursor, duration)))
+}
+
+/// M140: look up the nanosecond factor for a unit rank.
+fn unit_factor_by_rank(rank: u8) -> i64 {
+    match rank {
+        6 => 86_400_000_000_000, // d
+        5 => 3_600_000_000_000,  // h
+        4 => 60_000_000_000,     // m
+        3 => 1_000_000_000,      // s
+        2 => 1_000_000,          // ms
+        1 => 1_000,              // us
+        _ => 1,                  // ns
+    }
 }
 
 /// M80: scan a `$`-led money! literal. Forms accepted:
@@ -2248,6 +2517,114 @@ mod tests {
         let toks = lex("$foo").expect("lex");
         assert_eq!(toks.len(), 1);
         assert!(matches!(toks[0].kind, TokenKind::Word(_)));
+    }
+
+    #[test]
+    fn duration_literal_single() {
+        // M140: single-unit duration literals.
+        let d = |t: &TokenKind| match t {
+            TokenKind::Duration(d) => *d,
+            _ => panic!("not Duration: {t:?}"),
+        };
+        assert_eq!(d(&one("30s")), chrono::Duration::seconds(30));
+        assert_eq!(d(&one("1.5h")), chrono::Duration::seconds(5400));
+        assert_eq!(d(&one("250ms")), chrono::Duration::milliseconds(250));
+        assert_eq!(d(&one("100ns")), chrono::Duration::nanoseconds(100));
+        assert_eq!(d(&one("5m")), chrono::Duration::minutes(5));
+        assert_eq!(d(&one("2h")), chrono::Duration::hours(2));
+        assert_eq!(d(&one("1d")), chrono::Duration::days(1));
+        assert_eq!(d(&one("500us")), chrono::Duration::microseconds(500));
+        assert_eq!(d(&one("-30s")), chrono::Duration::seconds(-30));
+    }
+
+    #[test]
+    fn duration_literal_compound() {
+        // M140: compound duration literals (strict descending unit order).
+        let d = |t: &TokenKind| match t {
+            TokenKind::Duration(d) => *d,
+            _ => panic!("not Duration: {t:?}"),
+        };
+        assert_eq!(d(&one("1d1h")), chrono::Duration::seconds(86400 + 3600));
+        assert_eq!(d(&one("1d2s")), chrono::Duration::seconds(86400 + 2));
+        assert_eq!(
+            d(&one("1h30m45s")),
+            chrono::Duration::seconds(3600 + 1800 + 45)
+        );
+        assert_eq!(d(&one("1.5h30m")), chrono::Duration::seconds(5400 + 1800));
+        assert_eq!(d(&one("1h30.5m")), chrono::Duration::seconds(3600 + 1830));
+        assert_eq!(d(&one("-1d1h")), chrono::Duration::seconds(-(86400 + 3600)));
+        assert_eq!(d(&one("0d0h")), chrono::Duration::zero());
+    }
+
+    #[test]
+    fn duration_compound_errors() {
+        // M140: non-descending, repeated, sub-component overflow.
+        assert!(matches!(lex("1h1h"), Err(LexError::InvalidDuration { .. }))); // repeated
+        assert!(matches!(lex("1h1d"), Err(LexError::InvalidDuration { .. }))); // non-descending
+        assert!(matches!(
+            lex("1h70m"),
+            Err(LexError::InvalidDuration { .. })
+        )); // overflow: 70m >= 1h
+        assert!(matches!(
+            lex("1d25h"),
+            Err(LexError::InvalidDuration { .. })
+        )); // overflow: 25h >= 1d
+        assert!(matches!(
+            lex("1m60s"),
+            Err(LexError::InvalidDuration { .. })
+        )); // overflow: 60s >= 1m
+        assert!(matches!(
+            lex("1h60.5m"),
+            Err(LexError::InvalidDuration { .. })
+        )); // fractional overflow
+    }
+
+    #[test]
+    fn duration_collision_guard() {
+        // M140: `30stuff` — `s` suffix not committed (next char `t` is word).
+        let toks = lex("30stuff").expect("lex");
+        assert_eq!(toks.len(), 2);
+        assert_eq!(toks[0].kind, TokenKind::Integer(30));
+        assert!(matches!(toks[1].kind, TokenKind::Word(_)));
+        // `30s x` — `s` committed (next char is delimiter).
+        let toks = lex("30s x").expect("lex");
+        assert_eq!(toks.len(), 2);
+        assert!(matches!(toks[0].kind, TokenKind::Duration(_)));
+        assert!(matches!(toks[1].kind, TokenKind::Word(_)));
+        // `1d1hx` — first `1d` commits; second `1h` not committed (`x` follows).
+        let toks = lex("1d1hx").expect("lex");
+        assert_eq!(toks.len(), 3);
+        assert!(matches!(toks[0].kind, TokenKind::Duration(_)));
+        assert_eq!(toks[1].kind, TokenKind::Integer(1));
+        assert!(matches!(toks[2].kind, TokenKind::Word(_)));
+        // `5s+foo` — `s` not committed (`+` is a word-extending char).
+        let toks = lex("5s+foo").expect("lex");
+        assert_eq!(toks.len(), 2);
+        assert_eq!(toks[0].kind, TokenKind::Integer(5));
+        assert!(matches!(toks[1].kind, TokenKind::Word(_)));
+    }
+
+    #[test]
+    fn duration_mold_round_trips() {
+        // M140: mold then reparse yields same value (value-equal).
+        let cases = [
+            chrono::Duration::seconds(30),
+            chrono::Duration::minutes(90),
+            chrono::Duration::milliseconds(250),
+            chrono::Duration::nanoseconds(100),
+            chrono::Duration::seconds(-30),
+            chrono::Duration::hours(30), // 1d1h molds as 30h
+        ];
+        for dur in cases {
+            let v = crate::value::Value::duration(dur);
+            let molded = crate::printer::mold_to_string(&v);
+            let toks = lex(&molded).expect("reparse");
+            assert_eq!(toks.len(), 1, "molded: {molded}");
+            match &toks[0].kind {
+                TokenKind::Duration(d) => assert_eq!(*d, dur, "molded: {molded}"),
+                other => panic!("expected Duration, got {other:?} for molded: {molded}"),
+            }
+        }
     }
 
     #[test]

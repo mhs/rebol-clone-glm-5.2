@@ -187,8 +187,10 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Vector(_) => "vector!",
         Value::Image(_) => "image!",
         Value::Date { .. } => "date!",
+        Value::Duration { .. } => "duration!",
         Value::Bitset(_) => "bitset!",
         Value::Port(_) => "port!",
+        Value::Typeset(_) => "typeset!",
     }
 }
 

@@ -5,7 +5,7 @@ language, implemented in Rust. Red is a homoiconic, block-structured
 descendant of Rebol — code is data, evaluation is prefix-style and eager,
 and "dialects" are blocks interpreted by custom mini-interpreters.
 
-This repo is a **Red subset interpreter** (`v0.6.0`). It implements a usable slice of
+This repo is a **Red subset interpreter** (`v0.7.0`). It implements a usable slice of
 Red — lexer, parser, **bytecode compiler + stack VM** (the default since
 v0.3), tree-walking evaluator (retained as the `--walk` fallback), full
 series model, real word binding, functions, **first-class closures**
@@ -24,12 +24,13 @@ history is tracked in [`plan.md`](./plan.md) (v0.1),
 [`plan2.md`](./plan2.md) (v0.2), [`plan3.md`](./plan3.md) (v0.3 — VM +
 performance), [`plan5.md`](./plan5.md) (v0.4 — language completeness),
 [`plan6-closures-modules.md`](./plan6-closures-modules.md) (v0.5 —
-closures & modules), and [`plan11-functional-gaps.md`](./plan11-functional-gaps.md)
-(v0.6 — core functional gaps).
+closures & modules), [`plan11-functional-gaps.md`](./plan11-functional-gaps.md)
+(v0.6 — core functional gaps), and [`plan8-missing-types.md`](./plan8-missing-types.md)
+(v0.7 — type completeness).
 
 ## Status
 
-- **Tagged:** `v0.6.0`
+- **Tagged:** `v0.7.0`
 - **Workspace:** three crates — `red-core` (value model + lexer + parser + printer + VM IR types),
   `red-eval` (compiler + VM + tree-walker + natives + `parse`), `red-cli` (binary + REPL).
   A `fuzz/` crate (nightly-only, `libfuzzer-sys`) is excluded from the default workspace.
@@ -52,7 +53,7 @@ cargo test  --workspace
 cargo run  -p red-cli -- examples/hello.red     # → Hello, World!
 cargo run  -p red-cli                            # → REPL (no args)
 cargo run  -p red-cli -- --help
-cargo run  -p red-cli -- --version               # → red 0.6.0
+cargo run  -p red-cli -- --version               # → red 0.7.0
 cargo run  -p red-cli -- --allow-shell examples/call.red   # enable call/shell
 cargo run  -p red-cli -- --allow-network http://example.com/  # enable read url!/open url!
 cargo run  -p red-cli -- --walk examples/fib.red          # force tree-walker
@@ -62,9 +63,10 @@ cargo run  -p red-cli -- --trace examples/arith.red       # per-instr VM trace t
 cargo run  -p red-cli -- --module-path examples/modules \  # search dir for import %file
                         examples/modules/main.red
 cargo run  -p red-cli -- --no-stdlib examples/arith.red    # skip stdlib auto-import
+cargo run  -p red-cli -- --unset-on-unbound examples/arith.red  # evaluate unbound words to unset! (v0.7, default off)
 ```
 
-v0.3 was a **performance release**: the bytecode VM delivers 2–4× speedups on compute-heavy programs (deep recursion, tight loops) over the v0.2 tree-walker, while preserving exact observable behavior (golden parity, error parity). v0.4 re-opens the language surface on top of the unchanged VM — new value types (`char!`/`binary!`/`map!`/`pair!`/`tuple!`/`date!`/`bitset!`), `compose`, trig math, the full `error!` model, and the completed `parse` dialect. v0.5 adds **first-class closures** (`closure!` with snapshot freevar capture, fixing the v0.3 escaping-closure bug) and **modules** (`module`/`export`/`import`, with named-module caching, file-based import, and `system/options/module-path` search), plus a small auto-imported stdlib. v0.5.1 closes the **control-flow vocabulary gap** — `unless`, `forever`, `for` (direction-aware counted loop over int/float/char), `forskip` (record-wise series iteration). v0.6 closes four **core functional gaps**: `parse` **named-rule recursion** (a bound word resolving to a `block!` is a sub-rule, with a depth guard); `mold` exposed as a callable native (`/only`); series **`sort`** (native, shadowing the stdlib version) + set operations `unique`/`intersect`/`union`/`difference`/`exclude` on `block!`/`string!`; and a synchronous **`port!` abstraction** with minimal HTTP/HTTPS GET networking via the existing `ureq` dep (TLS on by default — no new dependency), gated behind `--allow-network`. All additions are additive: they compile through the existing VM const-pool + native-call path with no new hot-path instrs. See `BENCHMARKS.md` for measurements.
+v0.3 was a **performance release**: the bytecode VM delivers 2–4× speedups on compute-heavy programs (deep recursion, tight loops) over the v0.2 tree-walker, while preserving exact observable behavior (golden parity, error parity). v0.4 re-opens the language surface on top of the unchanged VM — new value types (`char!`/`binary!`/`map!`/`pair!`/`tuple!`/`date!`/`bitset!`), `compose`, trig math, the full `error!` model, and the completed `parse` dialect. v0.5 adds **first-class closures** (`closure!` with snapshot freevar capture, fixing the v0.3 escaping-closure bug) and **modules** (`module`/`export`/`import`, with named-module caching, file-based import, and `system/options/module-path` search), plus a small auto-imported stdlib. v0.5.1 closes the **control-flow vocabulary gap** — `unless`, `forever`, `for` (direction-aware counted loop over int/float/char), `forskip` (record-wise series iteration). v0.6 closes four **core functional gaps**: `parse` **named-rule recursion** (a bound word resolving to a `block!` is a sub-rule, with a depth guard); `mold` exposed as a callable native (`/only`); series **`sort`** (native, shadowing the stdlib version) + set operations `unique`/`intersect`/`union`/`difference`/`exclude` on `block!`/`string!`; and a synchronous **`port!` abstraction** with minimal HTTP/HTTPS GET networking via the existing `ureq` dep (TLS on by default — no new dependency), gated behind `--allow-network`. v0.7 is a **type-completeness release**: nine new `Value` variants (`percent!`/`money!`/`issue!`/`email!`/`tag!`/`unset!`/`hash!`/`vector!`/`image!`/`typeset!`), the `native!`/`op!`/`any-function?` type split, a gated `--unset-on-unbound` fallback (default off), and `typeset!`-backed runtime type-checking of typed-func args (`func [x [integer! float!]]` rejects a string arg at call time). `regex!`/`struct!`/`handle!` deferred to v0.8. All additions are additive: they compile through the existing VM const-pool + native-call path with no new hot-path instrs. See `BENCHMARKS.md` for measurements.
 
 ## What's implemented
 
@@ -81,19 +83,27 @@ v0.3 was a **performance release**: the bytecode VM delivers 2–4× speedups on
   reparseable variants (property-tested).
 
 ### Value types
-`None`, `Logic`, `Integer`, `Float`, `String`, `Word`/`SetWord`/`GetWord`/
-`LitWord`, `Block`, `Paren`, `Func`, `Closure` (snapshot-capture first-class
-closure), `Module` (self-contained namespace with exported words),
-`Path`/`GetPath`/`LitPath`/`SetPath`, `Refinement`, `File`, `Url`, `Object`,
-`Error`, `Char` (`#"a"`), `String8` (real `binary!`, `#{hex}`), `Map`
-(heterogeneous insertion-ordered keys), `Pair` (`100x200`), `Tuple`
-(`255.0.0` / `128.64.32.128` RGBA), `Date` (date-only / date+time /
-date+time+zone; `29-Jun-2024/12:30:00+5:30`), `Bitset` (bit-packed charset
-for `parse`), `Port` (synchronous I/O handle — file or HTTP; v0.6),
-`Percent` (`50%`), `Money` (`$10.00`), `Issue` (`#ABC`), `Email`
-(`foo@bar.com`), `Tag` (`<b>`), `Hash` (unordered `series!` table), `Vector`
+`None`, `Unset` (v0.7 — distinct "no value" sentinel, separate from `none!`;
+gated `--unset-on-unbound` fallback), `Logic`, `Integer`, `Float`,
+`Percent` (`50%`), `Money` (`$10.00`/`$1,234.56:EUR` — fixed-point cents +
+currency), `Issue` (`#ABC`), `Email` (`foo@bar.com`), `Tag` (`<b>`/
+`<img src="x">`), `String`, `Word`/`SetWord`/`GetWord`/`LitWord`, `Block`,
+`Paren`, `Func` (`type?` → `native!`/`op!`/`function!` — v0.7 split),
+`Closure` (snapshot-capture first-class closure), `Module` (self-contained
+namespace with exported words), `Path`/`GetPath`/`LitPath`/`SetPath`,
+`Refinement`, `File`, `Url`, `Object`, `Error`, `Char` (`#"a"`), `String8`
+(real `binary!`, `#{hex}`), `Map` (heterogeneous insertion-ordered keys),
+`Pair` (`100x200`), `Tuple` (`255.0.0` / `128.64.32.128` RGBA), `Date`
+(date-only / date+time / date+time+zone; `29-Jun-2024/12:30:00+5:30`),
+`Bitset` (bit-packed charset for `parse`), `Port` (synchronous I/O handle
+— file or HTTP; v0.6), `Hash` (unordered `series!` table — v0.7), `Vector`
 (packed numeric series with typed element kind: `integer!`/`float!`/`i8!`/…
-`i64!`/`f32!`/`f64!` — full `series!` model + componentwise arithmetic).
+`i64!`/`f32!`/`f64!` — full `series!` model + componentwise arithmetic),
+`Image` (fixed-size 2D RGBA8 pixel buffer; `length?`/`pick`/`poke` only —
+not a full `series!`), `Typeset` (set of type-word symbols for runtime
+typed-func arg type-checking — `func [x [integer! float!]]`), `Duration`
+(signed span-of-time scalar; `30s`/`1.5h`/`250ms`/`1d1h` compound — strict
+descending unit order; `date - date → duration!`).
 
 ### Evaluation
 - **Bytecode compiler + stack VM** (v0.3, default): blocks compile to a flat
@@ -181,7 +191,7 @@ for `parse`), `Port` (synchronous I/O handle — file or HTTP; v0.6),
   **v0.4 additions:** `to-char`, `to-binary`, `to-map`, `to-pair`, `to-tuple`,
   `to-date`, `to-bitset`, `to-error`, `to-utc`.
   **v0.7 additions:** `to-percent`, `to-money`, `to-issue`, `to-email`,
-  `to-tag`, `to-hash`, `to-vector`.
+  `to-tag`, `to-hash`, `to-vector`, `to-image`, `to-typeset`.
 - **Type predicates (v0.4 fill-in):** `integer?`, `float?`, `number?`,
   `string?`, `logic?`, `none?`, `char?`, `binary?`, `map?`, `pair?`, `tuple?`,
   `date?`, `time?`, `bitset?`, `error?`, `word?`, `set-word?`, `get-word?`,
@@ -190,7 +200,10 @@ for `parse`), `Port` (synchronous I/O handle — file or HTTP; v0.6),
   `paren?`, `file?`, `url?`, `same?`, `not-same?`, `value?`. `type?` returns
   the type word; `types-of` returns the block of matching type words.
   **v0.7 additions:** `percent?`, `money?`, `issue?`, `email?`, `tag?`,
-  `hash?`, `vector?`.
+  `unset?`, `hash?`, `vector?`, `image?`, `typeset?`, `native?`, `op?`,
+  `any-function?` (M87: `native?`/`op?` are disjoint — `+` is `op!` not
+  `native!`; `function?`/`any-function?` cover `function!`/`native!`/`op!`/
+  `closure!`).
 - **Objects:** `make object!`, `object`, `context`, `in`, `words-of`,
   `values-of`, `reflect`, `object?`, `same?`. Prototype inheritance, `self`
   reference, method calls via `o/method` paths.
@@ -341,11 +354,11 @@ rebol-clone/
 │       └── tests/cli.rs
 ├── fuzz/                      # cargo-fuzz targets (nightly-only, excluded from workspace)
 ├── examples/                  # sample .red programs
-├── BENCHMARKS.md              # VM + walker bench numbers (v0.3 → v0.5)
+├── BENCHMARKS.md              # VM + walker bench numbers (v0.3 → v0.7)
 ├── KNOWN_ISSUES.md            # pre-existing bugs + VM/walker divergences
 ├── project-brief.md           # feature scope and design decisions
 ├── architecture.md            # implementation sketch (lexer/parser/compiler/VM/eval internals)
-└── plan*.md                   # per-version build checklists (v0.1 → v0.6)
+└── plan*.md                   # per-version build checklists (v0.1 → v0.7)
 ```
 
 ## Design notes
@@ -366,42 +379,58 @@ rebol-clone/
   and rebind; aliases don't see updates (mirrors Red semantics). `map!` uses
   `Rc<RefCell<MapDef>>` for in-place mutation like `object!`.
 
-## Known gaps (v0.6)
+## Known gaps (v0.7)
 
 See [`project-brief.md`](./project-brief.md) and
-[`plan11-functional-gaps.md`](./plan11-functional-gaps.md) for the
+[`plan8-missing-types.md`](./plan8-missing-types.md) for the
 authoritative list. Headlines:
 
+- **Type-completeness gaps deferred to v0.8:** `regex!` (M82 skipped —
+  powers a future `parse` extension and `find`/`replace` with `/regex`),
+  `struct!`/`handle!` (M88 skipped — FFI-adjacent opaque types; ship
+  alongside the `routine!` FFI binding layer in v0.8), `ref!` (internal
+  C-level reference type with no script surface — closest POC equivalent
+  is the deferred `handle!`). The `typeset!` algebra (`union`/`intersect`/
+  `complement`) is also deferred to v0.8. Advanced `bitset!`/`logic!` ops
+  beyond membership remain deferred.
 - **Networking is a synchronous, GET-only subset** — `read http://`/`read
   https://` and `open`/`close`/`create`/`read port`/`write port` work (via
   `ureq`, TLS on by default), but: non-HTTP protocols (FTP/SMTP/POP3/NNTP/
   DNS/TCP/UDP/WHOIS/Finger/Daytime) are reserved `PortScheme` variants
   that error in v0.6; HTTP methods beyond GET, request headers/cookies/
   auth, redirect control, `write http://` (POST/PUT), and the async/
-  `Channel`-backed port model are deferred to v0.7+. Network access is
+  `Channel`-backed port model are deferred to v0.8+. Network access is
   gated behind `--allow-network` (default off).
 - **Closure capture is snapshot, not shared-cell** — each `closure` copies
   freevar values at creation time; outer writes after creation don't
   propagate inward, and SetWord inside a closure body is treated as a local
   (not a capture write — use block-as-state via `poke` for mutable closure
   state). Real Red `closure!` shares the cell across closures and across
-  outer/inner; shared-cell is a v0.7 candidate.
-- **`unimport` deferred to v0.7** — `import` aliases exports into `user_ctx`
+  outer/inner; shared-cell is a v0.8 candidate.
+- **`unimport` deferred to v0.8** — `import` aliases exports into `user_ctx`
   but there's no native to remove the aliases.
 - **Timezones: fixed UTC offsets only** (`±HH:MM`/`Z`) — no named zones, no
-  DST. Matches Red parity; named-zone support (`chrono-tz`) deferred to v0.7+.
+  DST. Matches Red parity; named-zone support (`chrono-tz`) deferred to v0.8+.
 - **`DD/MM/YYYY` date form not supported** — `/` is a lexer delimiter so the
   run splits before the date scanner. Use `DD-Mon-YYYY` or `YYYY-MM-DD`.
 - **`pair!`/`tuple!` `same?`** returns `false` (immutable value types; use `=`
   for structural equality). `same?` is for reference-identity comparisons.
-- **No `ref!`/`image!`/`regex!`**; `tag!`/`vector!`/`hash!` landed in v0.7
-  (M81/M83/M84). Advanced `bitset!`/`logic!` ops; `object!` `on-change` reactive
-  slots; `routine!` FFI remain deferred.
+- **`--unset-on-unbound` is default-off** — the v0.7 M86 gate makes a
+  truly-unbound word evaluate to `unset!` instead of erroring, but only
+  when the flag is set (back-compat with the strict-binding contract).
+  Revisit the default in v0.8.
 - **Object path method calls** work for `o/method` followed by trailing
   block args; `func/refinement` bound refinements references are deferred.
-- **Reactivity (`react`/`is-thunk`) is a v0.7 candidate** (see
-  `future-plan-reactivity.md`); concurrency (actors/channels) is a v0.7+
+- **Reactivity (`react`/`is-thunk`) is a v0.8 candidate** (see
+  `future-plan-reactivity.md`); concurrency (actors/channels) is a v0.8+
   candidate. GUI / `draw` / `vid` dialects are permanently out of scope.
+- **Calendar `period!` deferred** — `duration!` (v0.11) is the fixed-length
+  physical-time subset (days and below); months/years are calendar-bound and
+  cannot be represented as nanoseconds. A future `period!` type could cover
+  these.
+- **`date - date` returns `duration!` (v0.11 behavior change)** — was
+  `integer!` day count; now full nanosecond precision. Use
+  `to-integer (date - date) / 86400` for the old day count.
 
 ## License
 

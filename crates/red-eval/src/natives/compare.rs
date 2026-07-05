@@ -131,11 +131,22 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Date { dt: da, .. }, Value::Date { dt: db, .. }) => {
             da.dt == db.dt && da.zone.unwrap_or(0) == db.zone.unwrap_or(0)
         }
+        // M140: duration! equality — by nanos, not by original unit
+        // (`30s = 30000ms` ⇒ true). Cross-type `duration = integer` is false
+        // (distinct types).
+        (Value::Duration { d: da, .. }, Value::Duration { d: db, .. }) => da == db,
         // M46: bitset! equality — same length and same bit pattern.
         (Value::Bitset(a), Value::Bitset(b)) => {
             let a = a.borrow();
             let b = b.borrow();
             a.len == b.len && a.bits.borrow().as_slice() == b.bits.borrow().as_slice()
+        }
+        // M89: typeset! equality — same set of type words (order-independent;
+        // group words compare as words, not via expansion).
+        (Value::Typeset(a), Value::Typeset(b)) => {
+            let at = a.types.borrow();
+            let bt = b.types.borrow();
+            *at == *bt
         }
         // Word-family equality by name. Deviation from Red: real Red `=`
         // on `word!` compares bound values, not names; only `lit-word!`
@@ -191,6 +202,9 @@ pub(crate) fn less_than(
     if let Some(ord) = money_cmp(args)? {
         return Ok(Value::Logic(compare("<", ord)));
     }
+    if let Some(ord) = duration_cmp(args)? {
+        return Ok(Value::Logic(compare("<", ord)));
+    }
     Ok(Value::Logic(compare("<", num_cmp(&args[0], &args[1])?)))
 }
 
@@ -200,6 +214,9 @@ pub(crate) fn greater_than(
     _env: &mut Env,
 ) -> Result<Value, EvalError> {
     if let Some(ord) = money_cmp(args)? {
+        return Ok(Value::Logic(compare(">", ord)));
+    }
+    if let Some(ord) = duration_cmp(args)? {
         return Ok(Value::Logic(compare(">", ord)));
     }
     Ok(Value::Logic(compare(">", num_cmp(&args[0], &args[1])?)))
@@ -213,6 +230,9 @@ pub(crate) fn less_equal(
     if let Some(ord) = money_cmp(args)? {
         return Ok(Value::Logic(compare("<=", ord)));
     }
+    if let Some(ord) = duration_cmp(args)? {
+        return Ok(Value::Logic(compare("<=", ord)));
+    }
     Ok(Value::Logic(compare("<=", num_cmp(&args[0], &args[1])?)))
 }
 
@@ -224,7 +244,43 @@ pub(crate) fn greater_equal(
     if let Some(ord) = money_cmp(args)? {
         return Ok(Value::Logic(compare(">=", ord)));
     }
+    if let Some(ord) = duration_cmp(args)? {
+        return Ok(Value::Logic(compare(">=", ord)));
+    }
     Ok(Value::Logic(compare(">=", num_cmp(&args[0], &args[1])?)))
+}
+
+/// M140: duration! ordering dispatcher. Returns `Some(Ordering)` when both
+/// operands are duration! (compares by nanos). Returns `None` when neither is
+/// duration! (falls through to `num_cmp`). Errors when exactly one is
+/// duration! (asymmetric — duration vs non-duration is a type error).
+fn duration_cmp(args: &[Value]) -> Result<Option<std::cmp::Ordering>, EvalError> {
+    let a = &args[0];
+    let b = &args[1];
+    let a_d = matches!(a, Value::Duration { .. });
+    let b_d = matches!(b, Value::Duration { .. });
+    if !a_d && !b_d {
+        return Ok(None);
+    }
+    if a_d && b_d {
+        let Value::Duration { d: da, .. } = a else {
+            unreachable!()
+        };
+        let Value::Duration { d: db, .. } = b else {
+            unreachable!()
+        };
+        return Ok(Some(da.cmp(db)));
+    }
+    // Asymmetric: duration vs non-duration.
+    Err(EvalError::TypeError {
+        expected: "duration!",
+        found: if a_d { type_name(b) } else { type_name(a) },
+        span: if a_d {
+            b.span_or_default()
+        } else {
+            a.span_or_default()
+        },
+    })
 }
 
 /// M80: money! ordering dispatcher. Returns `Some(Ordering)` when both

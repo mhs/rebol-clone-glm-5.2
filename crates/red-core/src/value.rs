@@ -169,6 +169,14 @@ pub struct FuncDef {
     /// closures remain deferred). Populated by the compile-time scope analyzer;
     /// empty for natives and for funcs created before M23 runs.
     pub freevars: Vec<Symbol>,
+    /// M89: per-param runtime type-check (parallel to `params`, indexed
+    /// identically). `None` = unchecked (back-compat with all pre-M89 funcs).
+    /// `Some(ts)` = `ts.accepts(arg)` must be true or the call raises a
+    /// `TypeError` (rendered via `EvalError::Native` for the dynamic expected-
+    /// typeset message). Refinement-arg types are not checked in v0.7 — only
+    /// positional params. Stored as `Rc<TypesetDef>` so a shared spec block
+    /// reuses one typeset across many `func` definitions.
+    pub param_types: Vec<Option<Rc<TypesetDef>>>,
     /// Lazily-filled compiled-form cache (v0.3, M22+). `None` until the
     /// bytecode compiler runs (M24), then `Some(Rc<CompiledBlock>)`. Retained
     /// as `Rc` so pointer identity (`Rc::ptr_eq`) can drive cache invalidation
@@ -442,6 +450,17 @@ pub enum Value {
     /// `+05:30`. `FixedOffset` is used transiently during parse/mold/`now`
     /// only — the struct stores raw minutes.
     Date { dt: Rc<DateValue>, span: Span },
+    /// A `duration!` literal (M140): a signed span-of-time scalar backed by
+    /// `chrono::Duration` (signed i64 nanoseconds, ~292-year range). Source-
+    /// origin for literals (`30s`/`1.5h`/`250ms`/`5m`/`2h`/`1d`/`500us`/
+    /// `100ns`, plus compound `1d1h`/`1h30m45s` — strict descending unit
+    /// order, no repeats, sub-component overflow rejected); carries the
+    /// byte-offset span of the whole token. `chrono::Duration` is signed;
+    /// negative durations are first-class (distinct from `std::time::Duration`,
+    /// which is unsigned). Not a `number!` — strict-typed against the bare
+    /// numerics (mirrors `money!`'s precedent); only `date!`, `duration!`,
+    /// and scalar `*`/`/` interoperate.
+    Duration { d: chrono::Duration, span: Span },
     /// A bitset! (M46): a bit-packed set of byte values (0..255) used by
     /// `parse` dialect charset matching and the `charset`/`make bitset!`
     /// constructors. Synthetic — produced at runtime; carries no source span.
@@ -455,6 +474,15 @@ pub enum Value {
     /// not slurped at `open` time; file ports slurp the whole file on `read`
     /// (matching today's `read %file` behavior).
     Port(Rc<RefCell<PortDef>>),
+    /// A typeset! (M89): a set of type-word symbols (`'integer!`/`'float!`/...)
+    /// used for runtime type-checking of function arguments. Synthetic —
+    /// produced by `make typeset!`/`to-typeset` and stored in
+    /// `FuncDef.param_types`; carries no source span of its own. Immutable
+    /// after construction. `accepts(v)` returns true iff `type_name(v)` is in
+    /// the set or one of the `any-*`/`number!`/`series!` group words in the set
+    /// covers `v`. Reference-identity for `same?` (mirrors `Bitset`/`Hash`);
+    /// deep set-equality for `=`.
+    Typeset(Rc<TypesetDef>),
 }
 
 /// Payload of a `Value::Error`. M42 extends the prior message-only stub to
@@ -1410,11 +1438,13 @@ pub fn infer_vector_kind(elems: &[Value]) -> Result<(Symbol, Vec<Value>), String
     Ok((kind_sym, narrowed))
 }
 
-/// Minimal type name for `infer_vector_kind`'s error message (avoids a
-/// circular dep on `red_eval::natives::type_name`). Returns the same strings
-/// the native-side switch produces for the common cases; falls back to
-/// `"value"` for anything else.
-fn type_name_for(v: &Value) -> &'static str {
+/// Type-name string for a value (the `type?` word form, e.g. `"integer!"`).
+/// This is the red-core canonical switch; `red_eval::natives::type_name`
+/// re-exports and extends it for the M87 `native!`/`op!` split (which needs
+/// `FuncDef.native`/`infix` flags — kept in red-eval to avoid touching native
+/// dispatch from red-core). M89's `TypesetDef::accepts` calls this so the
+/// typeset matcher stays in red-core (no circular dep on red-eval).
+pub fn type_name_for(v: &Value) -> &'static str {
     match v {
         Value::None => "none!",
         Value::Unset => "unset!",
@@ -1443,8 +1473,13 @@ fn type_name_for(v: &Value) -> &'static str {
         Value::File { .. } => "file!",
         Value::Url { .. } => "url!",
         Value::Date { .. } => "date!",
+        Value::Duration { .. } => "duration!",
         Value::Pair { .. } => "pair!",
         Value::Tuple { .. } => "tuple!",
+        // `Func`/`Closure` distinction (native!/op!/function!/closure!) is
+        // resolved in red-eval's `type_name` using `FuncDef.flags`; here we
+        // return the conservative broad word so `TypesetDef::accepts` still
+        // works for `any-function!` matching.
         Value::Func(_) => "function!",
         Value::Closure(_) => "closure!",
         Value::Error(_) => "error!",
@@ -1456,6 +1491,166 @@ fn type_name_for(v: &Value) -> &'static str {
         Value::Image(_) => "image!",
         Value::Bitset(_) => "bitset!",
         Value::Port(_) => "port!",
+        Value::Typeset(_) => "typeset!",
+    }
+}
+
+/// Canonical ordered list of all leaf type-word names (no group words), used
+/// by `TypesetDef::accepts` to resolve the `any-*`/`number!`/`series!`
+/// group-word expansions and by `make typeset!` to validate inputs.
+pub const TYPE_WORDS: &[&str] = &[
+    "none!",
+    "unset!",
+    "logic!",
+    "integer!",
+    "float!",
+    "percent!",
+    "money!",
+    "string!",
+    "binary!",
+    "issue!",
+    "email!",
+    "tag!",
+    "char!",
+    "block!",
+    "paren!",
+    "word!",
+    "set-word!",
+    "get-word!",
+    "lit-word!",
+    "path!",
+    "get-path!",
+    "lit-path!",
+    "set-path!",
+    "refinement!",
+    "file!",
+    "url!",
+    "date!",
+    "duration!",
+    "pair!",
+    "tuple!",
+    "function!",
+    "closure!",
+    "error!",
+    "object!",
+    "module!",
+    "map!",
+    "hash!",
+    "vector!",
+    "image!",
+    "bitset!",
+    "port!",
+    "typeset!",
+];
+
+/// Group-word → predicate-fn table for `TypesetDef::accepts`. A group word in
+/// a typeset (e.g. `any-word!`) accepts any value whose `type_name_for` is in
+/// the listed sub-set. `any-type!` matches every leaf type.
+pub fn group_members(group: &str) -> Option<&'static [&'static str]> {
+    const ANY_WORD: &[&str] = &[
+        "word!",
+        "set-word!",
+        "get-word!",
+        "lit-word!",
+        "refinement!",
+    ];
+    const ANY_PATH: &[&str] = &["path!", "get-path!", "lit-path!", "set-path!"];
+    const ANY_STRING: &[&str] = &[
+        "string!", "binary!", "issue!", "email!", "tag!", "file!", "url!",
+    ];
+    const ANY_BLOCK: &[&str] = &["block!", "paren!"];
+    const ANY_OBJECT: &[&str] = &["object!", "module!"];
+    const ANY_FUNCTION: &[&str] = &["function!", "closure!", "native!", "op!"];
+    const NUMBER: &[&str] = &["integer!", "float!", "percent!"];
+    const SERIES: &[&str] = &[
+        "block!", "paren!", "string!", "binary!", "issue!", "email!", "tag!", "file!", "url!",
+        "hash!", "vector!", "image!",
+    ];
+    const ANY_TYPE: &[&str] = TYPE_WORDS;
+    match group {
+        "any-word!" => Some(ANY_WORD),
+        "any-path!" => Some(ANY_PATH),
+        "any-string!" => Some(ANY_STRING),
+        "any-block!" => Some(ANY_BLOCK),
+        "any-object!" => Some(ANY_OBJECT),
+        "any-function!" => Some(ANY_FUNCTION),
+        "number!" => Some(NUMBER),
+        "series!" => Some(SERIES),
+        "any-type!" => Some(ANY_TYPE),
+        _ => None,
+    }
+}
+
+/// A typeset! value's payload (M89): a set of type-word symbols (e.g.
+/// `'integer!`, `'float!`, `'any-word!`). `accepts(v)` is the runtime type-
+/// check: true iff `type_name_for(v)` is in the set literally, or one of the
+/// `any-*`/`number!`/`series!` group words in the set covers `v` via
+/// `group_members`. Immutable after construction; `RefCell` only mirrors the
+/// `HashDef`/`BitsetDef` shape so v0.8 typeset algebra (`union`/`intersect`)
+/// can mutate in place without a shape change.
+#[derive(Clone, Debug, Default)]
+pub struct TypesetDef {
+    pub types: RefCell<HashSet<Symbol>>,
+}
+
+impl TypesetDef {
+    /// Construct from an iterator of `Symbol`s. Unknown group words and
+    /// unknown leaf words are rejected by `make typeset!` before reaching
+    /// here; this constructor is for trusted callers (func spec parsing).
+    pub fn new<I: IntoIterator<Item = Symbol>>(syms: I) -> Self {
+        TypesetDef {
+            types: RefCell::new(syms.into_iter().collect()),
+        }
+    }
+
+    /// Construct from the raw type-word string slice (each entry must be a
+    /// known leaf type or a known group word; unknown entries are silently
+    /// skipped — caller should validate via `is_known_type_word` first).
+    pub fn from_words(words: &[&str]) -> Self {
+        let syms = words.iter().map(|w| Symbol::new(w));
+        TypesetDef::new(syms)
+    }
+
+    /// True iff `sym` is either a known leaf type word (`TYPE_WORDS` entry)
+    /// or a known group word (`group_members` returns `Some`).
+    pub fn is_known_type_word(sym: &Symbol) -> bool {
+        TYPE_WORDS.contains(&sym.as_str()) || group_members(sym.as_str()).is_some()
+    }
+
+    /// The runtime type-check. `true` iff `v`'s type-name is in the set
+    /// literally or is covered by one of the group words in the set.
+    pub fn accepts(&self, v: &Value) -> bool {
+        let t = type_name_for(v);
+        let set = self.types.borrow();
+        if set.iter().any(|s| s.as_str() == t) {
+            return true;
+        }
+        for sym in set.iter() {
+            if let Some(members) = group_members(sym.as_str()) {
+                if members.contains(&t) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Sorted iteration of the type words in the set, for stable mold output.
+    pub fn sorted_words(&self) -> Vec<Symbol> {
+        let set = self.types.borrow();
+        let mut out: Vec<Symbol> = set.iter().cloned().collect();
+        out.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        out
+    }
+
+    /// Number of type words in the set (group or leaf).
+    pub fn len(&self) -> usize {
+        self.types.borrow().len()
+    }
+
+    /// True iff the set is empty.
+    pub fn is_empty(&self) -> bool {
+        self.types.borrow().is_empty()
     }
 }
 
@@ -1909,6 +2104,18 @@ impl DateValue {
         DateValue::from_local(self.dt + chrono::Duration::days(days), self.zone)
     }
 
+    /// Add a `chrono::Duration` to this date (M141: `date + duration → date`).
+    /// Preserves the zone. Uses the underlying `NaiveDateTime + Duration`.
+    pub fn add_duration(&self, d: chrono::Duration) -> Self {
+        DateValue::from_local(self.dt + d, self.zone)
+    }
+
+    /// Subtract a `chrono::Duration` from this date (M141: `date - duration →
+    /// date`).
+    pub fn sub_duration(&self, d: chrono::Duration) -> Self {
+        DateValue::from_local(self.dt - d, self.zone)
+    }
+
     /// Replace the time component, keeping the date + zone. Used by
     /// `date + time` arithmetic (M45).
     pub fn with_time(&self, time: NaiveTime) -> Self {
@@ -2015,6 +2222,7 @@ impl Value {
             | Value::Url { span, .. }
             | Value::String8 { span, .. }
             | Value::Date { span, .. } => Some(*span),
+            Value::Duration { span, .. } => Some(*span),
             Value::None
             | Value::Unset
             | Value::Logic(_)
@@ -2028,7 +2236,8 @@ impl Value {
             | Value::Vector(_)
             | Value::Image(_)
             | Value::Bitset(_)
-            | Value::Port(_) => None,
+            | Value::Port(_)
+            | Value::Typeset(_) => None,
         }
     }
 
@@ -2328,6 +2537,16 @@ impl Value {
         }
     }
 
+    /// Constructor shorthand for a `duration!` value with a zero span
+    /// (synthetic/runtime-constructed use — most durations are not literal).
+    /// (M140.)
+    pub fn duration(d: chrono::Duration) -> Self {
+        Value::Duration {
+            d,
+            span: Span::default(),
+        }
+    }
+
     /// Constructor shorthand for a bitset! value wrapping `bs_def`.
     pub fn bitset(bs_def: BitsetDef) -> Self {
         Value::Bitset(Rc::new(RefCell::new(bs_def)))
@@ -2336,6 +2555,11 @@ impl Value {
     /// Constructor shorthand for a port! value wrapping `port_def`. (M113.)
     pub fn port(port_def: PortDef) -> Self {
         Value::Port(Rc::new(RefCell::new(port_def)))
+    }
+
+    /// Constructor shorthand for a typeset! value wrapping `def`. (M89.)
+    pub fn typeset(def: TypesetDef) -> Self {
+        Value::Typeset(Rc::new(def))
     }
 }
 
@@ -2679,6 +2903,17 @@ mod tests {
                 assert_eq!(dt.zone, None);
             }
             other => panic!("expected Date, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_duration_constructor() {
+        match Value::duration(chrono::Duration::seconds(30)) {
+            Value::Duration { d, span } => {
+                assert!(span.is_default());
+                assert_eq!(d, chrono::Duration::seconds(30));
+            }
+            other => panic!("expected Duration, got {other:?}"),
         }
     }
 

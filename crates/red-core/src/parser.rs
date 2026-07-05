@@ -228,6 +228,12 @@ impl<'a> Parser<'a> {
                 // M45: fold adjacent refinements (`29-Jun-2024/year`) into a path.
                 self.assemble_path(head, tok.span)
             }
+            TokenKind::Duration(d) => {
+                self.advance()?;
+                let head = Value::Duration { d, span: tok.span };
+                // M140: fold adjacent refinements (`30s/seconds`) into a path.
+                self.assemble_path(head, tok.span)
+            }
             TokenKind::Word(sym) => {
                 self.advance()?;
                 let head = Value::Word {

@@ -656,25 +656,42 @@ fn env_name(v: &Value) -> Result<String, EvalError> {
 // wait
 // ---------------------------------------------------------------------------
 
-/// `wait seconds` → `none!`. Sleeps the current thread for `seconds` (int or
-/// float). Sub-second precision via float.
+/// `wait seconds` → `none!`. Sleeps the current thread for `seconds` (int,
+/// float, or duration!). Sub-second precision via float/duration.
 fn wait(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(arity_err(args, "wait", 1, args.len()));
     }
-    let secs = match &args[0] {
-        Value::Integer { n, .. } => *n as f64,
-        Value::Float { f, .. } => *f,
+    let sleep_dur = match &args[0] {
+        Value::Integer { n, .. } => {
+            let secs = *n as f64;
+            if secs > 0.0 {
+                Some(Duration::from_secs_f64(secs))
+            } else {
+                None
+            }
+        }
+        Value::Float { f, .. } => {
+            if *f > 0.0 {
+                Some(Duration::from_secs_f64(*f))
+            } else {
+                None
+            }
+        }
+        // M141: `wait <duration>` — convert chrono::Duration to std Duration.
+        // Negative durations are treated as 0 (no sleep), mirroring the
+        // existing `secs > 0.0` guard.
+        Value::Duration { d, .. } => d.to_std().ok(),
         other => {
             return Err(EvalError::TypeError {
-                expected: "integer! or float!",
+                expected: "integer!, float!, or duration!",
                 found: type_name(other),
                 span: other.span_or_default(),
             });
         }
     };
-    if secs > 0.0 {
-        std::thread::sleep(Duration::from_secs_f64(secs));
+    if let Some(d) = sleep_dur {
+        std::thread::sleep(d);
     }
     Ok(Value::None)
 }

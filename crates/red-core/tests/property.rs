@@ -24,7 +24,7 @@
 use proptest::prelude::*;
 use red_core::{
     form_to_string, load_source, mold_to_string, printer::mold, Context, DateValue, HashDef,
-    ImageDef, MapDef, MapKey, ModuleDef, Series, Span, Symbol, Value, VectorDef,
+    ImageDef, MapDef, MapKey, ModuleDef, Series, Span, Symbol, TypesetDef, Value, VectorDef,
 };
 use std::rc::Rc;
 
@@ -170,6 +170,11 @@ fn gen_value(_depth: u32) -> BoxedStrategy<Value> {
                 let zone = Some(zh * 60);
                 Value::date(DateValue::from_local(date.and_time(time), zone))
             }),
+        // M140: duration! literals. Generate bounded nanos (i64 range, well
+        // within the ~292-year chrono limit). The mold form (`<N><unit>`)
+        // reparses through the lexer's duration scanner.
+        (-86_400_000_000_000i64..86_400_000_000_000)
+            .prop_map(|ns| { Value::duration(red_core::Duration::nanoseconds(ns)) }),
         // Word family.
         "[a-z][a-z0-9]{0,8}".prop_map(|s: String| Value::Word {
             sym: red_core::Symbol::new(&s),
@@ -553,6 +558,34 @@ proptest! {
         prop_assert!(
             molded1.starts_with("make image! [width:"),
             "expected `make image! [width: ...]` form, got: {molded1}"
+        );
+        prop_assert!(molded1.ends_with(']'), "expected closing ]: {molded1}");
+    }
+}
+
+// M89: `typeset!` mold stability. Like `hash!`/`vector!`/`image!`, `typeset!`
+// is synthetic (mold as `make typeset! [...]` which parses to a block, not a
+// Typeset value), so it's excluded from `gen_value`. This focused test builds
+// a `TypesetDef` directly from a random subset of the canonical type-word
+// list and asserts that molding it twice yields the same string, and that
+// the form starts with `make typeset! [` and ends with `]`.
+proptest! {
+    #[test]
+    fn typeset_mold_is_stable(
+        // Pick a random subset of type words (by index into TYPE_WORDS).
+        indices in prop::collection::vec(0u16..41, 0..12),
+    ) {
+        let words: Vec<Symbol> = indices
+            .into_iter()
+            .map(|i| Symbol::new(red_core::value::TYPE_WORDS[i as usize]))
+            .collect();
+        let ts = Value::typeset(TypesetDef::new(words));
+        let molded1 = mold_to_string(&ts);
+        let molded2 = mold_to_string(&ts);
+        prop_assert_eq!(&molded1, &molded2, "mold not deterministic");
+        prop_assert!(
+            molded1.starts_with("make typeset! ["),
+            "expected `make typeset! [...]` form, got: {molded1}"
         );
         prop_assert!(molded1.ends_with(']'), "expected closing ]: {molded1}");
     }

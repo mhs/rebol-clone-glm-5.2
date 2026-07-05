@@ -395,8 +395,10 @@ fn eval_prefix(
         | Value::Vector(_)
         | Value::Image(_)
         | Value::Date { .. }
+        | Value::Duration { .. }
         | Value::Bitset(_)
-        | Value::Port(_) => Ok(cur),
+        | Value::Port(_)
+        | Value::Typeset(_) => Ok(cur),
 
         // Path: a function-headed path is a refined call (`copy/part`,
         // `find/case`); anything else is a data-path select (`block/2`,
@@ -565,7 +567,13 @@ fn eval_path_call(
         // `[1 2 3]/1`). The head value is the data itself — no resolution
         // needed; walk the tail directly.
         // M80: email! is pathable (`foo@bar.com/user`, `/host`).
-        Value::Pair { .. } | Value::Tuple { .. } | Value::Block { .. } | Value::Email { .. } => {
+        // M140: duration! is pathable (`30s/total-seconds`).
+        Value::Pair { .. }
+        | Value::Tuple { .. }
+        | Value::Block { .. }
+        | Value::Date { .. }
+        | Value::Duration { .. }
+        | Value::Email { .. } => {
             let result = walk_data_path(parts[0].clone(), &parts[1..], env, path_span)?;
             return Ok(result);
         }
@@ -822,6 +830,32 @@ fn select_field(current: &Value, sym: &Symbol, path_span: Span) -> Result<Value,
                 span: path_span,
             }),
         },
+        // M142: duration! path accessors. `/days`/`/hours`/`/minutes`/
+        // `/seconds` are **components** (decomposed; mirrors `date!/hour`).
+        // `/total-seconds` is the total as a float. `/nanos` is the
+        // sub-second nanosecond component (0–999_999_999, signed).
+        Value::Duration { d, .. } => {
+            let total_secs = d.num_seconds();
+            let subsec = d.subsec_nanos();
+            match sym.as_str() {
+                "days" => Ok(Value::integer(total_secs / 86400)),
+                "hours" => Ok(Value::integer((total_secs % 86400) / 3600)),
+                "minutes" => Ok(Value::integer((total_secs % 3600) / 60)),
+                "seconds" => Ok(Value::integer(total_secs % 60)),
+                "nanos" => Ok(Value::integer(subsec as i64)),
+                "total-seconds" => {
+                    let ns = d.num_nanoseconds().unwrap_or(0);
+                    Ok(Value::float(ns as f64 / 1e9))
+                }
+                _ => Err(EvalError::Native {
+                    message: format!(
+                        "duration! has no field {} (only /days /hours /minutes /seconds /nanos /total-seconds)",
+                        sym.as_str()
+                    ),
+                    span: path_span,
+                }),
+            }
+        }
         // M80: email! path accessors. `/user` returns the local part (before
         // `@`); `/host` returns the host part (after `@`).
         Value::Email { addr, .. } => match sym.as_str() {
@@ -1213,10 +1247,12 @@ pub(crate) fn eval_get_path(
         // the data itself — no resolution needed.
         // M45: `date` head for `:29-Jun-2024/year`.
         // M80: `email` head for `:foo@bar.com/user`.
+        // M140: `duration` head for `:30s/total-seconds`.
         Value::Pair { .. }
         | Value::Tuple { .. }
         | Value::Block { .. }
         | Value::Date { .. }
+        | Value::Duration { .. }
         | Value::Email { .. } => parts[0].clone(),
         other => {
             return Err(EvalError::Native {
@@ -2002,12 +2038,46 @@ fn collect_call_args(
 ///
 /// Slot layout (established by `bind_function_body`):
 ///   `[param_0 ... param_{n-1}] [ref_0_flag] [ref_0_arg_0 ..] [ref_1_flag] ...`
+/// M89: runtime type-check for typed-function params. For each `param_types`
+/// entry that is `Some(ts)`, verify `ts.accepts(&args[i])`. The first
+/// mismatch raises a `Native` error with a message naming the expected
+/// typeset and the actual type. Untyped params (`None`) are skipped —
+/// back-compat with all pre-M89 funcs. Refinement-arg types are not checked
+/// (v0.7 deferral); only positional params.
+pub(crate) fn check_param_types(fd: &Rc<FuncDef>, args: &[Value]) -> Result<(), EvalError> {
+    let pts = &fd.param_types;
+    if pts.is_empty() {
+        return Ok(());
+    }
+    for (i, pt) in pts.iter().enumerate() {
+        if let Some(ts) = pt {
+            let arg = match args.get(i) {
+                Some(a) => a,
+                None => return Ok(()), // arity error caught elsewhere
+            };
+            if !ts.accepts(arg) {
+                return Err(EvalError::Native {
+                    message: format!(
+                        "type error: arg {} expected {}, got {}",
+                        i + 1,
+                        crate::typeset::typeset_label(ts),
+                        crate::natives::type_name(arg),
+                    ),
+                    span: arg.span_or_default(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn call_user_func(
     fd: &Rc<FuncDef>,
     args: Vec<Value>,
     refs: &RefineArgs,
     env: &mut Env,
 ) -> Result<Value, EvalError> {
+    check_param_types(fd, &args)?;
     let call_ctx = fd.ctx.clone();
     let mut slot = 0;
     for arg in args.iter() {
@@ -2078,6 +2148,7 @@ pub(crate) fn call_closure_func(
     env: &mut Env,
     captures: &Rc<Vec<std::cell::RefCell<Value>>>,
 ) -> Result<Value, EvalError> {
+    check_param_types(fd, &args)?;
     let call_ctx = fd.ctx.clone();
     let mut slot = 0;
     for arg in args.iter() {

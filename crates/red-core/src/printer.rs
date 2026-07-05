@@ -5,7 +5,7 @@ use chrono::{Datelike, Timelike};
 
 use crate::value::{
     BitsetDef, DateValue, HashDef, ImageDef, MapDef, MapKey, ModuleDef, MoneyValue, ObjectDef,
-    PortDef, Value, VectorDef,
+    PortDef, TypesetDef, Value, VectorDef,
 };
 
 /// Append the Red source form of `value` to `out`.
@@ -173,8 +173,10 @@ pub fn mold(value: &Value, out: &mut String) {
         Value::Image(im) => mold_image(&im.borrow(), out),
         Value::Module(m) => mold_module(&m.borrow(), out),
         Value::Date { dt, .. } => mold_date(dt, out),
+        Value::Duration { d, .. } => mold_duration(*d, out),
         Value::Bitset(b) => mold_bitset(&b.borrow(), out),
         Value::Port(p) => mold_port(&p.borrow(), out),
+        Value::Typeset(t) => mold_typeset(t, out),
     }
 }
 
@@ -272,8 +274,10 @@ pub fn form(value: &Value, out: &mut String) {
         Value::Image(im) => mold_image(&im.borrow(), out),
         Value::Module(m) => mold_module(&m.borrow(), out),
         Value::Date { dt, .. } => mold_date(dt, out),
+        Value::Duration { d, .. } => mold_duration(*d, out),
         Value::Bitset(b) => mold_bitset(&b.borrow(), out),
         Value::Port(p) => mold_port(&p.borrow(), out),
+        Value::Typeset(t) => mold_typeset(t, out),
     }
 }
 
@@ -490,6 +494,23 @@ fn mold_vector(v: &VectorDef, out: &mut String) {
     out.push(']');
 }
 
+/// M89: mold a typeset! as `make typeset! [<type-word> ...]`. The type words
+/// are emitted in sorted order (lexicographic on the symbol name) so the mold
+/// is deterministic across runs and across HashMap iteration orders. The form
+/// is reparseable via `make typeset!`. Group words (`any-word!`/`number!`/
+/// `series!`/...) mold alongside leaf words.
+fn mold_typeset(t: &TypesetDef, out: &mut String) {
+    out.push_str("make typeset! [");
+    let words = t.sorted_words();
+    for (i, w) in words.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(w.as_str());
+    }
+    out.push(']');
+}
+
 /// M85: mold an image! as `make image! [width: <w> height: <h> pixels: [<byte...>]]`.
 /// Pixels render as a flat row-major RGBA8 byte stream (4 integers per pixel),
 /// space-separated. The form is reparseable via `make image!`. The mold is
@@ -654,6 +675,51 @@ fn mold_date(d: &DateValue, out: &mut String) {
             let _ = write!(out, "{}{:02}:{:02}", sign, m / 60, m % 60);
         }
     }
+}
+
+/// Mold a `duration!` (M140). Strategy: pick the **largest unit** that
+/// yields a whole-number representation, falling back to `ns`. Since
+/// `chrono::Duration` is i64-nanoseconds, every value is a whole multiple
+/// of `1ns` — fractional mantissa never triggers. The sign (if negative)
+/// prefixes the whole token. Zero molds as `0s`.
+///
+/// Compound literals mold **single-unit** (`1d1h` → `30h`,
+/// `1.5h` → `90m`); the round-trip contract is value-equal, not
+/// text-equal (a future `/long` refinement could emit `1h30m`; deferred).
+fn mold_duration(d: chrono::Duration, out: &mut String) {
+    use std::fmt::Write;
+    // `num_nanoseconds` returns Option<i64>; None only for values beyond
+    // i64 range (~292 years), which the saturating constructor already
+    // excludes. Fall back to 0 defensively.
+    let n = d.num_nanoseconds().unwrap_or(0);
+    if n == 0 {
+        out.push_str("0s");
+        return;
+    }
+    let neg = n < 0;
+    let abs_n = n.wrapping_abs() as u64;
+    // (factor_nanos, suffix). Strictly descending magnitude — the first
+    // divisor that yields a zero remainder is the largest whole unit.
+    const UNITS: &[(u64, &str)] = &[
+        (86_400_000_000_000, "d"),
+        (3_600_000_000_000, "h"),
+        (60_000_000_000, "m"),
+        (1_000_000_000, "s"),
+        (1_000_000, "ms"),
+        (1_000, "us"),
+        (1, "ns"),
+    ];
+    for (factor, suffix) in UNITS {
+        if abs_n.is_multiple_of(*factor) {
+            if neg {
+                out.push('-');
+            }
+            let _ = write!(out, "{}{}", abs_n / factor, suffix);
+            return;
+        }
+    }
+    // Unreachable: `ns` (factor 1) always divides evenly.
+    let _ = write!(out, "{}ns", abs_n);
 }
 
 /// 3-letter English month abbreviation (matches Red's `DD-Mon-YYYY` form and
