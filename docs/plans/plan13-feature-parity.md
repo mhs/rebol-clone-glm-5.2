@@ -12,7 +12,7 @@ class of programs the way `plan11`'s four items did; collectively they close
 the remaining gap between this POC and a "no obvious missing native" Red
 clone.
 
-Per `project-brief.md`, GUI / `draw` / `vid` / reactive dialects remain
+Per `../../project-brief.md`, GUI / `draw` / `vid` / reactive dialects remain
 **permanently out of scope**. Parse recursion, `mold`-as-native, series
 `sort`/set-ops, and the port model are in `plan11-functional-gaps.md`.
 `unless`/`forever`/`for`/`forskip`/`except`/`finally`/`does-not` are in
@@ -165,7 +165,7 @@ after the M130 template is proven):
       **Resolved:** implemented via `Env.collect_stack: Vec<Vec<Value>>`
       (dynamic-scope accumulator stack). `collect` pushes, `keep` appends to
       the top, `collect` pops. No binding-pass involvement — works through
-      nested control flow. See `architecture.md` v0.10 section.
+      nested control flow. See `../../architecture.md` v0.10 section.
 - [ ] Inline `#[test]`: `map-each x [1 2 3] [x * 2]` → `[2 4 6]`.
       **Skipped:** covered by the `map_each_basic` golden fixture instead.
 - [ ] Inline `#[test]`: `a: [1 2 3 4] remove-each x a [even? x] a` → `[1 3]`.
@@ -336,7 +336,7 @@ version. `quote` is a Rebol3 proposal that didn't land; `meta-word` (`^foo`)
 is a Red experimental feature gated behind a compiler flag this POC doesn't
 track; `uneval`/`eval-set` are not real Red words. Per the user's decision
 in the planning phase, the entire milestone is dropped (not deferred) and
-documented as a confirmed-dropped item in `project-brief.md`. No code was
+documented as a confirmed-dropped item in `../../project-brief.md`. No code was
 written.
 
 - [~] Add `quote value` native — **DROPPED** (audit misidentification).
@@ -396,7 +396,7 @@ written.
       "additive native" non-goal constraint.
       **DEMOTED TO v0.11+** (per user decision in planning phase). Requires
       eval-loop hooks that break the v0.10 "additive native only" non-goal.
-      Documented as a future-plan candidate in `project-brief.md`.
+      Documented as a future-plan candidate in `../../project-brief.md`.
 - [ ] Inline `#[test]`: `floor 3.7` → `3.0`; `ceiling 3.2` → `4.0`;
       `truncate -3.7` → `-3.0` (confirm truncate's sign behavior — toward
       zero, not toward negative infinity, matching most languages'
@@ -443,7 +443,7 @@ written.
       the v0.10 "additive native only" non-goal. The `Env.user_trace:
       Option<Box<dyn Write>>` field was added as forward-prep but no native
       is registered. Documented as a future-plan candidate in
-      `project-brief.md`.
+      `../../project-brief.md`.
 - [x] Add `dump value` — Red's `dump` prints a value's *label + mold* pair
       for debugging (`dump x` prints something like `x: 5`), distinct from
       both `print`/`probe` (which print the value alone) — confirm exact
@@ -494,7 +494,7 @@ written.
       confusing near-alias.
       **DROPPED** (per user decision in planning phase). Near-duplicate of
       `make module!`; exposing both adds confusion without value.
-      Documented in `project-brief.md`.
+      Documented in `../../project-brief.md`.
 - [x] Add `exports-of module-value` — returns the `block!` of exported
       word-symbols for a given module (read from whatever internal
       `exports:` field `make module!`'s spec-parsing already populates,
@@ -562,7 +562,7 @@ any order, one PR per native is reasonable given the low coupling.
       **DEFERRED TO v0.11+** (per user decision in planning phase). Requires
       per-element line-hint metadata on `Series`/`Vec<Value>` — a model
       extension that breaks the v0.10 additive-only constraint. Documented
-      in `project-brief.md`.
+      in `../../project-brief.md`.
 - [ ] Inline `#[test]` per new refinement.
       **Skipped:** covered by the `refinements_basic` golden fixture.
 
@@ -674,12 +674,12 @@ any order, one PR per native is reasonable given the low coupling.
       **Done:** 8 fixtures added — `map_each_basic`, `collect_basic`,
       `codec_basic`, `object_reflection_basic`, `math_helpers_basic`,
       `reflection_basic`, `refinements_basic`, `protect_mutation_denied`.
-- [x] Run `cargo bench --bench eval`; record in `BENCHMARKS.md` under
+- [x] Run `cargo bench --bench eval`; record in `../../BENCHMARKS.md` under
       "v0.10.0" — expected neutral (all additions are native-call-path,
       no hot-path VM changes) except possibly `protect`'s per-mutation
       check (M131) and `round`'s expanded dispatch (M136); investigate any
       regression >5%.
-      **Done:** `BENCHMARKS.md` v0.10.0 notes added — expected neutral
+      **Done:** `../../BENCHMARKS.md` v0.10.0 notes added — expected neutral
       (no bench fixture exercises protected values; `round`'s expanded
       dispatch only fires when a new refinement is present, default path
       unchanged). `cargo bench --bench eval` not re-run (criterion numbers
@@ -688,7 +688,7 @@ any order, one PR per native is reasonable given the low coupling.
       **Done:** clean.
 - [x] Run `cargo fmt --all --check`; fix.
       **Done:** clean.
-- [x] Update `project-brief.md`:
+- [x] Update `../../project-brief.md`:
   - [x] Add a "Feature-Parity Round-Out (v0.10)" subsection summarizing
         M130–M136, explicitly noting which speculative items (M132/M134's
         unconfirmed primitives) were dropped after Red-parity confirmation
@@ -698,13 +698,13 @@ any order, one PR per native is reasonable given the low coupling.
         `keep` scoping if deferred, M132/M134's dropped items, M133's
         `math`-mode if demoted, M136's `append/line` if it required a
         `Series`-model change and got deferred instead).
-- [x] Update `architecture.md`:
+- [x] Update `../../architecture.md`:
   - [x] Protect-flag enforcement points across mutating natives (M131).
   - [x] The `collect`/`keep` dynamic-binding mechanism (M130), if
         implemented — this is novel enough to warrant an architecture note.
   - [x] Refinement surface additions (M136) in whatever table/reference
         already documents native refinements, if one exists.
-- [x] Update `README.md`:
+- [x] Update `../../README.md`:
   - [x] Bump version to v0.10.0.
   - [x] Add every native landed in M130–M136 to the natives list.
         **Partial:** the v0.10 summary paragraph lists them by group; the

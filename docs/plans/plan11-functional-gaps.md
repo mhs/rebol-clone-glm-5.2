@@ -10,7 +10,7 @@ shippable and touches a different subsystem (`parse.rs`, `printer.rs`,
 cumulative type scaffolding — **M110–M113 may land in any order**; the
 numbering is priority, not dependency.
 
-Per `project-brief.md`, GUI / `draw` / `vid` / reactive dialects remain
+Per `../../project-brief.md`, GUI / `draw` / `vid` / reactive dialects remain
 **permanently out of scope**. Control-flow gaps (`unless`/`forever`/`for`/
 `forskip`) are deliberately **not** here — see `plan12-control-flow.md`.
 Everything else (series/string DSL round-out, object reflection, math
@@ -19,7 +19,7 @@ helpers, module extras, refinement expansion) is in
 
 ## Why these four
 
-The post-v0.8 feature audit (see conversation history / `project-brief.md`
+The post-v0.8 feature audit (see conversation history / `../../project-brief.md`
 "Known gaps") flagged twelve categories of missing functionality. Most are
 individually low-stakes (a missing predicate, a thin refinement). Four stood
 out as **functional**, not cosmetic — each one blocks a whole class of
@@ -41,7 +41,7 @@ otherwise-idiomatic Red programs:
    file-only; there is no streaming abstraction and no `read http://`. This
    is the largest architectural gap, deliberately last and most open-ended.
    M113 closes the synchronous subset: a `port!` value, a `net/` protocol
-   facade (per `rust-networking-protocol-crate-recommendation.md`), and
+   facade (per `../notes/rust-networking-protocol-crate-recommendation.md`), and
    HTTP/HTTPS GET via the **existing** `ureq` dep (TLS is on by default in
    ureq 2.x — no new dependency).
 
@@ -322,7 +322,7 @@ Ships a **synchronous** `port!` value type and a protocol facade
 M113 formalizes that path into a proper `port!` abstraction with streaming,
 a network capability gate, and an extensible facade for the v0.10+ protocol
 breadth. Other protocols from the project's crate-recommendation research
-(`rust-networking-protocol-crate-recommendation.md`) are **reserved as
+(`../notes/rust-networking-protocol-crate-recommendation.md`) are **reserved as
 `PortScheme` enum variants but not implemented in v0.9** — they error with a
 clear "not supported in v0.9" message rather than silently misbehaving.
 This is explicitly **not** the async/`Channel`-backed port model from
@@ -541,7 +541,7 @@ addition, not a rework.
       `cargo tree -p red-eval` should show no new direct deps vs. the v0.8
       baseline; `suppaftp`/`lettre`/`domain` are explicitly v0.10+ and must
       not appear in the v0.9 lockfile.
-- [x] Update `project-brief.md`:
+- [x] Update `../../project-brief.md`:
   - [x] Add a "Core Functional Gaps (v0.9)" subsection: parse recursion,
         `mold` native, series `sort`/set-ops, `port!` + minimal HTTP/HTTPS
         GET (via the existing `ureq` dep — TLS on by default).
@@ -553,10 +553,10 @@ addition, not a rework.
         error in v0.9), HTTP methods beyond GET, request headers/cookies/
         auth, redirect control, `write http://` (POST/PUT), and the async
         port model.
-  - [x] Reference `rust-networking-protocol-crate-recommendation.md` as
+  - [x] Reference `../notes/rust-networking-protocol-crate-recommendation.md` as
         the source for the composed-facade decision (so the rationale is
         discoverable from the brief, not just conversation history).
-- [x] Update `architecture.md`:
+- [x] Update `../../architecture.md`:
   - [x] `PortDef`/`PortScheme`/`PortState` struct definitions.
   - [x] The `crates/red-eval/src/net/` facade module tree (`mod.rs`/
         `protocol.rs`/`request.rs`/`response.rs`/`error.rs`/`http.rs`),
@@ -570,7 +570,7 @@ addition, not a rework.
         `NetError::UnsupportedInV09`).
   - [x] The `env.allow_network` capability gate (alongside `allow_shell`).
   - [x] Parse's sub-rule recursion path in the `parse.rs` design section.
-- [x] Update `README.md`:
+- [x] Update `../../README.md`:
   - [x] Bump version to v0.9.0.
   - [x] Add `mold`/`sort`/`unique`/`intersect`(series)/`union`(series)/
         `difference`(series)/`exclude`(series)/`open`/`close`/`create`/
@@ -688,7 +688,7 @@ full Red parity.
       `parse_count_word`, `parse_count_zero`.
 - [x] `examples/parse.red` updated (block-match line uses lit-words;
       added an integer-count demo block).
-- [x] `README.md` parse inventory documents `n rule` / `n m rule` +
+- [x] `../../README.md` parse inventory documents `n rule` / `n m rule` +
       the integer-is-always-a-count disambiguation.
 - [x] `cargo test -p red-eval` green (676 lib + 11 integration + 4
       golden harness tests).

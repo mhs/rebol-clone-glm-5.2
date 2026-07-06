@@ -1,7 +1,7 @@
 # Plan: Step-by-Step Build of the Red Clone POC
 
-Execution checklist for the project described in `project-brief.md` and
-architected in `architecture.md`. Work top-to-bottom; each milestone depends
+Execution checklist for the project described in `../../project-brief.md` and
+architected in `../../architecture.md`. Work top-to-bottom; each milestone depends
 on the one above unless noted.
 
 ## Milestone 1 — Scaffold workspace
@@ -322,11 +322,11 @@ on the one above unless noted.
 - [x] Add golden fixtures for each error case (one per error kind)
 - [x] Expand `red-eval/tests/programs/` to 15-20 fixtures covering all features
 - [x] Include fixtures for: arithmetic, strings, blocks, parens, functions, recursion, series ops, `parse`, errors
-- [x] Add a `tests/programs/README.md` explaining fixture format
+- [x] Add a `tests/programs/../../README.md` explaining fixture format
 - [x] Audit `mold` output for printer edge cases (empty block, nested quotes, floats)
 - [x] Add property-style test: `mold(parse(mold(v))) == mold(v)` for random-ish `Value`s
 - [x] Run clippy on workspace; fix warnings
 - [x] Run `cargo fmt --all --check`
 - [x] Final `cargo test --workspace` green
-- [x] Update `project-brief.md` and `architecture.md` if any drift was discovered
+- [x] Update `../../project-brief.md` and `../../architecture.md` if any drift was discovered
 - [x] Tag release `v0.1.0-poc`

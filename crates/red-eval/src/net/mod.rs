@@ -10,7 +10,7 @@
 //! so the dispatch table is obviously extensible for v0.10+.
 //!
 //! This is explicitly **not** the async/`Channel`-backed port model from
-//! `future-plan-concurrency.md` — it's the synchronous subset that makes
+//! `docs/plans/future-plan-concurrency.md` — it's the synchronous subset that makes
 //! `port!` exist as a value, unifies file I/O under the same `open`/`close`/
 //! `read`/`write`/`create` verbs Red scripts expect, gates network access
 //! (closing the sandbox hole where `read http://` worked unconditionally),

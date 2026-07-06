@@ -61,9 +61,9 @@ cargo run  -p red-cli -- --no-stdlib examples/arith.red   # skip stdlib auto-imp
 cargo run  -p red-cli -- --unset-on-unbound examples/arith.red  # evaluate unbound words to unset! (default off)
 ```
 
-See [`plan13-feature-parity.md`](./plan13-feature-parity.md) for the most
-recent feature-parity round-out; the `plan*.md` files at the repo root
-track the build history per version.
+See [`plan13-feature-parity.md`](./docs/plans/plan13-feature-parity.md) for the most
+recent feature-parity round-out; the `docs/plans/` files track the build
+history per version.
 
 ## What's implemented
 
@@ -373,7 +373,9 @@ rebol-clone/
 ├── KNOWN_ISSUES.md            # pre-existing bugs + VM/walker divergences
 ├── project-brief.md           # feature scope and design decisions
 ├── architecture.md            # implementation sketch (lexer/parser/compiler/VM/eval internals)
-└── plan*.md                    # per-version build checklists
+└── docs/
+    ├── plans/                 # per-version build checklists (plan*.md, future-plan*.md)
+    └── notes/                 # research notes (e.g. networking crate survey)
 ```
 
 ## Design notes
@@ -397,7 +399,7 @@ rebol-clone/
 ## Known gaps
 
 See [`project-brief.md`](./project-brief.md) and
-[`plan8-missing-types.md`](./plan8-missing-types.md) for the
+[`plan8-missing-types.md`](./docs/plans/plan8-missing-types.md) for the
 authoritative list. Headlines:
 
 - **Type-completeness gaps deferred:** `regex!` (powers a future `parse` extension and `find`/`replace` with `/regex`),
@@ -436,7 +438,7 @@ authoritative list. Headlines:
 - **Object path method calls** work for `o/method` followed by trailing
   block args; `func/refinement` bound refinements references are deferred.
 - **Reactivity (`react`/`is-thunk`) is a future candidate** (see
-  `future-plan-reactivity.md`); concurrency (actors/channels) is a future candidate. GUI / `draw` / `vid` dialects are permanently out of scope.
+  `docs/plans/future-plan-reactivity.md`); concurrency (actors/channels) is a future candidate. GUI / `draw` / `vid` dialects are permanently out of scope.
 - **Calendar `period!` deferred** — `duration!` is the fixed-length
   physical-time subset (days and below); months/years are calendar-bound and
   cannot be represented as nanoseconds. A future `period!` type could cover

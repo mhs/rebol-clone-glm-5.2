@@ -16,7 +16,7 @@ proper `decimal!` backed by [`rust_decimal`](https://crates.io/crates/rust_decim
 `integer!`/`float!`/`money!`/`percent!` and lets users opt in per-literal
 via the `3.14dec` suffix.
 
-Per `project-brief.md`, GUI / `draw` / `vid` / reactive dialects remain
+Per `../../project-brief.md`, GUI / `draw` / `vid` / reactive dialects remain
 **permanently out of scope**. v0.11 is an **additive release** for the
 decimal work — one new `Value` variant, its lexer/parser/mold/convert/
 arithmetic surface, and the mixed-type promotion rules. No new VM
@@ -380,12 +380,12 @@ hot-path instrs; every new construct is additive through the existing
       round-trip via f64). Add a proptest that `to-float to-decimal f`
       equals `f` when `f` has ≤ 15 significant digits (f64 precision
       bound).
-- [ ] README.md "Value types" section: add `Decimal` to the Scalars or
+- [ ] ../../README.md "Value types" section: add `Decimal` to the Scalars or
       Formatted-scalars bullet with example (`3.14dec`).
-- [ ] `project-brief.md`: add `decimal!` to the type list.
-- [ ] `architecture.md`: note the `rust_decimal` dep and the
+- [ ] `../../project-brief.md`: add `decimal!` to the type list.
+- [ ] `../../architecture.md`: note the `rust_decimal` dep and the
       Decimal/Float promotion rules.
-- [ ] `KNOWN_ISSUES.md`: add a note that `float!` NaN/Inf behavior is
+- [ ] `../../KNOWN_ISSUES.md`: add a note that `float!` NaN/Inf behavior is
       unchanged (still surfaces in `1.0 / 0.0` on floats); recommend
       `decimal!` for exact arithmetic.
 - [ ] VM/walker parity: verify `cargo test --workspace` and
@@ -398,7 +398,7 @@ hot-path instrs; every new construct is additive through the existing
 ## M154 — Polish & v0.11.0 release
 
 - [ ] Bump crate versions to 0.11.0 in all `Cargo.toml`s.
-- [ ] Update `BENCHMARKS.md`: note any perf delta on decimal-heavy loops
+- [ ] Update `../../BENCHMARKS.md`: note any perf delta on decimal-heavy loops
       (expected: ~3-5× slower than f64 for tight `+`/`*` loops; same as
       f64 for transcendentals since those convert to f64 anyway).
 - [ ] Tag `v0.11.0`.

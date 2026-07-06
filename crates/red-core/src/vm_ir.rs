@@ -32,7 +32,7 @@ use crate::value::{FuncDef, Span, Symbol, Value};
 /// `Symbol`-carrying variants. The dispatch loop's per-iteration `instrs[pc]`
 /// read becomes a cheap bitwise copy.
 ///
-/// Variant groups (mirroring `plan3.md`'s design summary):
+/// Variant groups (mirroring `docs/plans/plan3.md`'s design summary):
 /// - Constants: `Const(i)` pushes `pool[i]`. The small-value fast paths
 ///   `ConstInt(n)`/`ConstNone`/`ConstBool(b)` (M30) skip the pool indirection
 ///   for the common literal kinds, avoiding a `block_pool` lookup + `Rc`

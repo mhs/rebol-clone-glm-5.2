@@ -10,7 +10,7 @@ mirrors the "modern general-purpose language" expectation (Rust/Go/Swift all
 ship a Duration type), and replaces the stopgap integer-day-count with a
 typed value.
 
-Per `project-brief.md`, GUI / `draw` / `vid` / reactive dialects remain
+Per `../../project-brief.md`, GUI / `draw` / `vid` / reactive dialects remain
 **permanently out of scope**. v0.11 is a **single-type additive release** —
 one new `Value` variant, its lexer/parser/mold/convert/arithmetic surface,
 and the `date!` integration. No new VM hot-path instrs; every new construct
@@ -614,7 +614,7 @@ Path access and decomposition natives for inspecting durations.
 - [ ] Extend `red-core/tests/golden/` to cover the duration literal.
 - [ ] Expand `red-eval/tests/programs/` to 10+ new duration fixtures
       (literal, mold, arith, date integration, accessors, error cases).
-- [ ] Run `cargo bench --bench eval`; record in `BENCHMARKS.md` under
+- [ ] Run `cargo bench --bench eval`; record in `../../BENCHMARKS.md` under
       "v0.11.0".
   - [ ] Expected neutral on existing benches (the `date - date` path
         changes return type but not hot-path cost; the duration suffix in
@@ -624,7 +624,7 @@ Path access and decomposition natives for inspecting durations.
         i64 add).
 - [ ] Run `cargo clippy --workspace --all-targets -- -D warnings`; fix.
 - [ ] Run `cargo fmt --all --check`; fix.
-- [ ] Update `project-brief.md`:
+- [ ] Update `../../project-brief.md`:
   - [ ] Add a "`duration!` (v0.11)" subsection under "Value model": the
         new variant, the `chrono::Duration` backing (no new dep), the
         unit-suffix literal (single **and compound** — `30s` and `1d1h`),
@@ -632,7 +632,7 @@ Path access and decomposition natives for inspecting durations.
         overflow rejected), the `date - date` behavior change.
   - [ ] Update the value-model code block (add `Duration`).
   - [ ] Update "Deferred" — add the calendar-`period!` candidate.
-- [ ] Update `architecture.md`:
+- [ ] Update `../../architecture.md`:
   - [ ] New `Duration` variant in the value-model section.
   - [ ] The unit-suffix lexer branch (mirrors `percent!`'s pattern);
         **the compound component loop** (descending/repeat/overflow
@@ -640,7 +640,7 @@ Path access and decomposition natives for inspecting durations.
   - [ ] The `date_add`/`date_subtract` extension and the
         `date - date → duration!` transition.
   - [ ] The `duration_binop` dispatcher.
-- [ ] Update `README.md`:
+- [ ] Update `../../README.md`:
   - [ ] Bump version to v0.11.0.
   - [ ] Add `duration!` to the "Value types" list.
   - [ ] Add `duration?` to the type predicates list.

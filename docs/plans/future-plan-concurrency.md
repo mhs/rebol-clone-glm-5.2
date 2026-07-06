@@ -8,7 +8,7 @@ support parallel compute (multi-core `fib`, parallel `read url!`), non-
 blocking I/O, and Erlang-style actor structure with one coherent primitive
 set.
 
-Per `project-brief.md`, GUI/draw/VID/reactive dialects remain **permanently
+Per `../../project-brief.md`, GUI/draw/VID/reactive dialects remain **permanently
 out of scope** (reactivity itself is in scope via `plan6-reactivity.md`, but
 its GUI triggers are not). v0.6 **builds on** v0.5's `on-change` hooks —
 actors may subscribe to object fields for messages — but does not require
@@ -343,18 +343,18 @@ main thread and workers. Actors (M45) build on top.
       natives (`channel`, `send`, `recv`, `close`, `channel?`, `closed?`).
       Register in `natives/registry.rs` under a `register_concurrency` call.
       Place `spawn` (M43) in the same file when it lands.
-- [ ] Update `architecture.md`: add a "Concurrency (v0.6)" subsection under
+- [ ] Update `../../architecture.md`: add a "Concurrency (v0.6)" subsection under
       "Cross-cutting" documenting the Send boundary, the marshal/reject
       type list, `ThreadEnv`, and the channel primitives.
-- [ ] Update `project-brief.md`: add a "Concurrency (v0.6)" subsection
+- [ ] Update `../../project-brief.md`: add a "Concurrency (v0.6)" subsection
       under "Built-ins (full block set)" listing the 6 new natives. Add
       `Channel` to the `Value` enum list. Note "Threads + channels are
       always-on; no cargo feature gate (purely additive)."
-- [ ] Update `README.md`: add `Channel` to the value types list; add
+- [ ] Update `../../README.md`: add `Channel` to the value types list; add
       `channel`/`send`/`recv`/`close`/`channel?`/`closed?` to the natives
       count (~140 → ~146). Add a "Concurrency" subsection to "What's
       implemented" with a one-paragraph summary and a pointer to
-      `architecture.md`.
+      `../../architecture.md`.
 - [ ] Inline `#[test]`: `c: channel send c 5 recv c` returns `Integer(5)`
       (single-threaded smoke test).
 - [ ] Inline `#[test]`: `send` of a `Func` value raises

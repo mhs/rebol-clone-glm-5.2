@@ -1,13 +1,13 @@
 # Plan 8: Closures & Modules (v0.5)
 
 Execution checklist extending the v0.4.0 baseline in `plan5.md`. v0.5 lands the
-two features `README.md:294–296` calls out as the "headline v0.5 candidates":
+two features `../../README.md:294–296` calls out as the "headline v0.5 candidates":
 **first-class closures** (`closure!`) and **modules** (`module`/`import`/
 `export`). GUI/draw/vid remain permanently out of scope; reactivity (plan6) and
 concurrency (plan7) are *not* prerequisites and are not built here — v0.5 is a
 **language-organization release**.
 
-Per `project-brief.md`, every new construct is additive through the existing VM
+Per `../../project-brief.md`, every new construct is additive through the existing VM
 `Const`-pool + `Call`/`CallUser`/`MakeFunc` path; the v0.3.3 VM stays the
 default evaluator. The parity harness (`tests/parity.rs`) and
 `cargo test --workspace --features force-walk` remain the regression gates.
@@ -80,7 +80,7 @@ via `closure`.
   accepts only an `object!` (`object.rs:301–340`); `use` clones `user_ctx`
   into a child and swaps `env.user_ctx` temporarily (`words.rs:603–661`).
 - No `module`/`import`/`export` stubs exist anywhere; only doc mentions
-  (`README.md:296`, `architecture.md:1026`, `binding.rs:19–27`).
+  (`../../README.md:296`, `../../architecture.md:1026`, `binding.rs:19–27`).
 - `system` is an `object!` in `user_ctx["system"]` (`registry.rs:386–404`)
   — no module-path field exists.
 - `make object!` swaps `env.user_ctx` to the object's ctx during spec eval
@@ -461,8 +461,8 @@ re-walking:
 - In walker mode: `resolve_word` `Unbound` arm currently errors. Change to
   `env.user_ctx.get(sym).ok_or_else(|| EvalError::UnboundWord { ... })`.
 - **Parity:** the change brings the walker in line with the VM's existing
-  `LoadDynamic` behavior. Document the caveat in `project-brief.md` under
-  "Binding" (the `Unbound → error` rule at project-brief.md:260–261 gains a
+  `LoadDynamic` behavior. Document the caveat in `../../project-brief.md` under
+  "Binding" (the `Unbound → error` rule at ../../project-brief.md:260–261 gains a
   caveat: "unless a later `import`/`set` populated the user context after
   `bind_pass`").
 - **Regression guard:** all existing `unbound_word` error fixtures must still
@@ -703,7 +703,7 @@ Implementation notes:
       `make module!` literals.
 - [ ] Expand `red-eval/tests/programs/` to 20+ new fixtures (closures ×
       modules × paths).
-- [ ] Run `cargo bench --bench eval`; record in `BENCHMARKS.md` under
+- [ ] Run `cargo bench --bench eval`; record in `../../BENCHMARKS.md` under
       "v0.5.0". The closure-capture path adds a `Vec<Value>` alloc per
       `closure` creation — expected to be neutral on existing benches (no
       closures in fib/ackermann/sum_loop). If any bench regresses >5%,
@@ -711,9 +711,9 @@ Implementation notes:
       frame size.
 - [ ] Run `cargo clippy --workspace --all-targets -- -D warnings`; fix.
 - [ ] Run `cargo fmt --all --check`; fix.
-- [ ] Update `project-brief.md`:
+- [ ] Update `../../project-brief.md`:
   - [ ] Remove "closures" and "modules/`import`/`export`" from the
-        v0.5-candidates note (project-brief.md:270–271).
+        v0.5-candidates note (../../project-brief.md:270–271).
   - [ ] Add "Closures & Modules (v0.5)" subsection under "Binding &
         contexts": `closure!` snapshot-capture semantics, `module!`/
         `export`/`import`, the `resolve_word` `Unbound` → `user_ctx`
@@ -722,7 +722,7 @@ Implementation notes:
         section.
   - [ ] Note stdlib auto-import and `--module-path`/`--no-stdlib` CLI
         flags.
-- [ ] Update `architecture.md`:
+- [ ] Update `../../architecture.md`:
   - [ ] New value variants in the value-model section.
   - [ ] `ClosureDef`/`ModuleDef` struct definitions.
   - [ ] Closure capture cell mechanism (snapshot at `MakeClosure`,
@@ -732,10 +732,10 @@ Implementation notes:
   - [ ] Path resolution rules for `module!`.
   - [ ] The `resolve_word` `Unbound` → `user_ctx` fallback (behavior
         change).
-- [ ] Update `README.md`:
+- [ ] Update `../../README.md`:
   - [ ] Bump version to v0.5.0.
   - [ ] Remove "No closures" and "No modules" from "Known gaps"
-        (README.md:294–296).
+        (../../README.md:294–296).
   - [ ] Add "Closures & Modules" bullet under "What's implemented".
   - [ ] Add `closure`/`module`/`export`/`import`/`module?`/`closure?` to
         the natives list.

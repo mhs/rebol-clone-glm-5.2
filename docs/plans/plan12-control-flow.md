@@ -15,7 +15,7 @@ around evaluation machinery that already exists (`if`/`either`, `loop`,
 `while`, `foreach`/`forall`, `try`/`catch`); none requires a new `Value`
 variant or VM instruction.
 
-Per `project-brief.md`, GUI / `draw` / `vid` / reactive dialects remain
+Per `../../project-brief.md`, GUI / `draw` / `vid` / reactive dialects remain
 **permanently out of scope**. This plan does not touch parse, mold, series
 set-ops, or the port model — see `plan11-functional-gaps.md` for those, and
 `plan13-feature-parity.md` for everything else (reflection, math helpers,
@@ -237,7 +237,7 @@ v0.5.1 release.
       `break` mid-loop).
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` clean.
 - [x] `cargo fmt --all --check` clean.
-- [x] Update `README.md`: add `unless`/`forever`/`for`/`forskip` to the
+- [x] Update `../../README.md`: add `unless`/`forever`/`for`/`forskip` to the
       natives list; bump version to v0.5.1.
 - [x] Final `cargo test --workspace` green; `--features force-walk` green.
 - [ ] Tag release `v0.5.1`.
@@ -274,7 +274,7 @@ M123 was dropped (no `except`/`finally` in Red), so the M123-specific audit
 items are moot. The remaining polish/release tasks all pass; the v0.5.1 tag
 was created on the existing release commit (`88d83b0 release: v0.5.1 —
 control-flow completeness`). `recurse`/`recur` was deferred (see the open
-question below) and noted in `project-brief.md`'s "Known gaps."
+question below) and noted in `../../project-brief.md`'s "Known gaps."
 
 - [x] Audit `EvalError` rendering for any new error-carrying state `except`
       needed to add (M123). *(N/A — M123 dropped.)*
@@ -282,7 +282,7 @@ question below) and noted in `project-brief.md`'s "Known gaps."
       *(N/A — M123 dropped.)*
 - [x] Run `cargo clippy --workspace --all-targets -- -D warnings`; clean.
 - [x] Run `cargo fmt --all --check`; clean.
-- [x] Update `project-brief.md`: the "Control-Flow Completeness" entry
+- [x] Update `../../project-brief.md`: the "Control-Flow Completeness" entry
       (lines 396–398) lists `unless`/`forever`/`for`/`forskip`; none of these
       appear in "Known gaps." `recurse`/`recur` added to the deferred list.
 - [x] Final `cargo test --workspace` green; `--features force-walk` green.
@@ -294,7 +294,7 @@ question below) and noted in `project-brief.md`'s "Known gaps."
 1. **`recurse`/`recur`.** Not in the original seven-item gap list, but a
    natural companion (self-reference without naming the enclosing function —
    useful in anonymous `func`/`closure` bodies). **Decision: deferred.** Not
-   implemented in v0.5.1; noted in `project-brief.md`'s "Optional/deferred"
+   implemented in v0.5.1; noted in `../../project-brief.md`'s "Optional/deferred"
    list as a v0.6+ candidate so it doesn't silently disappear. Real Red has
    no `recurse`/`recur` native either (anonymous self-reference is done via
    `closure`/named funcs), so this is a possible future ergonomic extension

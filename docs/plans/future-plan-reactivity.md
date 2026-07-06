@@ -3,8 +3,8 @@
 Execution checklist extending the v0.4.0 baseline in `plan5.md`. v0.5 lands a
 **reactive dialect** matching upstream Red's `react`/`on-change` semantics —
 data-flow reactions over object fields, with no GUI dependency. Reverses the
-"permanently out of scope" stance documented in `README.md`,
-`project-brief.md`, and `plan2/3/4/5.md` (see "Scope reversal" below).
+"permanently out of scope" stance documented in `../../README.md`,
+`../../project-brief.md`, and `plan2/3/4/5.md` (see "Scope reversal" below).
 
 Per upstream Red, **reactions are object-field-scoped data-flow**, not
 GUI redraw signals: a `react [body]` re-runs `body` whenever an object
@@ -72,12 +72,12 @@ docs is a Red-world assumption (reactive's main upstream use is GUI
 redraws). The dialect itself is pure data-flow over object fields and
 needs no GUI. This plan reverses the stance:
 
-- [ ] `README.md:241` — change "**GUI / `draw` / `vid` / reactive dialects
+- [ ] `../../README.md:241` — change "**GUI / `draw` / `vid` / reactive dialects
       are permanently out of scope.**" to "**GUI / `draw` / `vid` are
       permanently out of scope.**" and add a "Reactive dialect" bullet
       under "What's implemented" once M50 lands.
-- [ ] `project-brief.md` — remove "reactive dialects" from the "Other
-      dialects (illustrative, NOT implemented)" list (`project-brief.md:
+- [ ] `../../project-brief.md` — remove "reactive dialects" from the "Other
+      dialects (illustrative, NOT implemented)" list (`../../project-brief.md:
       344-346`); add a "Reactive dialect" subsection under "Dialects"
       describing `react`/`on-change` semantics.
 - [ ] `plan2.md:9`, `plan3.md:10`, `plan4.md:7`, `plan5.md:10-11` — each
@@ -87,7 +87,7 @@ needs no GUI. This plan reverses the stance:
       `plan6-reactivity.md`."
 - [ ] `plan5.md:16` — strike "`object!` `on-change` reactive slots" from
       the v0.5+ deferred list (it lands here in v0.5).
-- [ ] Add a "Reactive dialect" section to `architecture.md` covering the
+- [ ] Add a "Reactive dialect" section to `../../architecture.md` covering the
       registry, hooks, batching, and GC (lands with M56).
 
 ## Semantic target (upstream Red parity)
@@ -207,7 +207,7 @@ no `unreact`, no `on-change`. Single-source reactions only.
       `update` triggers it. (Upstream Red's `/later` semantics: the
       reaction is registered but dormant until a dependency is
       established by a later `update` or by the user running the body
-      once via `cause-reaction`.) Document this in `architecture.md`.
+      once via `cause-reaction`.) Document this in `../../architecture.md`.
 
 ### Read tracking — hook placement
 
@@ -556,7 +556,7 @@ mechanism if needed.
 ### Decision criteria
 
 - **0–1% regression:** keep `react` always-on, no feature flag.
-  Document the measurement in `BENCHMARKS.md`.
+  Document the measurement in `../../BENCHMARKS.md`.
 - **1–5% regression:** feature flag, default-on in dev/test,
   default-off in `--release` perf builds. Document.
 - **>5% regression:** investigate the branch. Likely cause: the
@@ -568,7 +568,7 @@ mechanism if needed.
 ### Documentation
 
 - [ ] Add "Reactive dialect — performance" subsection to
-      `BENCHMARKS.md` with the bench numbers and the feature-flag
+      `../../BENCHMARKS.md` with the bench numbers and the feature-flag
       decision.
 
 ---
@@ -646,7 +646,7 @@ is dead weight. This milestone adds GC and hardens edge cases.
 
 ## Milestone 56 — Documentation
 
-- [ ] **`README.md`:**
+- [ ] **`../../README.md`:**
   - [ ] Remove "reactive dialects" from "Known gaps" (line 241).
   - [ ] Add "Reactive dialect" bullet under "What's implemented →
         Dialect" (alongside `parse`).
@@ -654,7 +654,7 @@ is dead weight. This milestone adds GC and hardens edge cases.
         `cause-reaction`/`update`/`clear-reactions` to the natives
         list.
   - [ ] Add `examples/reactive.red` to the examples table.
-- [ ] **`architecture.md`:**
+- [ ] **`../../architecture.md`:**
   - [ ] New "Reactive dialect" section covering the registry, the
         `Context` watcher hook, read tracking, write hook + batching,
         `on-change` vs `react`, the cycle guard, and the GC.
@@ -663,7 +663,7 @@ is dead weight. This milestone adds GC and hardens edge cases.
         design and the M54 feature-flag decision.
   - [ ] Update the mermaid crate-ownership diagram: `red-eval` now
         contains `react.rs`.
-- [ ] **`project-brief.md`:**
+- [ ] **`../../project-brief.md`:**
   - [ ] Remove "reactive dialects" from "Other dialects (illustrative,
         NOT implemented)" (line 344-346).
   - [ ] Add "Reactive dialect" subsection under "Dialects" describing
@@ -671,7 +671,7 @@ is dead weight. This milestone adds GC and hardens edge cases.
         object-field-scoped design.
   - [ ] Update "Decisions confirmed": add "Reactive dialect: in scope
         (v0.5); `react`/`on-change` over object fields, no GUI."
-- [ ] **`BENCHMARKS.md`:** add the M54 perf numbers and feature-flag
+- [ ] **`../../BENCHMARKS.md`:** add the M54 perf numbers and feature-flag
       decision.
 - [ ] **`examples/reactive.red`:** a self-contained demo (counter,
       derived field, `on-change` logger, `unreact`).

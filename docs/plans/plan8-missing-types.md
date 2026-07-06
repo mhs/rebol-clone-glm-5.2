@@ -7,7 +7,7 @@ the POC's `Value` enum and the Red/Rebol value type inventory by landing every
 missing variant the user-supplied canonical list calls out, plus `regex!`
 (already documented as a gap).
 
-Per `project-brief.md`, GUI / `draw` / `vid` / reactive dialects remain
+Per `../../project-brief.md`, GUI / `draw` / `vid` / reactive dialects remain
 **permanently out of scope**. v0.7 is a **type-completeness release**, in the
 spirit of v0.4 (plan5) but smaller: it lands ten new value types and their
 end-to-end scaffolding (lexer → parser → mold/form → walker arm → VM const-pool
@@ -978,9 +978,9 @@ wires the type-check into the call path.
 - [x] Expand `red-eval/tests/programs/` to 30+ new fixtures (one per new
       type × positive + error case). *(Audit confirmed 58 files matching
       the new-type keywords across `programs/` + `programs_errors/`.)*
-- [x] Run `cargo bench --bench eval`; record in `BENCHMARKS.md` under
+- [x] Run `cargo bench --bench eval`; record in `../../BENCHMARKS.md` under
       "v0.7.0". *(Recorded — new "Current status (v0.7.0, native arm64)"
-      section at the top of `BENCHMARKS.md` with end-to-end fixture table,
+      section at the top of `../../BENCHMARKS.md` with end-to-end fixture table,
       v0.5.0→v0.7.0 deltas, and the M89 type-check cost note.)*
   - [x] Expected neutral on existing benches (no new hot-path work).
         *(Confirmed: no new `Instr` variants; `fib 30` ~3.21× faster than
@@ -996,7 +996,7 @@ wires the type-check into the call path.
 - [x] Run `cargo clippy --workspace --all-targets -- -D warnings`; fix.
       *(Clean.)*
 - [x] Run `cargo fmt --all --check`; fix. *(Clean.)*
-- [x] Update `project-brief.md`:
+- [x] Update `../../project-brief.md`:
   - [x] Add a "Type Completeness (v0.7)" subsection under "Value model":
         list the nine landed variants, the `unset!` gated-fallback behavior
         change, the `native!`/`op!` split, the `typeset!` func-spec
@@ -1007,7 +1007,7 @@ wires the type-check into the call path.
   - [x] Update "Deferred" — remove the items now landed; add v0.8 candidates
         (reactivity, concurrency, port model, routine! FFI binding layer,
         typeset algebra, shared-cell closures, `regex!`/`struct!`/`handle!`).
-- [x] Update `architecture.md`:
+- [x] Update `../../architecture.md`:
   - [x] New value variants in the value-model section. *(Enum relabeled
         "v0.7"; added `Percent`/`Money`/`Issue`/`Email`/`Tag`/`Unset`;
         `Func` arm annotated with the M87 type-split note.)*
@@ -1020,7 +1020,7 @@ wires the type-check into the call path.
         the `Env` struct block; the `resolve_word` pseudocode + walker
         note updated with the gated branch.)*
   - [x] The `FuncDef.param_types` parallel vec and the call-time type-check.
-        *(Already documented at `architecture.md:80`/`:175-185`; M90 added
+        *(Already documented at `../../architecture.md:80`/`:175-185`; M90 added
         the "M89 typed-func arg type-check" + "M87 native!/op! split"
         paragraphs to the Native dispatch section.)*
   - [x] Path resolution rules for `email!`/`image!`. *(Added
@@ -1029,7 +1029,7 @@ wires the type-check into the call path.
   - [x] Series-model rules for `hash!`/`vector!` (which series ops apply).
         *(Added "hash! series model", "vector! series model", and
         "image! (limited)" subsections to the Series natives section.)*
-- [x] Update `README.md`:
+- [x] Update `../../README.md`:
   - [x] Bump version to v0.7.0. *(Lines 8/32/55; `--version` output
         auto-picks up `env!("CARGO_PKG_VERSION")`.)*
   - [x] Remove `tag!`/`image!`/`vector!`/`hash!` from "Known gaps" (now
@@ -1072,7 +1072,7 @@ wires the type-check into the call path.
 
 ## `ref!` deferral
 
-`ref!` appears in the user-supplied list and in `README.md:352`, but it is
+`ref!` appears in the user-supplied list and in `../../README.md:352`, but it is
 **excluded from v0.7**. Rationale:
 
 - Red's `ref!` is an internal C-level reference type used by the runtime, not

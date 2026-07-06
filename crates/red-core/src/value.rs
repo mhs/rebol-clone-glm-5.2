@@ -2052,7 +2052,7 @@ impl DateValue {
     }
 
     /// Apply `zone` to produce an absolute UTC instant. Zone-naive (`None`)
-    /// is treated as UTC for arithmetic only (matching plan5.md M45: "None
+    /// is treated as UTC for arithmetic only (matching docs/plans/plan5.md M45: "None
     /// treated as UTC for arithmetic").
     pub fn to_offset_utc(&self) -> DateTime<Utc> {
         let offset_secs = self.zone.unwrap_or(0) * 60;

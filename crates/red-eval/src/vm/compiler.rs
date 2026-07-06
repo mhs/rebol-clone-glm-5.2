@@ -1029,7 +1029,7 @@ fn patch_tail_call(c: &mut Compiler, self_func: Option<(u32, usize)>) {
 /// <then-block inline> ; pushes value (or nothing if block empty)
 /// L_end:
 /// ```
-/// Matches plan3.md's expected `[Const(true), JumpIfFalse(L1), Const(42), L1: Return]`.
+/// Matches docs/plans/plan3.md's expected `[Const(true), JumpIfFalse(L1), Const(42), L1: Return]`.
 ///
 /// `if` takes 2 args (cond + block); the block must be a literal `Block`.
 /// If the shape doesn't match (block arg isn't a literal Block), we fall
@@ -2085,9 +2085,9 @@ mod tests {
         );
     }
 
-    // --- Plan-required tests (plan3.md:307-318) --------------------------
+    // --- Plan-required tests (docs/plans/plan3.md:307-318) --------------------------
 
-    /// `5` -> `[ConstInt(5), Return]`. (plan3.md:307)
+    /// `5` -> `[ConstInt(5), Return]`. (docs/plans/plan3.md:307)
     ///
     /// M30: integer literals now emit `ConstInt(n)` (small-value fast path)
     /// instead of `Const(idx)` + a pool entry, skipping the pool indirection
@@ -2108,7 +2108,7 @@ mod tests {
     }
 
     /// `foo: 5 foo` -> `[ConstInt(5), SetGlobal(slot), Pop, LoadGlobal(slot), Return]`.
-    /// (plan3.md:308 — originally expected no `Pop`, but M25 adds `Pop` after
+    /// (docs/plans/plan3.md:308 — originally expected no `Pop`, but M25 adds `Pop` after
     /// non-last expressions to keep the VM stack disciplined. The SetWord is
     /// not the last expression, so its pushed-back value is popped before the
     /// `foo` load. The walker's `last = ...` overwrite is the equivalent.)
@@ -2141,7 +2141,7 @@ mod tests {
         assert_eq!(block.pool.len(), 0);
     }
 
-    /// `1 + 2` -> `[ConstInt(1), ConstInt(2), Call(+, 2), Return]`. (plan3.md:310)
+    /// `1 + 2` -> `[ConstInt(1), ConstInt(2), Call(+, 2), Return]`. (docs/plans/plan3.md:310)
     ///
     /// M30: both operands are `ConstInt` (no pool entries).
     #[test]
@@ -2166,7 +2166,7 @@ mod tests {
     }
 
     /// `if true [42]` -> `[LoadGlobal(true_slot), JumpIfFalse(4), ConstInt(42), Jump(5), ConstNone, Return]`.
-    /// (plan3.md:312 expected `Const(true)`, but `true` is a context-stored constant
+    /// (docs/plans/plan3.md:312 expected `Const(true)`, but `true` is a context-stored constant
     /// via `install_constants`, so the compiler emits `LoadGlobal` — matching the
     /// walker, which resolves `true` as a word bound to the user context.)
     ///
@@ -2206,7 +2206,7 @@ mod tests {
     }
 
     /// `if 1 [42]` exercises the pure-Const(cond) path (literal cond, not a
-    /// context-stored constant like `true`). Verifies the plan3.md:312
+    /// context-stored constant like `true`). Verifies the docs/plans/plan3.md:312
     /// instr shape with the M29 `none` push for the false branch.
     ///
     /// M30: `1`/`42` are `ConstInt`, `none` is `ConstNone`.
@@ -2237,7 +2237,7 @@ mod tests {
         assert_eq!(block.pool.len(), 0);
     }
 
-    /// `func [x][x * x]` emits `MakeFunc` with freevars=[]. (plan3.md:314)
+    /// `func [x][x * x]` emits `MakeFunc` with freevars=[]. (docs/plans/plan3.md:314)
     #[test]
     fn compile_func_makefunc() {
         let (body, ctx_rc, registry) = parse_bind_and_registry("square: func [x][x * x]");
@@ -2259,7 +2259,7 @@ mod tests {
         }
     }
 
-    /// A recursive factorial emits `CallUser(0, 1)` referencing its own slot. (plan3.md:316)
+    /// A recursive factorial emits `CallUser(0, 1)` referencing its own slot. (docs/plans/plan3.md:316)
     #[test]
     fn compile_recursive_factorial_calluser() {
         // `fact: func [n][either n <= 1 [1][n * fact n - 1]]`

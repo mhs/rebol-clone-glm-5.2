@@ -6,7 +6,7 @@ core-language completeness items (refinements, conversions, strings, control
 flow, math). Work top-to-bottom; each milestone depends on the one above
 unless noted.
 
-Per `project-brief.md`, GUI/draw/VID/reactive dialects are **permanently out of
+Per `../../project-brief.md`, GUI/draw/VID/reactive dialects are **permanently out of
 scope** and will not appear in this or future plans.
 
 Deferred to v0.3+ (acknowledged but not built here): `char!`, `map!`, `pair!`,
@@ -228,7 +228,7 @@ Deferred to v0.3+ (acknowledged but not built here): `char!`, `map!`, `pair!`,
 - [~] Inline `#[test]`: `now` returns a value with year/month/day fields accessible
       — **deferred with `now`**
 - [x] Add golden fixtures: file-copying program, line-count program
-- [x] Document sandbox policy in `project-brief.md`: no shell by default in tests
+- [x] Document sandbox policy in `../../project-brief.md`: no shell by default in tests
 - [x] `cargo test --workspace` passes
 
 ## Milestone 21 — Polish & v0.2.0 release
@@ -249,11 +249,11 @@ Deferred to v0.3+ (acknowledged but not built here): `char!`, `map!`, `pair!`,
 - [x] Expand `red-eval/tests/programs/` to 30-40 fixtures (now ~85 program
       fixtures + ~18 error fixtures)
 - [x] Run clippy + `cargo fmt --all --check`; fix
-- [x] Update `project-brief.md` and `architecture.md`:
+- [x] Update `../../project-brief.md` and `../../architecture.md`:
       - Add `Object`/`File`/`Url`/`Path`/`GetPath`/`LitPath` to value model
       - Document refinement dispatch in architecture
       - Document path resolution rules
       - Note `char!`/`map!`/`date!` still deferred to v0.3
-- [x] Add `README.md` with quickstart, supported features, known gaps
+- [x] Add `../../README.md` with quickstart, supported features, known gaps
 - [x] Final `cargo test --workspace` green
 - [ ] Tag release `v0.2.0`

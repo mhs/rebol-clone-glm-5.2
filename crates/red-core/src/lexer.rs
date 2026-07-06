@@ -1431,7 +1431,7 @@ fn consume_digits(bytes: &[u8], mut i: usize) -> usize {
 /// 2+ dots between digit-only runs), or neither (`None` → plain int/
 /// float, handled by `scan_number`). Does not advance `i`.
 ///
-/// Disambiguation rules (per plan5.md M44):
+/// Disambiguation rules (per docs/plans/plan5.md M44):
 /// - `x` separator between two digit-led runs → pair (both sides may be int
 ///   or float, e.g. `1x2`, `1.5x2.5`, `1.0e2x3`).
 /// - 2+ dots between digit-only runs → tuple (scan_tuple enforces the 3–4

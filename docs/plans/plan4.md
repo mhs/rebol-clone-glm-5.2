@@ -3,7 +3,7 @@
 Execution checklist extending the v0.2.0/v0.3 baseline in `plan2.md` / `plan3.md`.
 Unlike the prior milestone-driven plans, **plan4 is a code-review remediation release**:
 no new language features, no perf work. It pays down the debt surfaced by a full
-review of `crates/red-core`, `red-eval`, and `red-cli`. Per `project-brief.md`,
+review of `crates/red-core`, `red-eval`, and `red-cli`. Per `../../project-brief.md`,
 GUI/draw/VID/reactive dialects remain permanently out of scope.
 
 Each item below carries a severity tag and file:line references. Work top-to-bottom;
@@ -271,7 +271,7 @@ Lowest priority; bundle into a single cleanup commit at the end.
 - [x] **Document the `Rc::as_ptr` ABA mitigation** *(low)*
       `crates/red-core/src/env.rs:121, 129` and
       `crates/red-eval/src/interp_legacy.rs:98-107`. The M29 `source_span`
-      secondary check is documented in-line but not in `architecture.md`. Add
+      secondary check is documented in-line but not in `../../architecture.md`. Add
       a paragraph so the trade-off (probabilistic collision on equal spans for
       synthetic test blocks) is discoverable.
 

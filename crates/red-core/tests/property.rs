@@ -137,7 +137,7 @@ fn gen_value(_depth: u32) -> BoxedStrategy<Value> {
         // validates), an optional time (HH:MM:SS), and an optional fixed
         // offset zone (0..=14h). The mold form `DD-Mon-YYYY[/HH:MM:SS[+HH:MM]]`
         // reparses through the new lexer rule. Skip the `now`-derived zone
-        // (use fixed offsets only, per plan5.md M45 line 627).
+        // (use fixed offsets only, per docs/plans/plan5.md M45 line 627).
         (1900i32..2100, 1u32..=12, 1u32..=28).prop_map(|(y, m, d)| {
             let date = red_core::NaiveDate::from_ymd_opt(y, m, d).unwrap();
             Value::date(DateValue::date_only(date))

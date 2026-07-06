@@ -970,7 +970,7 @@ rules above for `width`/`height`/`size`/coord access.
 ### `port!` + networking (M113)
 The `crates/red-eval/src/net/` module is a synchronous protocol facade
 layered over the existing `ureq = "2"` dep (TLS on by default in ureq 2.x —
-no new dependency; see `rust-networking-protocol-crate-recommendation.md`
+no new dependency; see `docs/notes/rust-networking-protocol-crate-recommendation.md`
 for the composed-facade rationale). Module tree:
 
 ```
@@ -1477,7 +1477,7 @@ main levers:
   mutable closure state.
 - **Deferred to v0.6+** (acknowledged, not built): shared-cell closures
   (proper SetWord capture), `unimport`, reactivity (`react`/`is-thunk` —
-  see `future-plan-reactivity.md`), concurrency (actors/channels, v0.7),
+  see `docs/plans/future-plan-reactivity.md`), concurrency (actors/channels, v0.7),
   full port model, `any*?` family beyond what ships here, `tag!`, `ref!`,
   `image!`, `vector!`, `hash!`, `regex!`, `logic!`/`bitset!` advanced ops,
   `object!` `on-change` reactive slots, `routine!` FFI, named timezones

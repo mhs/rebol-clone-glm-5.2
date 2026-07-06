@@ -5,7 +5,7 @@ v0.6 lands **modern package management** — a `red pkg` toolchain, a
 `package.red` manifest dialect, git/path source resolution, a `red.lock`
 lockfile, and **runtime-loadable native plugins** via cdylib + `dlopen`.
 
-Per `project-brief.md`, every new construct is additive through the existing
+Per `../../project-brief.md`, every new construct is additive through the existing
 VM `Const`-pool + `Call`/`CallUser`/`MakeFunc` path; the v0.3.3 VM stays the
 default evaluator. The parity harness (`tests/parity.rs`) and
 `cargo test --workspace --features force-walk` remain the regression gates.
@@ -143,7 +143,7 @@ Layer 1 as a cheap backstop, Layer 3 as the real defense. Layer 2
 
 ## Relationship to `routine!` FFI
 
-Red's `routine!` (deferred in `project-brief.md:280`) is a *compile-time*
+Red's `routine!` (deferred in `../../project-brief.md:280`) is a *compile-time*
 FFI binding generator — you write `routine "int printf(char* fmt, ...)"`
 inline and the compiler generates a binding. The cdylib plugin layer is a
 *runtime* extension mechanism — packages ship pre-compiled `.dylib`s with
@@ -891,7 +891,7 @@ deps, version conflicts, `red-version` constraints.
       `load-plugin`.
 - [ ] **Edit: `crates/red-cli/src/main.rs`** — `--help` lists
       `load-plugin` under `--allow-shell`-gated natives.
-- [ ] **New: `examples/packages/README.md`** — walkthrough of the
+- [ ] **New: `examples/packages/../../README.md`** — walkthrough of the
       `mathutils` example (path-dep version, hermetic). Git-dep version
       documented but not tested (network).
 - [ ] **Edit: `crates/red-eval/src/plugin.rs`** module docs — document the
@@ -921,14 +921,14 @@ deps, version conflicts, `red-version` constraints.
 - [ ] **Property test:** `mold(parse(mold(v)))` round-trip for the
       `package.red` block form (extend `red-core/tests/property.rs` or add
       a `red-pkg/tests/property.rs`).
-- [ ] **Run `cargo bench --bench eval`**; record in `BENCHMARKS.md` under
+- [ ] **Run `cargo bench --bench eval`**; record in `../../BENCHMARKS.md` under
       "v0.6.0". The plugin trampoline adds a per-native-call FFI cost —
       expected to be neutral on existing benches (no plugin natives in
       fib/ackermann/sum_loop). If any bench regresses >5%, investigate the
       trampoline's arg-marshalling cost.
 - [ ] **Run `cargo clippy --workspace --all-targets -- -D warnings`**; fix.
 - [ ] **Run `cargo fmt --all --check`**; fix.
-- [ ] **Update `project-brief.md`:**
+- [ ] **Update `../../project-brief.md`:**
   - [ ] Remove "modules / `import` / `export`" and "closures" from the
         v0.5-candidates note (already done by plan6's M65; verify).
   - [ ] Add "Package Manager & Native Plugins (v0.6)" subsection under
@@ -942,7 +942,7 @@ deps, version conflicts, `red-version` constraints.
         plugin layer — see "Relationship to `routine!`"); add "WASM
         plugins", "plugin sandboxing", "plugin hot-reload", "central
         registry server", "multiple versions side-by-side".
-- [ ] **Update `architecture.md`:**
+- [ ] **Update `../../architecture.md`:**
   - [ ] New section "Plugin system" — cdylib + `dlopen`, opaque handles,
         the `red-plugin-abi` crate, the trampoline, the three drift
         layers, allocator discipline, threat model.
@@ -951,7 +951,7 @@ deps, version conflicts, `red-version` constraints.
   - [ ] Note the `Env::plugins`/`plugin_handles` fields and the
         `invalidate_native_index` call after `load_plugin`.
   - [ ] Note the `RunOptions::plugin_paths`/`auto_load_plugins` fields.
-- [ ] **Update `README.md`:**
+- [ ] **Update `../../README.md`:**
   - [ ] Bump version to v0.6.0.
   - [ ] Add "Packages & Native Plugins" bullet under "What's implemented".
   - [ ] Add `load-plugin`/`import` (plugin) to the natives list.

@@ -1,13 +1,13 @@
 # Plan 5: Language Completeness (v0.4)
 
 Execution checklist extending the v0.3.0/v0.3.3 baseline in `plan3.md` /
-`plan4.md`. v0.4 closes the **"Known gaps"** list in `README.md` by landing the
+`plan4.md`. v0.4 closes the **"Known gaps"** list in `../../README.md` by landing the
 deferred value types and the missing pieces of the `parse` dialect. The
 language surface — frozen at v0.2 for the v0.3 performance release —
 re-opens for v0.4: new value variants, new natives, new literals, new
 predicates, and a real error model.
 
-Per `project-brief.md`, GUI/draw/VID/reactive dialects remain **permanently
+Per `../../project-brief.md`, GUI/draw/VID/reactive dialects remain **permanently
 out of scope**.
 
 Deferred to v0.5+ (acknowledged, not built here): modules / `import` /
@@ -747,26 +747,26 @@ Closes the most-limited core feature. Adds the missing rule words, the
 - [x] Extend `red-core/tests/golden/` to cover all new literals
 - [x] Expand `red-eval/tests/programs/` to 50+ new fixtures (one per new
         feature × positive + error case)
-- [x] Run `cargo bench --bench eval` and record numbers in `BENCHMARKS.md`
+- [x] Run `cargo bench --bench eval` and record numbers in `../../BENCHMARKS.md`
       under a new "v0.4.0" header — **regression noted but attributed to
       environment drift (v0.3.0 tag reproduces the same numbers on this
       machine); no v0.4 code change introduces per-iter work in the VM
       dispatch loop**
 - [x] Run clippy + `cargo fmt --all --check`; fix
-- [x] Update `project-brief.md`:
+- [x] Update `../../project-brief.md`:
   - [x] Add `Char`/`Pair`/`Tuple`/`Date`/`Map`/`Bitset`/real `String8` to
         the value model section
   - [x] Document the full error model (`code`/`type`/`args`/`near`/
         `where`/`by`)
   - [x] Document `parse` rule additions
   - [x] Note `chrono`/`indexmap` deps
-- [x] Update `architecture.md`:
+- [x] Update `../../architecture.md`:
   - [x] New value variants in the value-model section
   - [x] `MapDef`/`BitsetDef`/`DateValue`/`MapKey` struct definitions
   - [x] Path resolution rules for `map!`
   - [x] Trig/transcendental native list
   - [x] `parse` rule inventory
-- [x] Update `README.md`:
+- [x] Update `../../README.md`:
   - [x] Bump version to v0.4.0
   - [x] Remove closed items from "Known gaps" (char/map/pair/tuple/date/
         bitset/binary/compose/trig/parse rules/error fields)

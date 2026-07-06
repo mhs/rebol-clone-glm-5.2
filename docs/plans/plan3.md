@@ -7,7 +7,7 @@ flat instruction stream, words resolve via **lexical addressing** (frame depth
 + slot index) where statically analyzable, falling back to the existing dynamic
 `Context` slot mechanism for `bind`/`use`/`make object!`/`do`-on-data cases.
 
-Per `project-brief.md`, GUI/draw/VID/reactive dialects remain **permanently out
+Per `../../project-brief.md`, GUI/draw/VID/reactive dialects remain **permanently out
 of scope**.
 
 Deferred to v0.4+ (acknowledged, not built here): `char!`, `map!`, `pair!`,
@@ -62,7 +62,7 @@ so later milestones can prove the speedup rather than assert it.
 
 This milestone ships **no behavior change**: it only adds benches, a
 call-depth counter, and a benchmark-fixture program set. All numbers are
-captured in `BENCHMARKS.md` (committed) so the VM milestones have a written
+captured in `../../BENCHMARKS.md` (committed) so the VM milestones have a written
 baseline to point at.
 
 - [x] Add `criterion` to `crates/red-eval/Cargo.toml [dev-dependencies]`
@@ -122,13 +122,13 @@ baseline to point at.
       in `interp::eval`; an "instr" is one `eval_expression` step, so
       `1 + 2` is exactly 1 instr.)
 - [x] Gate both counters behind a new `stats` cargo feature on `red-eval` so
-      release builds pay zero cost. Document in `architecture.md`. (Ground
+      release builds pay zero cost. Document in `../../architecture.md`. (Ground
       truth: the feature is defined on `red-core` (`stats = []`); `red-eval`
       re-exports it as `stats = ["red-core/stats"]`. The fields are absent
       from the `Env` struct layout when the feature is off — a compile-time
       test in `red-core/src/env.rs` confirms their absence.)
 - [x] Run the benches on the developer's machine (macOS for this repo) and
-      record numbers in a new `BENCHMARKS.md` at the repo root:
+      record numbers in a new `../../BENCHMARKS.md` at the repo root:
       - One table per fixture group with `mean`, `p99`, `throughput`
         (Ground truth: criterion's default output is `mean` + `[lower, upper]`
         confidence interval; no `p99` or `throughput` columns were emitted
@@ -142,9 +142,9 @@ baseline to point at.
       default 10s sample) for faster CI-like turnaround; record both short and
       full-sample numbers. (Ground truth: the short-sample run was used as a
       smoke check; the *full-sample* run (`cargo bench --bench eval`) produced
-      the numbers recorded in `BENCHMARKS.md`. The short mode disables
+      the numbers recorded in `../../BENCHMARKS.md`. The short mode disables
       statistical analysis, so only the full-sample numbers are in the doc.)
-- [x] Add `crates/red-eval/benches/README.md` explaining how to run benches,
+- [x] Add `crates/red-eval/benches/../../README.md` explaining how to run benches,
       how to compare two runs (`critcmp`), and what regress-guard threshold
       M30 will enforce (10%)
 - [x] Inline `#[test]`: each `.red` fixture in `benches/programs/` produces a
@@ -174,8 +174,8 @@ baseline to point at.
 - [x] `cargo test --workspace` passes (no `stats` feature)
 - [x] `cargo test --workspace --features red-eval/stats` passes
 - [x] `cargo bench --bench eval` runs to completion without errors (numbers
-      recorded in `BENCHMARKS.md`)
-- [x] Commit `BENCHMARKS.md` with the baseline table; tag the baseline as
+      recorded in `../../BENCHMARKS.md`)
+- [x] Commit `../../BENCHMARKS.md` with the baseline table; tag the baseline as
       `v0.2.0-baseline-bench` so M30 can pull it for comparison
 
 ## Milestone 22 - IR + value-model prep
@@ -972,7 +972,7 @@ baseline to point at.
       (Ground truth: `Value::String` uses `Rc<str>`; `Value::clone()` bumps
       the refcount. No accidental deep copies found — `block_pool` and
       `LoadGlobal` clone the `Value` (one `Rc` bump), not the string bytes.)
-- [x] Document findings in `architecture.md` ("Performance" section)
+- [x] Document findings in `../../architecture.md` ("Performance" section)
       (Ground truth: added "Performance (v0.3.0 VM, M30)" section before
       "Cross-cutting", documenting the 7 optimizations, the A/B bench harness,
       and the wins/regressions.)
@@ -994,7 +994,7 @@ baseline to point at.
       (Ground truth: `cargo test --workspace` (580 tests), `--features
       force-walk`, and `--features red-eval/stats` all pass. `cargo build
       --workspace --tests` emits zero warnings. `cargo bench --bench eval`
-      runs to completion; numbers recorded in `BENCHMARKS.md`.)
+      runs to completion; numbers recorded in `../../BENCHMARKS.md`.)
 
 ## Milestone 30.1 - v0.3.1 Speedup plan
 
@@ -1418,20 +1418,20 @@ per-recursion-call overhead. All are semantics-preserving.
       (Ground truth: `cargo fmt --all` applied (pre-existing fmt drift in
       `cli.rs`, `context.rs`, `value.rs` from earlier milestones — all
       auto-fixed). `cargo fmt --all --check` now exits 0.)
-- [x] Update `project-brief.md`:
+- [x] Update `../../project-brief.md`:
       - Add "Execution model" section: bytecode compiler + stack VM, lexical
         addressing, tail calls, walker retained for `bind`/`use`/`do`-on-data
         fallback
       - Note language surface frozen at v0.2 for v0.3
       - Note `--walk`/`--disasm`/`--trace` CLI flags
       (Ground truth: updated the status banner at the top of
-      `project-brief.md` to v0.3. The "Execution model (v0.3)" block covers
+      `../../project-brief.md` to v0.3. The "Execution model (v0.3)" block covers
       the bytecode compiler + stack VM, lexical addressing, tail-call
       optimization, the walker fallback, and all four CLI flags (`--walk`/
       `--disasm`/`--disasm-func`/`--trace`). Explicitly notes "the language
       surface is frozen at v0.2 for v0.3 — no new natives or value types;
       v0.3 is a performance release".)
-- [x] Update `architecture.md`:
+- [x] Update `../../architecture.md`:
       - Add "Compiler" section (scope analysis, freevars, tail-position
         detection)
       - Add "VM" section (frames, stack, instr dispatch, refinement
@@ -1447,7 +1447,7 @@ per-recursion-call overhead. All are semantics-preserving.
       diagram to include a `Compile` node and a mode-dispatch branch
       (`Vm` → Compiler → CompiledBlock → Stack VM; `Walk`/`needs_rebind` →
       Tree-walker).)
-- [x] Update `README.md` quickstart with `--disasm` and `--walk` flags
+- [x] Update `../../README.md` quickstart with `--disasm` and `--walk` flags
       (Ground truth: updated the "Build & run" section with `--walk`,
       `--disasm`, `--disasm-func`, and `--trace` examples. Updated the
       "Status" section to v0.3.0 (three crates + fuzz crate, VM default,

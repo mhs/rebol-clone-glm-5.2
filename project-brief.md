@@ -522,7 +522,7 @@ binding, not just dynamic lookup.
   async/`Channel`-backed port model are deferred to v0.7+. Network access
   is gated behind `--allow-network` (default off, mirroring `--allow-shell`).
   See `plan11-functional-gaps.md` and
-  `rust-networking-protocol-crate-recommendation.md`.
+  `docs/notes/rust-networking-protocol-crate-recommendation.md`.
 
 ### Spans
 Each `Block`/`Paren` retains the span of its `[...]`/`(...)` delimiters;
@@ -607,7 +607,7 @@ for `bind` to report unbound words with a location.
   `create`/`read port`/`read url!` for HTTP/HTTPS GET via the existing
   `ureq` dep — TLS on by default in ureq 2.x, no new dependency) behind a
   `--allow-network` capability gate. See `plan11-functional-gaps.md` and
-  `rust-networking-protocol-crate-recommendation.md` (the composed-facade
+  `docs/notes/rust-networking-protocol-crate-recommendation.md` (the composed-facade
   rationale).
   v0.7 (M80–M89): **type completeness** — `percent!`/`money!`/`issue!`/
   `email!`/`tag!`/`unset!`/`hash!`/`vector!`/`image!`/`typeset!`,
@@ -906,7 +906,7 @@ A small `tests/common/mod.rs` helper in each crate walks a directory and generat
 11. REPL mode in CLI
 12. Golden program suite for eval; error handling polish
 13. v0.2 (M13–M20): refinements, paths, objects, file/shell I/O, strings,
-    math/bitwise, conversions, control-flow expansion — see `plan2.md`.
+    math/bitwise, conversions, control-flow expansion — see `docs/plans/plan2.md`.
 
 ## Decisions confirmed
 - Floats: included from the start

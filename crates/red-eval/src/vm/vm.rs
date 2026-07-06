@@ -1844,35 +1844,35 @@ mod tests {
         }
     }
 
-    /// VM runs `5` -> `Integer(5)`. (plan3.md:461)
+    /// VM runs `5` -> `Integer(5)`. (docs/plans/plan3.md:461)
     #[test]
     fn vm_runs_literal() {
         let v = run_vm("5");
         assert!(matches!(v, Value::Integer { n: 5, .. }));
     }
 
-    /// VM runs `1 + 2` -> `Integer(3)`. (plan3.md:462)
+    /// VM runs `1 + 2` -> `Integer(3)`. (docs/plans/plan3.md:462)
     #[test]
     fn vm_runs_infix() {
         let v = run_vm("1 + 2");
         assert!(matches!(v, Value::Integer { n: 3, .. }));
     }
 
-    /// VM runs `foo: 5 foo` -> `Integer(5)`. (plan3.md:463)
+    /// VM runs `foo: 5 foo` -> `Integer(5)`. (docs/plans/plan3.md:463)
     #[test]
     fn vm_runs_setword_load() {
         let v = run_vm("foo: 5 foo");
         assert!(matches!(v, Value::Integer { n: 5, .. }));
     }
 
-    /// VM runs `if true [42]` -> `Integer(42)`. (plan3.md:464)
+    /// VM runs `if true [42]` -> `Integer(42)`. (docs/plans/plan3.md:464)
     #[test]
     fn vm_runs_if() {
         let v = run_vm("if true [42]");
         assert!(matches!(v, Value::Integer { n: 42, .. }));
     }
 
-    /// VM runs `square: func [x][x * x] square 5` -> `Integer(25)`. (plan3.md:465)
+    /// VM runs `square: func [x][x * x] square 5` -> `Integer(25)`. (docs/plans/plan3.md:465)
     #[test]
     fn vm_runs_square() {
         let v = run_vm("square: func [x][x * x] square 5");
@@ -1883,7 +1883,7 @@ mod tests {
         );
     }
 
-    /// VM runs recursive `fact 5` -> `Integer(120)`. (plan3.md:466)
+    /// VM runs recursive `fact 5` -> `Integer(120)`. (docs/plans/plan3.md:466)
     ///
     /// M25 doesn't implement tail-call optimization (M28 does); the test
     /// verifies correctness at `fact 5` (shallow recursion, no stack concern).
@@ -1904,7 +1904,7 @@ mod tests {
     /// `copy/part [1 2 3] 2` runs through the VM with refinement dispatch:
     /// the compiler emits `MarkRefine("part")` + the arg + `EndRefine`, and
     /// the VM assembles `RefineArgs` from the stack marks before invoking the
-    /// `copy` native. (plan3.md:547)
+    /// `copy` native. (docs/plans/plan3.md:547)
     #[test]
     fn vm_copy_part() {
         let v = run_vm("copy/part [1 2 3] 2");
@@ -1913,7 +1913,7 @@ mod tests {
 
     /// `find/case [a A b] 'A` runs through the VM with a zero-arity
     /// refinement (`/case`). The `MarkRefine("case")` + `EndRefine` region
-    /// carries no args; `find` sees `refs.has("case")`. (plan3.md:548)
+    /// carries no args; `find` sees `refs.has("case")`. (docs/plans/plan3.md:548)
     #[test]
     fn vm_find_case() {
         let v = run_vm("find/case [a A b] 'A");
@@ -1923,7 +1923,7 @@ mod tests {
     /// `foreach x [1 2 3][print x]` -> "1\n2\n3\n" via VM. The `foreach`
     /// native recurses into its body block through `dispatch_block`, which
     /// (with `Env::mode == Vm`) compiles the body and runs it on the VM each
-    /// iteration. (plan3.md:549)
+    /// iteration. (docs/plans/plan3.md:549)
     #[test]
     fn vm_foreach_print() {
         let (block, mut env, buf) = compile_for_vm_captured("foreach x [1 2 3][print x]");
@@ -1934,7 +1934,7 @@ mod tests {
 
     /// `switch 2 [1 ["a"] 2 ["b"]]` -> `"b"` via VM. The `switch` native
     /// evaluates the matched body block through `dispatch_block` (VM path).
-    /// (plan3.md:550)
+    /// (docs/plans/plan3.md:550)
     #[test]
     fn vm_switch() {
         let v = run_vm("switch 2 [1 [\"a\"] 2 [\"b\"]]");
@@ -1948,7 +1948,7 @@ mod tests {
     /// to `user_ctx` (not a foreign context), so `has_foreign_bindings` returns
     /// false and `dispatch_block` routes the `do`'d block to the VM. The VM
     /// compiles `[x: 5]` (SetGlobal + Const) and runs it, setting `x` to 5;
-    /// the trailing `x` loads it back. (plan3.md:551)
+    /// the trailing `x` loads it back. (docs/plans/plan3.md:551)
     ///
     /// Note: the plan3 "falls back to walker" qualifier assumed `bind` targets
     /// a foreign context. In the POC, `bind` always targets `user_ctx`, so the
@@ -1973,7 +1973,7 @@ mod tests {
     /// `dispatch_block_reduce`, which compiles the block with
     /// `compile_block_reduce` (no `Pop` between expressions) and runs
     /// `run_reduce`, collecting the stack into a `Value::Block`.
-    /// (plan3.md:565 — "`reduce` native: same logic")
+    /// (docs/plans/plan3.md:565 — "`reduce` native: same logic")
     #[test]
     fn vm_reduce() {
         let v = run_vm("reduce [1 + 1 2 + 2]");
@@ -1987,7 +1987,7 @@ mod tests {
     /// A `func` invoked twice compiles its body exactly once. The first
     /// `CallUser` misses the `Env::func_cache` and compiles; the second hits
     /// the cache (keyed by `Rc::as_ptr(fd)`, stable across `Rc` clones).
-    /// (plan3.md:646)
+    /// (docs/plans/plan3.md:646)
     #[test]
     fn vm_func_compiles_once_across_calls() {
         crate::vm::compiler::reset_compile_counter();
@@ -2021,7 +2021,7 @@ mod tests {
     /// to `LoadDynamic` + 0 args, not `CallUser`). Calling runtime-constructed
     /// funcs is walker territory until a future milestone adds flow-sensitive
     /// func-arity inference. The cache invalidation itself is what's under
-    /// test here, not the call path. (plan3.md:648)
+    /// test here, not the call path. (docs/plans/plan3.md:648)
     #[test]
     fn vm_bind_func_invalidates_cache() {
         let (block, mut env, _buf) =
@@ -2053,7 +2053,7 @@ mod tests {
     /// on first call" half is covered by `vm_func_compiles_once_across_calls`
     /// (which uses the `func` keyword so the compiler emits `MakeFunc` +
     /// `CallUser`). Full call-path generality arrives with flow-sensitive
-    /// func-arity inference in a future milestone. (plan3.md:649)
+    /// func-arity inference in a future milestone. (docs/plans/plan3.md:649)
     #[test]
     fn vm_make_function_lazy_compile() {
         // `make function!` with no call -> func_cache stays empty (no
@@ -2074,7 +2074,7 @@ mod tests {
     /// stack growth. The compiler emits `TailCall` for the recursive call in
     /// tail position (the last expr of the `either` false-branch); the VM
     /// overwrites the current frame in place, so call-stack depth stays
-    /// bounded regardless of recursion depth. (plan3.md:758)
+    /// bounded regardless of recursion depth. (docs/plans/plan3.md:758)
     ///
     /// `countdown 100000 0` on the tree-walker would push 100k Rust frames;
     /// the VM with tail-call optimization pushes zero. Correctness: returns
@@ -2098,7 +2098,7 @@ mod tests {
     /// The tree-walker also handles this without overflow (loops don't push
     /// Rust frames there either), but the test verifies the VM handles it
     /// too, and that `print`/`if`/`>`/`repeat` all work end-to-end in VM
-    /// mode. (plan3.md:756)
+    /// mode. (docs/plans/plan3.md:756)
     #[test]
     fn vm_repeat_one_million_no_overflow() {
         let (block, mut env, buf) =
@@ -2114,7 +2114,7 @@ mod tests {
 
     /// `loop [break]` exits cleanly via `EvalError::Break` caught by the
     /// loop native. Verifies the VM's `Break` control-flow unwind propagates
-    /// through `dispatch_block` (M26 bridge) to the loop native. (plan3.md:759)
+    /// through `dispatch_block` (M26 bridge) to the loop native. (docs/plans/plan3.md:759)
     #[test]
     fn vm_loop_break_exits_cleanly() {
         let v = run_vm("loop [break]");
@@ -2125,7 +2125,7 @@ mod tests {
     /// call-stack depth. Verifies the compiler emits `TailReenter` for a
     /// self-call in tail position (the SetWord slot equals the func's own
     /// slot, detected statically by `patch_tail_call`), and the VM reuses
-    /// the current frame. (plan3.md:754)
+    /// the current frame. (docs/plans/plan3.md:754)
     ///
     /// `fact-tail n acc`: if n <= 1 return acc; else `fact-tail n-1 n*acc`.
     /// Returns `factorial(5) = 120` (correctness) at a depth that would
@@ -2161,7 +2161,7 @@ mod tests {
     // M31: --trace / Env::trace_out
     // -----------------------------------------------------------------------
 
-    /// M31: `--trace` of `1 + 2` produces >= 4 instr lines (plan3.md:1199).
+    /// M31: `--trace` of `1 + 2` produces >= 4 instr lines (docs/plans/plan3.md:1199).
     /// Each executed VM instr emits one `pc=... {instr:?}` line to
     /// `Env::trace_out`. `1 + 2` compiles to
     /// `[ConstInt(1), ConstInt(2), Call(+, 2), Return]` = 4 instrs.

@@ -667,7 +667,7 @@ fn mold_port(p: &PortDef, out: &mut String) {
 /// - **date+time, non-UTC zone**: `29-Jun-2024/12:30:00-04:00`.
 ///
 /// Always emits `+HH:MM` two-digit form for the zone, **never `Z`** (per
-/// plan5.md M45). The day-month-year uses Red's `DD-Mon-YYYY` form (month
+/// docs/plans/plan5.md M45). The day-month-year uses Red's `DD-Mon-YYYY` form (month
 /// abbreviated English). Time uses `HH:MM:SS` (optionally `.mmm` if
 /// sub-second; the lexer/parser support `.mmm` but `now`-derived values
 /// typically don't carry nanoseconds in the mold form).

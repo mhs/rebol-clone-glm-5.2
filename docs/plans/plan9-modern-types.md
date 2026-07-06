@@ -8,7 +8,7 @@ faithful Red clone at its core; v0.8 adds types that the modern Red/Rebol
 inventory lacks but which a 2026-era general-purpose language user expects
 out of the box.
 
-Per `project-brief.md`, GUI / `draw` / `vid` / reactive dialects remain
+Per `../../project-brief.md`, GUI / `draw` / `vid` / reactive dialects remain
 **permanently out of scope**. v0.8 is a **modern-ergonomics release**, in
 the spirit of v0.4/v0.7 but focused on two themes: **numeric exactness** and
 **identity & concurrency primitives**. No new VM hot-path instrs; every new
@@ -762,7 +762,7 @@ integration lands with the concurrency release.
 - [ ] Add `programs_errors/promise_double_fulfill.red`,
         `programs_errors/promise_deadlock.red`.
 - [ ] Add a stable-string property test for `Promise`.
-- [ ] Document the deadlock caveat in `project-brief.md` and `README.md`.
+- [ ] Document the deadlock caveat in `../../project-brief.md` and `../../README.md`.
 
 ### `atomic!`
 
@@ -814,12 +814,12 @@ atomics.
 - [ ] Add golden fixtures: `atomic_basic`, `atomic_cas`.
 - [ ] Add a stable-string property test for `Atomic`.
 - [ ] Document the v0.9+ activation (real atomics, `Send`-restriction)
-      in `project-brief.md` and `README.md`.
+      in `../../project-brief.md` and `../../README.md`.
 
 ### M104 closeout
 
 - [ ] Document the **single-threaded caveat** for both `promise!` and
-      `atomic!` in `project-brief.md` and `README.md`: "v0.8 lands the
+      `atomic!` in `../../project-brief.md` and `../../README.md`: "v0.8 lands the
       value shapes; the concurrency release (v0.9+) activates thread
       semantics. `await` on a pending promise panics (deadlock detection);
       `atomic!` is `Cell`-backed (no real concurrency until v0.9+)."
@@ -874,7 +874,7 @@ atomics.
 - [ ] Extend `red-core/tests/golden/` to cover all new literals.
 - [ ] Expand `red-eval/tests/programs/` to 25+ new fixtures (one per new
       type × positive + error case).
-- [ ] Run `cargo bench --bench eval`; record in `BENCHMARKS.md` under
+- [ ] Run `cargo bench --bench eval`; record in `../../BENCHMARKS.md` under
       "v0.8.0".
   - [ ] Expected neutral on existing benches (no new hot-path work).
   - [ ] The M100 promotion table routes every `+`/`-`/`*`/`/` through
@@ -885,7 +885,7 @@ atomics.
         slower than `Integer` but the use case is correctness, not speed.
 - [ ] Run `cargo clippy --workspace --all-targets -- -D warnings`; fix.
 - [ ] Run `cargo fmt --all --check`; fix.
-- [ ] Update `project-brief.md`:
+- [ ] Update `../../project-brief.md`:
   - [ ] Add a "Modern Types (v0.8)" subsection under "Value model": list
         the nine new variants, the `num-*` and `uuid` crate deps, the
         promotion table, the `cell!` closure-gap fix, the single-
@@ -897,7 +897,7 @@ atomics.
         (reactivity, concurrency/port model, routine! FFI binding
         layer, typeset algebra, shared-cell closures, the remaining
         modern types from the v0.8 exploration not picked here).
-- [ ] Update `architecture.md`:
+- [ ] Update `../../architecture.md`:
   - [ ] New value variants in the value-model section.
   - [ ] `DecimalValue`/`ComplexValue`/`WeakRefDef`/`WeakTarget`/
         `PromiseDef`/`PromiseState`/`AtomicDef` struct definitions.
@@ -906,7 +906,7 @@ atomics.
         closure.red` reference).
   - [ ] The `weak-ref!` cycle-breaking pattern.
   - [ ] The `promise!`/`atomic!` single-threaded caveat.
-- [ ] Update `README.md`:
+- [ ] Update `../../README.md`:
   - [ ] Bump version to v0.8.0.
   - [ ] Add the nine new types to the "Value types" list.
   - [ ] Add `bigint?`/`decimal?`/`rational?`/`complex?`/`uuid?`/`cell?`/

@@ -1,7 +1,7 @@
 # Benchmarks
 
 Performance baseline for the Red-clone interpreter. Established in
-Milestone Pre-22 (`plan3.md`) as the reference the v0.3 VM milestones
+Milestone Pre-22 (`docs/plans/plan3.md`) as the reference the v0.3 VM milestones
 (M22–M30) are compared against.
 
 ## Current status (v0.7.0, native arm64)
@@ -13,7 +13,7 @@ type split at the predicate layer, a gated `--unset-on-unbound` fallback
 (M86 — the one non-additive change, default off), and `typeset!`-backed
 runtime type-checking of typed-func args (M89 — `FuncDef.param_types:
 Vec<Option<Rc<TypesetDef>>>` parallel to `params`, checked at call time).
-`regex!`/`struct!`/`handle!` were deferred to v0.8 (see `plan8-missing-types.md`).
+`regex!`/`struct!`/`handle!` were deferred to v0.8 (see `docs/plans/plan8-missing-types.md`).
 
 **No new `Instr` variants** and **no new per-iter work** were added to the
 VM dispatch loop. Every new source-origin literal (`Percent`/`Money`/
@@ -365,7 +365,7 @@ routing regressions; the bench suite is the authoritative check.
 ## v0.3.3 VM (Tier 4 recursion speedups)
 
 Milestone 30.3 (v0.3.3) applied six Tier 4 recursion hot-path
-optimizations (documented in `plan3.md` → "Tier 4 — Recursion hot-path"):
+optimizations (documented in `docs/plans/plan3.md` → "Tier 4 — Recursion hot-path"):
 
 - **1. `Frame.block: Rc<CompiledBlock>`** — the biggest single win.
   Changing `Frame.block` from owned `CompiledBlock` to `Rc<CompiledBlock>`
@@ -447,7 +447,7 @@ optimizations directly target the user-func call path.
 ## v0.3.2 VM (Tier 2 speedups)
 
 Milestone 30.2 (v0.3.2) applied two Tier 2 speedups (documented in
-`plan3.md` → "Milestone 30.1 - v0.3.1 Speedup plan" → Tier 2):
+`docs/plans/plan3.md` → "Milestone 30.1 - v0.3.1 Speedup plan" → Tier 2):
 
 - **D. Eliminate per-iteration `Rc<[Instr]>` clone** — the dispatch cache's
   `refresh_cache()` no longer returns an `Rc<[Instr]>` (one Rc bump per
@@ -517,7 +517,7 @@ better measure of real-world impact.
 ## v0.3.1 VM (Tier 1 speedups)
 
 Milestone 30.1 (v0.3.1) applied three Tier 1 hot-path optimizations
-(documented in `plan3.md` → "Milestone 30.1 - v0.3.1 Speedup plan"):
+(documented in `docs/plans/plan3.md` → "Milestone 30.1 - v0.3.1 Speedup plan"):
 
 - **A. Stack-allocated native args** — the `Call` instr arm copies args
   into a stack-allocated `[Value; 8]` instead of heap-allocating a `Vec`

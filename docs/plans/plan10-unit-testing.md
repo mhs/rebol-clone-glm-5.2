@@ -8,7 +8,7 @@ by stdlib auto-import); the pure-Red stdlib facade (Option A) is intentionally
 **not** added — the natives are the canonical surface, mirroring how `if`/`try`
 are unconditional language built-ins.
 
-Per `project-brief.md`, every new construct is additive through the existing VM
+Per `../../project-brief.md`, every new construct is additive through the existing VM
 `Call`/`CallUser`/native-call path; the v0.3.3 VM stays the default evaluator.
 The parity harness (`tests/parity.rs`) and `cargo test --workspace --features
 force-walk` remain the regression gates.
@@ -541,14 +541,14 @@ Documentation. No code changes.
   Should include: a passing suite, a nested suite, a `before-test` hook, an
   `assert-error` case, and one deliberately-failing test (commented out by
   default with a note on how to uncomment to see the TAP failure output).
-- [ ] **Edit: `README.md:44` (Build & run block)** — add a line:
+- [ ] **Edit: `../../README.md:44` (Build & run block)** — add a line:
   ```
   cargo run -p red-cli -- --test examples/tests.red        # run the unit tests declared in the file (TAP output)
   ```
-- [ ] **Edit: `README.md` (What's implemented)** — add a "Unit testing"
+- [ ] **Edit: `../../README.md` (What's implemented)** — add a "Unit testing"
   subsection under "Natives" listing the test words and the `--test` CLI
   mode. Cross-link to `examples/tests.red`.
-- [ ] **Edit: `README.md:31` (Status / Workspace)** — bump the v0.5.0 line
+- [ ] **Edit: `../../README.md:31` (Status / Workspace)** — bump the v0.5.0 line
   to mention `--test` mode (or note it as a v0.5.x patch — decide at release
   time; this plan doesn't bump the version).
 - [ ] **New: this file (`plan10-unit-testing.md`)** — the plan you're reading.
