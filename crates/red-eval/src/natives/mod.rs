@@ -497,6 +497,25 @@ mod tests {
         assert_eq!(mold_to_string(&val("loop [break]")), "none");
     }
 
+    #[test]
+    fn loop_count_form() {
+        // `loop count block` — evaluate block `count` times.
+        let v = val("i: 0 loop 3 [i: i + 1] i");
+        assert_eq!(mold_to_string(&v), "3");
+    }
+
+    #[test]
+    fn loop_count_zero_is_noop() {
+        let v = val("i: 0 loop 0 [i: 99] i");
+        assert_eq!(mold_to_string(&v), "0");
+    }
+
+    #[test]
+    fn loop_count_with_break() {
+        let v = val("i: 0 loop 10 [i: i + 1 if i > 2 [break]] i");
+        assert_eq!(mold_to_string(&v), "3");
+    }
+
     // --- M121: forever ---
 
     #[test]

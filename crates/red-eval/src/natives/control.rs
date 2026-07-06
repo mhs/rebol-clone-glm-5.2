@@ -84,9 +84,33 @@ pub(crate) fn loop_native(
     _refs: &RefineArgs,
     env: &mut Env,
 ) -> Result<Value, EvalError> {
-    let body = expect_block(args, 0, "loop")?;
+    // `loop count block` — evaluate `block` `count` times (standard Red form).
+    // `loop block` — evaluate `block` forever until `break` (legacy/convenience
+    // form; `forever` is the canonical infinite loop). Variadic registration
+    // lets the compiler collect 1 or 2 args; dispatch on args[0]'s type.
+    let (count, body) = match args {
+        [Value::Integer { n, .. }, _block] => {
+            if *n < 0 {
+                return Ok(Value::None);
+            }
+            (Some(*n as u64), expect_block(args, 1, "loop")?)
+        }
+        [_block] => (None, expect_block(args, 0, "loop")?),
+        _ => {
+            return Err(EvalError::Arity {
+                native: Symbol::new("loop"),
+                expected: 2,
+                got: args.len(),
+                span: args
+                    .first()
+                    .map(|v| v.span_or_default())
+                    .unwrap_or_default(),
+            });
+        }
+    };
     if let Some(compiled) = resolve_compiled_block(&body, env) {
-        loop {
+        let n = count.unwrap_or(u64::MAX);
+        for _ in 0..n {
             let caps = active_captures(env);
             match crate::vm::run((*compiled).clone(), env, caps) {
                 Ok(_) => {}
@@ -95,8 +119,10 @@ pub(crate) fn loop_native(
                 Err(e) => return Err(e),
             }
         }
+        return Ok(Value::None);
     }
-    loop {
+    let n = count.unwrap_or(u64::MAX);
+    for _ in 0..n {
         match dispatch_block(&body, env) {
             Ok(_) => {}
             Err(EvalError::Break(v)) => return Ok(v.unwrap_or(Value::None)),
@@ -104,6 +130,7 @@ pub(crate) fn loop_native(
             Err(e) => return Err(e),
         }
     }
+    Ok(Value::None)
 }
 
 /// `repeat 'word count block` — binds `word` to 1..=count, evaluates `block`

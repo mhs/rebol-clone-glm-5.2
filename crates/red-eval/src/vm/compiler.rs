@@ -1416,7 +1416,20 @@ fn collect_args(
     } else {
         None
     };
-    let arity = module_arity_override.unwrap_or(arity);
+    // `loop count block` (arity 2) vs `loop block` (arity 1, infinite).
+    // Peek the first arg: Integer → 2, Block → 1.
+    let loop_arity_override = if sym.as_str() == "loop" {
+        match data.get(*i) {
+            Some(Value::Integer { .. }) | Some(Value::Float { .. }) => Some(2),
+            Some(Value::Block { .. }) | Some(Value::Paren { .. }) => Some(1),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let arity = module_arity_override
+        .or(loop_arity_override)
+        .unwrap_or(arity);
 
     // `set 'word <func-form>`: the `set` native writes a Func value into the
     // named slot at runtime. If the second arg is a literal `func`/`does`/

@@ -188,7 +188,7 @@ pub fn register_natives(env: &mut Env) {
     // Loops (M7)
     env.natives.insert(
         Symbol::new("loop"),
-        fixed_native(loop_native as NativeFn, 1),
+        fixed_native(loop_native as NativeFn, 2),
     );
     env.natives
         .insert(Symbol::new("repeat"), fixed_native(repeat as NativeFn, 3));
