@@ -26,6 +26,9 @@ base64 = "0.22"
 # versions).
 crc32fast = "1"
 sha2 = "0.10"
+# M150: `decimal!` value type — reuses red-core's `rust_decimal` dep for the
+# arithmetic/convert natives (Decimal is Copy, no extra surface needed).
+rust_decimal = "1.36"
 
 [dev-dependencies]
 tempfile = "3"

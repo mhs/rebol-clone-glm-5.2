@@ -24,9 +24,13 @@
 > (i64 nanoseconds, ~292-year range), with both single-unit (`30s`/`1.5h`/
 > `250ms`) and compound (`1d1h`/`1h30m45s`) literal forms, `date - date →
 > duration!` (replacing the stopgap `integer!` day count), and strict-typed
-> arithmetic (not a `number!` — mirrors `money!`'s precedent). This document
-> reflects the v0.7 execution model; `architecture.md` covers the
-> compiler/VM/dispatch/path/object/closure/module internals.
+> arithmetic (not a `number!` — mirrors `money!`'s precedent). v0.11 also
+> adds `decimal!` — a true fixed-decimal numeric backed by `rust_decimal`
+> (28-digit precision, 96-bit mantissa, no NaN/Inf), with the `3.14dec`
+> literal suffix, exact arithmetic (`0.1dec + 0.2dec = 0.3dec`), and
+> mixed-type promotion where Float wins on mix (`decimal + float → float`).
+> This document reflects the v0.7 execution model; `architecture.md` covers
+> the compiler/VM/dispatch/path/object/closure/module internals.
 >
 > **Feature-Parity Round-Out (v0.10):** closes the remaining native-surface
 > gaps flagged by the post-v0.8 audit. M130 adds `map-each`/`remove-each`/

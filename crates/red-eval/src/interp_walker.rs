@@ -370,6 +370,7 @@ fn eval_prefix(
         | Value::Logic(_)
         | Value::Integer { .. }
         | Value::Float { .. }
+        | Value::Decimal { .. }
         | Value::Percent { .. }
         | Value::Money { .. }
         | Value::Issue { .. }

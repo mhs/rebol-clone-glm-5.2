@@ -21,6 +21,7 @@ pub fn mold(value: &Value, out: &mut String) {
             let _ = write!(out, "{}", n);
         }
         Value::Float { f, .. } => mold_float(*f, out),
+        Value::Decimal { d, .. } => mold_decimal(*d, out),
         Value::Percent { value, .. } => mold_percent(*value, out),
         Value::Money { amount, .. } => mold_money(amount, out),
         Value::Issue { s, .. } => {
@@ -209,6 +210,7 @@ pub fn form(value: &Value, out: &mut String) {
             let _ = write!(out, "{}", n);
         }
         Value::Float { f, .. } => mold_float(*f, out),
+        Value::Decimal { d, .. } => mold_decimal(*d, out),
         Value::Percent { value, .. } => mold_percent(*value, out),
         Value::Money { amount, .. } => mold_money(amount, out),
         Value::Issue { s, .. } => out.push_str(s),
@@ -297,6 +299,22 @@ fn mold_float(f: f64, out: &mut String) {
     if !s.contains('.') && !s.contains('e') && !s.contains("inf") && !s.contains("NaN") {
         out.push_str(".0");
     }
+}
+
+/// M150: mold a decimal! value. `rust_decimal::Decimal`'s `Display` impl
+/// is round-trip-safe and never produces `NaN`/`inf`. We append `dec` so
+/// the result parses back as a decimal! literal (not a float!). For
+/// integer-valued decimals, `Decimal::Display` produces `100` (no `.0`),
+/// so we insert `.0` to keep the value visibly non-integer — matching
+/// `mold_float`'s convention and ensuring `100dec` round-trips as
+/// `100.0dec` rather than colliding with the integer-with-suffix form.
+fn mold_decimal(d: rust_decimal::Decimal, out: &mut String) {
+    let s = d.to_string();
+    out.push_str(&s);
+    if !s.contains('.') && !s.contains('e') {
+        out.push_str(".0");
+    }
+    out.push_str("dec");
 }
 
 /// M80: mold a percent! value. Stored as a fractional float (`0.5` ⇒ `50%`);

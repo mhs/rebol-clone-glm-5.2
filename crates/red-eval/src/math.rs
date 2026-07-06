@@ -42,6 +42,11 @@ fn as_number(v: &Value) -> Option<Num> {
     match v {
         Value::Integer { n, .. } => Some(Num::Int(*n)),
         Value::Float { f, .. } => Some(Num::Float(*f)),
+        // M150: decimal! promotes to its f64 value for the `num_binop`
+        // fallback path (when mixed with Float — Float wins on mix). The
+        // exact Decimal-preserving path (Dec+Dec, Dec+Int) is intercepted
+        // upstream by `dec_binop` before `num_binop` runs.
+        Value::Decimal { d, .. } => Some(Num::Float((*d).try_into().unwrap_or(f64::NAN))),
         // M80: percent! promotes to its fractional float value for arithmetic
         // (`percent + float → float`, `percent * scalar → float`). The
         // percent-preserving case (`percent + percent → percent`) is handled
@@ -498,12 +503,75 @@ fn date_subtract(args: &[Value]) -> Result<Option<Value>, EvalError> {
 /// Apply a numeric binary operator to `args[0]` (left) and `args[1]` (right).
 /// Int+Int → Int; any Float involved → Float. `op` names the operation for
 /// error messages. Errors carry the offending operand's span.
+/// M150: decimal! exact-arithmetic dispatcher. Returns `Some(Value)` when
+/// both sides are `decimal!` or `integer!` (no Float/Percent involved) —
+/// uses `rust_decimal`'s native `+`/`-`/`*`/`/` to preserve precision.
+/// Returns `None` when either side is Float/Percent (caller falls through
+/// to `num_binop`, which promotes Dec → f64; Float wins on mix).
+///
+/// Divide-by-zero on Decimal raises a structured `math` error (rust_decimal
+/// has no NaN/Inf — we must error Red-style rather than produce a sentinel).
+fn dec_binop(args: &[Value], op: &str) -> Result<Option<Value>, EvalError> {
+    use rust_decimal::Decimal as D;
+    let a_dec = match &args[0] {
+        Value::Decimal { d, .. } => Some(*d),
+        Value::Integer { n, .. } => Some(D::from(*n)),
+        _ => None,
+    };
+    let b_dec = match &args[1] {
+        Value::Decimal { d, .. } => Some(*d),
+        Value::Integer { n, .. } => Some(D::from(*n)),
+        _ => None,
+    };
+    // Both sides must be Dec-or-Int (the "exact" path). If either side is
+    // Float/Percent/other, fall through.
+    let (x, y) = match (a_dec, b_dec) {
+        (Some(x), Some(y)) => (x, y),
+        _ => return Ok(None),
+    };
+    // Also require that at least one side is actually Decimal (otherwise
+    // it's a plain Int+Int op handled by num_binop's f_int path).
+    let any_dec =
+        matches!(&args[0], Value::Decimal { .. }) || matches!(&args[1], Value::Decimal { .. });
+    if !any_dec {
+        return Ok(None);
+    }
+    let span = args[0].span_or_default();
+    let r = match op {
+        "add" => x.checked_add(y),
+        "subtraction" | "subtract" => x.checked_sub(y),
+        "multiply" => x.checked_mul(y),
+        "divide" | "division" => {
+            if y.is_zero() {
+                return Err(math_by_zero(args, "divide"));
+            }
+            x.checked_div(y)
+        }
+        _ => return Ok(None),
+    };
+    match r {
+        Some(d) => Ok(Some(Value::decimal(d))),
+        None => Err(EvalError::Native {
+            message: format!("{op}: decimal! overflow"),
+            span,
+        }),
+    }
+}
+
 fn num_binop(
     args: &[Value],
     op: &str,
     f_int: fn(i64, i64) -> Option<i64>,
     f_float: fn(f64, f64) -> f64,
 ) -> Result<Value, EvalError> {
+    // M150: decimal! exact-arithmetic path. When both sides are Decimal or
+    // Integer (no Float/Percent), use rust_decimal's native ops to preserve
+    // precision (`0.1dec + 0.2dec = 0.3dec`). When Float is involved, fall
+    // through to `num_binop` (Dec promotes to f64 via `as_number`; Float
+    // wins on mix — precision already lost).
+    if let Some(r) = dec_binop(args, op)? {
+        return Ok(r);
+    }
     let a = as_number(&args[0]).ok_or_else(|| num_type_err(&args[0]))?;
     let b = as_number(&args[1]).ok_or_else(|| num_type_err(&args[1]))?;
     match (a, b) {
@@ -1251,6 +1319,27 @@ pub(crate) fn modulo(
     _refs: &RefineArgs,
     _env: &mut Env,
 ) -> Result<Value, EvalError> {
+    // M150: decimal! modulo — preserve Decimal type (exact).
+    let a_dec = match &args[0] {
+        Value::Decimal { d, .. } => Some(*d),
+        Value::Integer { n, .. } => Some(rust_decimal::Decimal::from(*n)),
+        _ => None,
+    };
+    let b_dec = match &args[1] {
+        Value::Decimal { d, .. } => Some(*d),
+        Value::Integer { n, .. } => Some(rust_decimal::Decimal::from(*n)),
+        _ => None,
+    };
+    if let (Some(da), Some(db)) = (a_dec, b_dec) {
+        let any_dec =
+            matches!(&args[0], Value::Decimal { .. }) || matches!(&args[1], Value::Decimal { .. });
+        if any_dec {
+            if db.is_zero() {
+                return Err(math_by_zero(args, "decimal modulo"));
+            }
+            return Ok(Value::decimal(da % db));
+        }
+    }
     let a = as_number(&args[0]).ok_or_else(|| num_type_err(&args[0]))?;
     let b = as_number(&args[1]).ok_or_else(|| num_type_err(&args[1]))?;
     match (a, b) {
@@ -1292,6 +1381,8 @@ fn abs_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Valu
     match &args[0] {
         Value::Integer { n, .. } => Ok(Value::integer(n.wrapping_abs())),
         Value::Float { f, .. } => Ok(Value::float(f.abs())),
+        // M150: abs on a decimal! preserves the decimal type (exact).
+        Value::Decimal { d, .. } => Ok(Value::decimal(d.abs())),
         // M80: abs on a percent preserves the percent wrapper.
         Value::Percent { value, .. } => Ok(Value::percent(value.abs())),
         // M80: abs on money preserves the currency; abs the cents.
@@ -1317,10 +1408,16 @@ fn abs_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Valu
 
 /// Helper: `abs` of a single number value (int/float). Errors on non-numbers.
 fn abs_one(v: &Value) -> Result<Value, EvalError> {
-    match as_number(v) {
-        Some(Num::Int(n)) => Ok(Value::integer(n.wrapping_abs())),
-        Some(Num::Float(f)) => Ok(Value::float(f.abs())),
-        None => Err(num_type_err(v)),
+    match v {
+        Value::Integer { n, .. } => Ok(Value::integer(n.wrapping_abs())),
+        Value::Float { f, .. } => Ok(Value::float(f.abs())),
+        // M150: preserve decimal! type (abs is exact on Decimal).
+        Value::Decimal { d, .. } => Ok(Value::decimal(d.abs())),
+        _ => match as_number(v) {
+            Some(Num::Int(n)) => Ok(Value::integer(n.wrapping_abs())),
+            Some(Num::Float(f)) => Ok(Value::float(f.abs())),
+            None => Err(num_type_err(v)),
+        },
     }
 }
 
@@ -1331,6 +1428,8 @@ fn negate_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<V
     match &args[0] {
         Value::Integer { n, .. } => Ok(Value::integer(n.wrapping_neg())),
         Value::Float { f, .. } => Ok(Value::float(-f)),
+        // M150: negate on a decimal! preserves the decimal type (exact).
+        Value::Decimal { d, .. } => Ok(Value::decimal(-*d)),
         // M80: negate on a percent preserves the percent wrapper.
         Value::Percent { value, .. } => Ok(Value::percent(-value)),
         // M80: negate on money preserves the currency; negate the cents.
@@ -1355,12 +1454,18 @@ fn negate_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<V
     }
 }
 
-/// Helper: negate of a single number value (int/float).
+/// Helper: negate of a single number value (int/float/decimal).
 fn negate_one(v: &Value) -> Result<Value, EvalError> {
-    match as_number(v) {
-        Some(Num::Int(n)) => Ok(Value::integer(n.wrapping_neg())),
-        Some(Num::Float(f)) => Ok(Value::float(-f)),
-        None => Err(num_type_err(v)),
+    match v {
+        Value::Integer { n, .. } => Ok(Value::integer(n.wrapping_neg())),
+        Value::Float { f, .. } => Ok(Value::float(-f)),
+        // M150: preserve decimal! type.
+        Value::Decimal { d, .. } => Ok(Value::decimal(-*d)),
+        _ => match as_number(v) {
+            Some(Num::Int(n)) => Ok(Value::integer(n.wrapping_neg())),
+            Some(Num::Float(f)) => Ok(Value::float(-f)),
+            None => Err(num_type_err(v)),
+        },
     }
 }
 
@@ -1469,6 +1574,9 @@ fn as_orderable(v: &Value) -> Option<Num> {
     match v {
         Value::Integer { n, .. } => Some(Num::Int(*n)),
         Value::Float { f, .. } => Some(Num::Float(*f)),
+        // M150: decimal! compares via f64 conversion (min/max return the
+        // original arg, so the Decimal type is preserved).
+        Value::Decimal { d, .. } => Some(Num::Float((*d).try_into().unwrap_or(f64::NAN))),
         Value::Char { c, .. } => Some(Num::Int(*c as i64)),
         _ => None,
     }
@@ -1625,6 +1733,10 @@ fn round_native(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Val
         let result = n * scale;
         return Ok(match &args[0] {
             Value::Integer { .. } => Value::integer(result as i64),
+            // M150: preserve decimal! type when the input is decimal.
+            Value::Decimal { .. } => {
+                Value::decimal(rust_decimal::Decimal::try_from(result).unwrap_or_default())
+            }
             _ => Value::float(result),
         });
     }
@@ -1779,6 +1891,18 @@ pub(crate) fn power(
 ) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity_err(args, "power", 2, args.len()));
+    }
+    // M150: decimal! power — Dec ** Int (non-negative) → Decimal (repeated
+    // multiplication, exact). Dec ** Float → Float (f64 powf, precision lost).
+    // Dec ** negative-Int → Float (fractional result, can't stay Decimal).
+    if let (Value::Decimal { d: base, .. }, Value::Integer { n: exp, .. }) = (&args[0], &args[1]) {
+        if *exp >= 0 {
+            let mut result = rust_decimal::Decimal::ONE;
+            for _ in 0..*exp {
+                result *= *base;
+            }
+            return Ok(Value::decimal(result));
+        }
     }
     match (as_number(&args[0]), as_number(&args[1])) {
         (Some(Num::Int(base)), Some(Num::Int(exp))) if exp >= 0 => {
@@ -2173,14 +2297,24 @@ pub fn register_math_natives(env: &mut Env) {
 // ---------------------------------------------------------------------------
 
 fn floor_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    // M150: preserve decimal! type (floor is exact on Decimal).
+    if let Value::Decimal { d, .. } = &args[0] {
+        return Ok(Value::decimal(d.floor()));
+    }
     let x = as_float_arg(args, "floor")?;
     Ok(Value::float(x.floor()))
 }
 fn ceiling_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if let Value::Decimal { d, .. } = &args[0] {
+        return Ok(Value::decimal(d.ceil()));
+    }
     let x = as_float_arg(args, "ceiling")?;
     Ok(Value::float(x.ceil()))
 }
 fn truncate_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if let Value::Decimal { d, .. } = &args[0] {
+        return Ok(Value::decimal(d.trunc()));
+    }
     let x = as_float_arg(args, "truncate")?;
     Ok(Value::float(x.trunc()))
 }

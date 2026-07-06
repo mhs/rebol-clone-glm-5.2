@@ -673,6 +673,7 @@ fn compile_prefix(
             c.emit(Instr::ConstInt(*n));
         }
         Value::Float { .. }
+        | Value::Decimal { .. }
         | Value::Percent { .. }
         | Value::Money { .. }
         | Value::Issue { .. }

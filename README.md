@@ -5,33 +5,27 @@ language, implemented in Rust. Red is a homoiconic, block-structured
 descendant of Rebol — code is data, evaluation is prefix-style and eager,
 and "dialects" are blocks interpreted by custom mini-interpreters.
 
-This repo is a **Red subset interpreter** (`v0.10.0`). It implements a usable slice of
-Red — lexer, parser, **bytecode compiler + stack VM** (the default since
-v0.3), tree-walking evaluator (retained as the `--walk` fallback), full
-series model, real word binding, functions, **first-class closures**
-(`closure!` with snapshot freevar capture), **modules** (`module`/
-`export`/`import`), the `parse` dialect (with `collect`/`keep`/`match`/
-lookahead/`/case`/`bitset!` charset/**named-rule recursion**), **objects**,
-**real paths**, **refinements**, the full type-conversion/string/control-flow/
-math surfaces (incl. trig + transcendentals), file & shell I/O, **first-class
-`error!` values** with the full Red field set, the v0.4 value types (`char!`/
-`binary!`/`map!`/`pair!`/`tuple!`/`date!`/`bitset!`), `compose`, an
-auto-imported **stdlib** (~25 utility functions, suppressible via
+This repo is a **Red subset interpreter**. It implements a usable slice of
+Red — lexer, parser, **bytecode compiler + stack VM** (the default), a
+tree-walking evaluator (retained as the `--walk` fallback), full series
+model, real word binding, functions, **first-class closures** (`closure!`
+with snapshot freevar capture), **modules** (`module`/`export`/`import`),
+the `parse` dialect (with `collect`/`keep`/`match`/lookahead/`/case`/
+`bitset!` charset/**named-rule recursion**), **objects**, **real paths**,
+**refinements**, the full type-conversion/string/control-flow/math surfaces
+(incl. trig + transcendentals), file & shell I/O, **first-class `error!`
+values** with the full Red field set, the extended value types (`char!`/
+`binary!`/`map!`/`pair!`/`tuple!`/`date!`/`bitset!`/`percent!`/`money!`/
+`issue!`/`email!`/`tag!`/`hash!`/`vector!`/`image!`/`typeset!`), `compose`,
+an auto-imported **stdlib** (~25 utility functions, suppressible via
 `--no-stdlib`), a REPL, and a synchronous **`port!` abstraction** with
 minimal HTTP/HTTPS networking (`open`/`close`/`create`/`read port`,
-`read url!` for GET via `ureq`, gated behind `--allow-network`). The build
-history is tracked in [`plan.md`](./plan.md) (v0.1),
-[`plan2.md`](./plan2.md) (v0.2), [`plan3.md`](./plan3.md) (v0.3 — VM +
-performance), [`plan5.md`](./plan5.md) (v0.4 — language completeness),
-[`plan6-closures-modules.md`](./plan6-closures-modules.md) (v0.5 —
-closures & modules), [`plan11-functional-gaps.md`](./plan11-functional-gaps.md)
-(v0.6 — core functional gaps), and [`plan8-missing-types.md`](./plan8-missing-types.md)
-(v0.7 — type completeness), and [`plan13-feature-parity.md`](./plan13-feature-parity.md)
-(v0.10 — feature-parity round-out).
+`read url!` for GET via `ureq`, gated behind `--allow-network`). The
+per-version build history is tracked in the `plan*.md` files at the repo
+root.
 
 ## Status
 
-- **Tagged:** `v0.10.0`
 - **Workspace:** three crates — `red-core` (value model + lexer + parser + printer + VM IR types),
   `red-eval` (compiler + VM + tree-walker + natives + `parse`), `red-cli` (binary + REPL).
   A `fuzz/` crate (nightly-only, `libfuzzer-sys`) is excluded from the default workspace.
@@ -51,25 +45,25 @@ closures & modules), [`plan11-functional-gaps.md`](./plan11-functional-gaps.md)
 ```sh
 cargo build --workspace
 cargo test  --workspace
-cargo run  -p red-cli -- examples/hello.red     # → Hello, World!
-cargo run  -p red-cli                            # → REPL (no args)
+cargo run  -p red-cli -- examples/hello.red              # → Hello, World!
+cargo run  -p red-cli                                    # → REPL (no args)
 cargo run  -p red-cli -- --help
-cargo run  -p red-cli -- --version               # → red 0.10.0
-cargo run  -p red-cli -- --allow-shell examples/call.red   # enable call/shell
+cargo run  -p red-cli -- --version                       # → red 0.10.0
+cargo run  -p red-cli -- --allow-shell examples/call.red  # enable call/shell
 cargo run  -p red-cli -- --allow-network http://example.com/  # enable read url!/open url!
-cargo run  -p red-cli -- --walk examples/fib.red          # force tree-walker
+cargo run  -p red-cli -- --walk examples/fib.red         # force tree-walker
 cargo run  -p red-cli -- --disasm examples/fib.red        # disassemble (no run)
 cargo run  -p red-cli -- --disasm-func fib examples/fib.red  # disassemble named func
 cargo run  -p red-cli -- --trace examples/arith.red       # per-instr VM trace to stderr
-cargo run  -p red-cli -- --module-path examples/modules \  # search dir for import %file
-                        examples/modules/main.red
-cargo run  -p red-cli -- --no-stdlib examples/arith.red    # skip stdlib auto-import
-cargo run  -p red-cli -- --unset-on-unbound examples/arith.red  # evaluate unbound words to unset! (v0.7, default off)
+cargo run  -p red-cli -- --module-path examples/modules \ # search dir for import %file
+                          examples/modules/main.red
+cargo run  -p red-cli -- --no-stdlib examples/arith.red   # skip stdlib auto-import
+cargo run  -p red-cli -- --unset-on-unbound examples/arith.red  # evaluate unbound words to unset! (default off)
 ```
 
-v0.3 was a **performance release**: the bytecode VM delivers 2–4× speedups on compute-heavy programs (deep recursion, tight loops) over the v0.2 tree-walker, while preserving exact observable behavior (golden parity, error parity). v0.4 re-opens the language surface on top of the unchanged VM — new value types (`char!`/`binary!`/`map!`/`pair!`/`tuple!`/`date!`/`bitset!`), `compose`, trig math, the full `error!` model, and the completed `parse` dialect. v0.5 adds **first-class closures** (`closure!` with snapshot freevar capture, fixing the v0.3 escaping-closure bug) and **modules** (`module`/`export`/`import`, with named-module caching, file-based import, and `system/options/module-path` search), plus a small auto-imported stdlib. v0.5.1 closes the **control-flow vocabulary gap** — `unless`, `forever`, `for` (direction-aware counted loop over int/float/char), `forskip` (record-wise series iteration). v0.6 closes four **core functional gaps**: `parse` **named-rule recursion** (a bound word resolving to a `block!` is a sub-rule, with a depth guard); `mold` exposed as a callable native (`/only`); series **`sort`** (native, shadowing the stdlib version) + set operations `unique`/`intersect`/`union`/`difference`/`exclude` on `block!`/`string!`; and a synchronous **`port!` abstraction** with minimal HTTP/HTTPS GET networking via the existing `ureq` dep (TLS on by default — no new dependency), gated behind `--allow-network`. v0.7 is a **type-completeness release**: nine new `Value` variants (`percent!`/`money!`/`issue!`/`email!`/`tag!`/`unset!`/`hash!`/`vector!`/`image!`/`typeset!`), the `native!`/`op!`/`any-function?` type split, a gated `--unset-on-unbound` fallback (default off), and `typeset!`-backed runtime type-checking of typed-func args (`func [x [integer! float!]]` rejects a string arg at call time). `regex!`/`struct!`/`handle!` deferred to v0.8. All additions are additive: they compile through the existing VM const-pool + native-call path with no new hot-path instrs. See `BENCHMARKS.md` for measurements.
-
-v0.10 is a **feature-parity round-out**: closes the remaining native-surface gaps flagged by the post-v0.8 audit. **M130** adds series/string DSL natives (`map-each`/`remove-each`/`collect`+`keep` via a dynamic-scope accumulator on `Env`) and codec natives (`checksum` with CRC32+SHA-256 via `crc32fast`/`sha2`; `compress`/`decompress` via `flate2`; `enbase`/`debase` via `base64`; `encode`/`decode` for `'url`). **M131** adds object/context reflection (`set?`/`bound?`/`bind?`/`context-of`/`context?`/`spec-of`/`body-of`/`resolve`/`has`/`extend`) plus `protect`/`unprotect`/`protect-system` with a `protected` flag on `ObjectDef` and an `Env.protected_series` side-set enforced at every mutating native (`append`/`insert`/`change`/`remove`/`clear`/`take`/`poke` + `SetPath`). **M133** adds math helpers (`floor`/`ceiling`/`truncate`/`zero?`/`positive?`/`negative?`/`sign-of`/`sign?`/`gcd`/`lcm`/`sinh`/`cosh`/`tanh`/`square-root`/`absolute`), promoting `gcd`/`lcm`/`sign-of` from the stdlib to natives. **M134** adds `dump` and an `errors` catalog. **M135** adds `exports-of`. **M136** widens `find` (`/part`/`/last`/`/tail`/`/match`), `append` (`/part`/`/dup`), `copy` (`/deep`/`/types`), `replace` (`/case`/`/part`), `round` (`/floor`/`/ceiling`/`/down`/`/up`/`/half-down`/`/half-up`), and `parse` (`/all`/`/part`). The speculative M132 primitives (`quote`/`meta`/`uneval`/`eval-set`) and M134's `stop?` were **dropped after Red-parity confirmation** as audit misidentifications; the `trace` user-level toggle and the `math` evaluation-order mode were **demoted to v0.11** (both require eval-loop hooks that break the v0.10 "additive native only" non-goal). `append/line` deferred (needs `Series` per-element line-hint metadata). See `plan13-feature-parity.md`.
+See [`plan13-feature-parity.md`](./plan13-feature-parity.md) for the most
+recent feature-parity round-out; the `plan*.md` files at the repo root
+track the build history per version.
 
 ## What's implemented
 
@@ -86,36 +80,55 @@ v0.10 is a **feature-parity round-out**: closes the remaining native-surface gap
   reparseable variants (property-tested).
 
 ### Value types
-`None`, `Unset` (v0.7 — distinct "no value" sentinel, separate from `none!`;
-gated `--unset-on-unbound` fallback), `Logic`, `Integer`, `Float`,
-`Percent` (`50%`), `Money` (`$10.00`/`$1,234.56:EUR` — fixed-point cents +
-currency), `Issue` (`#ABC`), `Email` (`foo@bar.com`), `Tag` (`<b>`/
-`<img src="x">`), `String`, `Word`/`SetWord`/`GetWord`/`LitWord`, `Block`,
-`Paren`, `Func` (`type?` → `native!`/`op!`/`function!` — v0.7 split),
-`Closure` (snapshot-capture first-class closure), `Module` (self-contained
-namespace with exported words), `Path`/`GetPath`/`LitPath`/`SetPath`,
-`Refinement`, `File`, `Url`, `Object`, `Error`, `Char` (`#"a"`), `String8`
-(real `binary!`, `#{hex}`), `Map` (heterogeneous insertion-ordered keys),
-`Pair` (`100x200`), `Tuple` (`255.0.0` / `128.64.32.128` RGBA), `Date`
-(date-only / date+time / date+time+zone; `29-Jun-2024/12:30:00+5:30`),
-`Bitset` (bit-packed charset for `parse`), `Port` (synchronous I/O handle
-— file or HTTP; v0.6), `Hash` (unordered `series!` table — v0.7), `Vector`
-(packed numeric series with typed element kind: `integer!`/`float!`/`i8!`/…
-`i64!`/`f32!`/`f64!` — full `series!` model + componentwise arithmetic),
-`Image` (fixed-size 2D RGBA8 pixel buffer; `length?`/`pick`/`poke` only —
-not a full `series!`), `Typeset` (set of type-word symbols for runtime
-typed-func arg type-checking — `func [x [integer! float!]]`), `Duration`
-(signed span-of-time scalar; `30s`/`1.5h`/`250ms`/`1d1h` compound — strict
-descending unit order; `date - date → duration!`).
+- **Scalars:** `None` (`none`), `Unset` (distinct "no value" sentinel,
+  separate from `none!`; gated `--unset-on-unbound` fallback), `Logic`
+  (`true`/`false`), `Integer` (`42`/`-7`), `Float` (`3.14`/`1e9`),
+  `Decimal` (`3.14dec`/`100dec` — true fixed-decimal via `rust_decimal`,
+  28-digit precision, no NaN/Inf; `0.1dec + 0.2dec = 0.3dec` holds).
+- **Formatted scalars:** `Percent` (`50%`), `Money` (`$10.00`/`$1,234.56:EUR`
+  — fixed-point cents + currency), `Issue` (`#ABC`/`#1234`), `Email`
+  (`foo@bar.com`), `Tag` (`<b>`/`<img src="x">`).
+- **Strings & binary:** `String` (`"hello"`/`{multi-line}`), `Char` (`#"a"`/
+  `#^-`/`^/`), `String8` (real `binary!`, `#{48656c6c6f}`).
+- **Words:** `Word` (`foo`), `SetWord` (`foo:`), `GetWord` (`:foo`),
+  `LitWord` (`'foo`), `Refinement` (`/part`).
+- **Blocks & paths:** `Block` (`[1 2 3]`), `Paren` (`(1 + 2)`), `Path`
+  (`foo/bar`), `GetPath` (`:foo/bar`), `LitPath` (`'foo/bar`), `SetPath`
+  (`foo/bar:`).
+- **Functions:** `Func` (`func [x] [x + 1]`; `type?` → `native!`/`op!`/
+  `function!`), `Closure` (`closure [x] [x + 1]` — snapshot-capture
+  first-class closure).
+- **Namespaces:** `Module` (`module [body]` — self-contained namespace with
+  exported words), `Object` (`make object! [x: 1]`), `Error` (`make error!
+  "msg"` — first-class `error!` with the full Red field set).
+- **Literals:** `File` (`%hello.red`/`%./data/`), `Url`
+  (`http://example.com/`).
+- **Collections:** `Map` (`make map! [a 1 b 2]` — heterogeneous
+  insertion-ordered keys), `Hash` (unordered `series!` table), `Vector`
+  (`make vector! [1 2 3]` — packed numeric series with typed element kind:
+  `integer!`/`float!`/`i8!`/…/`i64!`/`f32!`/`f64!` — full `series!` model
+  + componentwise arithmetic), `Bitset` (`charset "ABC"` — bit-packed charset
+  for `parse`), `Typeset` (`make typeset! [integer! float!]` — set of
+  type-word symbols for runtime typed-func arg type-checking —
+  `func [x [integer! float!]]`).
+- **Geometry & media:** `Pair` (`100x200`), `Tuple` (`255.0.0` /
+  `128.64.32.128` RGBA), `Image` (fixed-size 2D RGBA8 pixel buffer;
+  `length?`/`pick`/`poke` only — not a full `series!`).
+- **Temporal:** `Date` (date-only / date+time / date+time+zone;
+  `29-Jun-2024`/`29-Jun-2024/12:30:00+5:30`), `Duration` (signed span-of-time
+  scalar; `30s`/`1.5h`/`250ms`/`1d1h` compound — strict descending unit
+  order; `date - date → duration!`).
+- **I/O handles:** `Port` (`open %file.red` / `open http://example.com/` —
+  synchronous I/O handle, file or HTTP).
 
 ### Evaluation
-- **Bytecode compiler + stack VM** (v0.3, default): blocks compile to a flat
+- **Bytecode compiler + stack VM** (default): blocks compile to a flat
   `Vec<Instr>` with a constant pool; the VM dispatches instrs with lexical
   addressing (frame depth + slot index) where statically analyzable, falling
   back to the dynamic `Context` slot mechanism for `bind`/`use`/`do`-on-data.
   Tail-call optimization (`TailCall`/`TailReenter`) bounds call-stack depth for
   tail-recursive programs. See `architecture.md` for the full design.
-- **Tree-walking evaluator** (`interp_walker.rs`, the v0.2 default): retained
+- **Tree-walking evaluator** (`interp_walker.rs`, the default): retained
   as the `--walk` fallback and the path for `needs_rebind`-flagged blocks
   (`use`/`make object!`/foreign-bound). `--features force-walk` runs the entire
   test suite against the walker for byte-for-byte parity with the VM.
@@ -127,18 +140,18 @@ descending unit order; `date - date → duration!`).
   value").
 - SetWord at script top level binds into the user context.
 - Function bodies get bound at `func`/`does` creation time, not at load.
-- **Debug ergonomics (M31):** `--disasm` prints the bytecode disassembly with
+- **Debug ergonomics:** `--disasm` prints the bytecode disassembly with
   per-instr `file:line:col` annotations (no run); `--disasm-func <name>` disassembles
   a named top-level func body; `--trace` emits one line per executed VM instr to stderr.
 
 ### Natives (~140)
 - **I/O:** `print`, `prin`, `probe`, `form`, `mold` (`/only` — callable native
-  wrapping the printer; v0.6).
+  wrapping the printer).
 - **Arithmetic / comparison / logic:** `+ - * / //`, `**` (power), `= <> < >
   <= >=`, `and or not` (logic + bitwise on integers), `abs`, `negate`,
   `add`/`subtract`/`multiply`/`divide`, `min`, `max`, `round` (`/to`/`/even`),
   `random` (`/seed`/`/only`/`/secure`), `even?`, `odd?`, `complement`,
-  `shift-left`, `shift-right`. **Trig + transcendentals (v0.4):** `sin`/`cos`/
+  `shift-left`, `shift-right`. **Trig + transcendentals:** `sin`/`cos`/
   `tan`/`asin`/`acos`/`atan`/`atan2`, `sqrt`, `exp`, `log-e`/`ln`, `log-10`,
   `log-2`, `degrees`/`radians`; `pi`/`e` constants. Pair/tuple arithmetic
   (componentwise: `pair + pair`, `tuple + tuple`, `pair * int`, etc.).
@@ -146,29 +159,29 @@ descending unit order; `date - date → duration!`).
   `forever`, `for`, `forskip`, `do`, `reduce`, `break`, `continue`, `switch`
   (`/default`/`/case`), `case` (`/default`/`/all`), `default`, `all`, `any`,
   `try`, `attempt`, `catch`/`throw`, `cause-error`, `function` (auto-locals),
-  `comment`, `exit`/`quit`, `compose` (`/deep`/`/only` — v0.4).
+  `comment`, `exit`/`quit`, `compose` (`/deep`/`/only`).
 - **Series (full model):** `first` `second` `third` `last` `next` `back` `at`
   `skip` `head` `tail` `index?` `length?` `pick` `poke` `select` `find`
   (`/case`/`/part`) `append` (`/only`) `insert` `change` `remove` `clear`
   `take` `copy` (`/part`) `empty?` `block?` `paren?` `series?` `any-block?`
   `foreach` `forall` `forskip`. `binary!` is byte-indexed (`pick`/`poke`/`copy`/`find`/
   `append`/`insert`); `map!` supports `select`/`find`/`keys-of`/`values-of`/
-  `length?`/`empty?`/`clear`/`put`/`extend`/`copy`. **v0.6:** `sort`
+  `length?`/`empty?`/`clear`/`put`/`extend`/`copy`. `sort`
   (`/case`/`/reverse`/`/skip size`/`/compare func` — native, destructive)
   and set operations `unique`/`intersect`/`union`/`difference`/`exclude`
   (`/case`/`/skip`) on `block!`/`string!` (the same names dispatch on
-  `bitset!` to the M46 implementations).
+  `bitset!` to the implementations).
 - **Functions / binding:** `func`, `does`, `make function!`, `function?`,
   `return`, `bind`, `use`, `in`, `get`, `set`, `value?`. Recursion works.
-- **Closures (v0.5):** `closure [spec] [body]` — like `func` but captures
+- **Closures:** `closure [spec] [body]` — like `func` but captures
   freevar *values* into an owned cell at creation time (snapshot semantics).
   `closure?` predicate; `function?` returns true on closures too. The
   closure can escape its defining frame (returned, stored, passed around)
   and still see the captured values. Inner writes to the capture cell
   persist across invocations of the same closure (the `RefCell` cell
   mechanism); outer writes after creation do NOT propagate inward (snapshot,
-  not shared cell — a v0.6 candidate).
-- **Modules (v0.5):** `module [body]` (anonymous) / `module 'name [body]`
+  not shared cell — a future candidate).
+- **Modules:** `module [body]` (anonymous) / `module 'name [body]`
   (named, cached singleton). `export 'word` / `export [words]` marks words
   for public visibility (only valid inside a module body). `import 'name` /
   `import %file.red` / `import <module-value>` aliases a module's exports
@@ -187,24 +200,24 @@ descending unit order; `date - date → duration!`).
   (`/auto` `/with` `/lines` `/all`), `replace` (`/all`), `uppercase`/
   `lowercase` (`/part`), `suffix?`. `+` concatenates two strings; `find`
   does substring search; `copy` on a string honors `/part`. `append`/`insert`
-  on a `string!` accept `char!`/`string!` (v0.4).
+  on a `string!` accept `char!`/`string!`.
 - **Type conversions:** `to-integer`, `to-float`, `to-string`, `to-block`,
   `to-word`/`to-set-word`/`to-get-word`/`to-lit-word`, `to-logic`, `to-file`,
   `to-url`, `to-path`/`to-get-path`/`to-lit-path`, `make`, `to`, `form`.
-  **v0.4 additions:** `to-char`, `to-binary`, `to-map`, `to-pair`, `to-tuple`,
+  `to-char`, `to-binary`, `to-map`, `to-pair`, `to-tuple`,
   `to-date`, `to-bitset`, `to-error`, `to-utc`.
-  **v0.7 additions:** `to-percent`, `to-money`, `to-issue`, `to-email`,
+  `to-percent`, `to-money`, `to-issue`, `to-email`,
   `to-tag`, `to-hash`, `to-vector`, `to-image`, `to-typeset`.
-- **Type predicates (v0.4 fill-in):** `integer?`, `float?`, `number?`,
+- **Type predicates :** `integer?`, `float?`, `number?`,
   `string?`, `logic?`, `none?`, `char?`, `binary?`, `map?`, `pair?`, `tuple?`,
   `date?`, `time?`, `bitset?`, `error?`, `word?`, `set-word?`, `get-word?`,
   `lit-word?`, `refinement?`, `path?`, `get-path?`, `lit-path?`, `any-word?`,
   `any-path?`, `any-object?`, `function?`, `object?`, `series?`, `block?`,
   `paren?`, `file?`, `url?`, `same?`, `not-same?`, `value?`. `type?` returns
   the type word; `types-of` returns the block of matching type words.
-  **v0.7 additions:** `percent?`, `money?`, `issue?`, `email?`, `tag?`,
+  `percent?`, `money?`, `issue?`, `email?`, `tag?`,
   `unset?`, `hash?`, `vector?`, `image?`, `typeset?`, `native?`, `op?`,
-  `any-function?` (M87: `native?`/`op?` are disjoint — `+` is `op!` not
+  `any-function?` (`native?`/`op?` are disjoint — `+` is `op!` not
   `native!`; `function?`/`any-function?` cover `function!`/`native!`/`op!`/
   `closure!`).
 - **Objects:** `make object!`, `object`, `context`, `in`, `words-of`,
@@ -212,68 +225,67 @@ descending unit order; `date - date → duration!`).
   reference, method calls via `o/method` paths.
 - **Paths:** `obj/field`, `block/2`, `string/3` (returns `char!`), `obj/field:
   value` (set-path), `:obj/method` (get-path), `'foo/bar` (lit-path), nested
-  `obj/inner/x`, paren selectors `b/(1 + 1)`. **v0.4 additions:** `map/word`,
+  `obj/inner/x`, paren selectors `b/(1 + 1)`. `map/word`,
   `map/integer`, `map/string`, `map/char` (+ set-paths); `pair/x`/`pair/y`,
   `tuple/r`/`tuple/g`/`tuple/b`/`tuple/a` (+ set-paths); `date/year`/
   `month`/`day`/`time`/`weekday`/`yearday`/`week`/`zone` (+ `date/zone:`
   relabel); literal-headed paths `100x200/x`, `255.0.0/r`.
 - **File & shell I/O:** `read` (`/lines`/`/binary`), `write`
   (`/lines`/`/append`/`/binary`), `load`, `save`, `exists?`, `size?`,
-  `modified?` (returns `date!` with local timezone — v0.4), `dir?`, `make-dir`,
+  `modified?` (returns `date!` with local timezone), `dir?`, `make-dir`,
   `delete`, `rename`, `change-dir`, `what-dir`, `call`/`shell`
   (`--allow-shell` gated), `wait`, `env`/`get-env`/`set-env`, `system/options/args`.
-  `read` of `url!` fetches via `ureq` (http/https). `read/binary`/`write/binary`
-  de-stubbed in v0.4.
-- **Ports & networking (v0.6):** `open` (`file!`/`url!`), `close`, `create`
+  `read` of `url!` fetches via `ureq` (http/https). `read/binary`/`write/binary`.
+- **Ports & networking:** `open` (`file!`/`url!`), `close`, `create`
   (`file!`), `port?` predicate, `read port` (streaming for HTTP, whole-file
   for files), `write port` (file ports only — HTTP is GET-only). `read url!`
   for `http://`/`https://` routes through the `net/` facade (GET via `ureq`,
   TLS on by default). All network access is gated behind `--allow-network`
   (default off, mirroring `--allow-shell`). Non-HTTP protocols
   (FTP/SMTP/POP3/NNTP/DNS/TCP/UDP/WHOIS/Finger/Daytime) are reserved
-  `PortScheme` variants that error in v0.6; the async/`Channel`-backed port
-  model is deferred to v0.7+.
+  `PortScheme` variants that; the async/`Channel`-backed port
+  model is deferred.
 - **Dialect:** `parse` — over string! and block! inputs. Rule set:
   `skip`, `to`, `thru`, `end`, `none`, `any`, `some`, `opt`, `while`, `|`
   (alternative), `copy 'word rule`, `set 'word rule`, `[...]` grouping,
-  `(...)` Red side-effects. **v0.4 completions:** `collect 'word` /
+  `(...)` Red side-effects. `collect 'word` /
   `collect into 'word`, `keep` (value / `'word` / `(expr)`), `match value`,
   `into 'word rule`, `fail`, `break`, `if (expr)`, `not rule`, `??` (debug),
   `accept value`, `reject`, `ahead rule`, `behind rule`, `bitset!` charset
   matching, `/case` refinement for case-sensitive string matching.
-  **v0.7 integer-count rules:** `n rule` and `n m rule` (exact-count and
+  **Integer-count rules:** `n rule` and `n m rule` (exact-count and
   range-count repetition), where `n`/`m` are `integer!` literals or words
   resolving to a non-negative `integer!`. Per Red semantics, *every*
   `integer!` in a rule block is a count prefix (literal-integer matching
   against block input uses `match`/lit-word/string forms instead).
   Negative counts and inverted ranges (`3 1 rule`) raise a parse error.
-  **v0.6 named-rule recursion:** a bound word resolving to a `block!` is
+  **Named-rule recursion:** a bound word resolving to a `block!` is
   treated as a named sub-rule (parsed recursively against the same cursor);
   a word resolving to a `bitset!` still does charset matching. A depth
   guard raises `ParseRecursionLimit` on self/mutual-reference loops.
   Backtracking via cursor save/restore.
-- **Dates (v0.4):** `now` (local time + local UTC offset), `today`,
+- **Dates:** `now` (local time + local UTC offset), `today`,
   `to-utc`. Date arithmetic: `date + integer` (days), `date - date` (day
   diff, zone-adjusted), `date + time`. Timezone model: **fixed UTC offsets
   only** (`±HH:MM` / `Z`); no named zones, no DST.
-- **Errors (v0.4):** first-class `error!` values with the full Red field
+- **Errors:** first-class `error!` values with the full Red field
   set — `code`/`type`/`message`/`args`/`near`/`where`/`by`. `make error!`
   from string or block of keyword pairs; `try`/`attempt`/`catch` unwrap
   structured payloads; `cause-error` (1/2/4-arg + block forms);
   `error-type`/`error-code`/`error-args`/`error-near` accessors;
   `attempted?` predicate.
-- **Bitset (v0.4):** `charset "ABC"`, `make bitset! [...]` (ranges, unions),
+- **Bitset:** `charset "ABC"`, `make bitset! [...]` (ranges, unions),
   `union`/`intersect`/`difference`/`complement`/`extract?` (membership test).
 - **Constants:** `none`, `true`, `false`, `newline`, `pi`, `e` bound in the
   user context.
-- **Stdlib (v0.5):** ~25 utility functions auto-imported into `user_ctx` at
+- **Stdlib:** ~25 utility functions auto-imported into `user_ctx` at
   script startup (unless `--no-stdlib`): string utils (`str-upper`/
   `str-lower`/`starts-with?`/`ends-with?`/`contains?`/`str-join`/
   `repeat-str`/`pad-left`/`pad-right`), block utils (`block-sum`/
   `block-product`/`block-len`/`block-mean`/`mean`/`reverse-of`/`flatten`/
   `min-of`/`max-of`/`intersperse`/`chunk`), math utils (`gcd`/`lcm`/
   `sign-of`/`clamp`/`factorial-iter`), `range-of`. (The stdlib also defines
-  a pure-Red `sort`, now shadowed by the v0.6 native `sort` — natives are
+  a pure-Red `sort`, now shadowed by the native `sort` — natives are
   looked up before stdlib bindings.) The stdlib is a module
   (`crates/red-eval/stdlib/stdlib.red`) embedded via `include_str!` and
   cached on `Env::stdlib` (so the REPL doesn't recompile per line).
@@ -285,7 +297,7 @@ Path-step errors localize to the offending part's span; `load %file` parse
 errors fold the loaded file's `file:line:col:` into the message body.
 `Return`/`Break`/`Continue`/`Throw`/`Quit` are control-flow unwinds caught by
 the function-call shim, loop natives, `catch`, and the script entry point.
-`try`/`attempt` catch errors as `error!` values. **v0.4 structured errors:**
+`try`/`attempt` catch errors as `error!` values. 
 `EvalError::Raised(Rc<ErrorValue>)` transports first-class `error!` values with
 the full Red field set (`code`/`type`/`args`/`near`/`where`/`by`); the VM and
 walker auto-enrich `Native` errors with `where`/`near` via `enrich_error`;
@@ -315,7 +327,7 @@ runnable via `cargo run -p red-cli -- examples/<name>.red`:
 | `mutation.red` | `insert` / `change` / `remove` / `take` / `clear` / `poke`, shared-storage aliasing, `copy` |
 | `shared.red` | shared-storage semantics via aliases |
 | `blocks.red` | blocks as data (homoiconicity), `mold`/`do`/`reduce`, nested blocks |
-| `strings.red` | `"..."` escapes and `{...}` multi-line braced strings, `prin`, M15 string natives (`rejoin`/`split`/`trim`/`replace`/`uppercase`/`lowercase`/`suffix?`, string `+`, string `find`/`copy`) |
+| `strings.red` | `"..."` escapes and `{...}` multi-line braced strings, `prin`, string natives (`rejoin`/`split`/`trim`/`replace`/`uppercase`/`lowercase`/`suffix?`, string `+`, string `find`/`copy`) |
 | `sort.red` | insertion sort with `forall`/`insert` |
 | `map.red` | `reduce`-style mapping |
 | `filter.red` | filtering with series ops |
@@ -326,14 +338,14 @@ runnable via `cargo run -p red-cli -- examples/<name>.red`:
 | `calculator.red` | cursor-based `take`/`append` queue calculator with `does` and `func` |
 | `tree-walk.red` | recursive walk of a nested-block tree (leaf count, flatten, depth) |
 | `probe.red` | `probe` debug output |
-| `char.red` | `#"..."` literals, char arithmetic, char pick/poke (v0.4) |
-| `binary.red` | `#{hex}` literals, `to-binary`, `read/binary`/`write/binary` (v0.4) |
-| `compose.red` | `compose`/`compose/deep`/`compose/only` (v0.4) |
-| `dates.red` | `date!`/`time!` literals, `now`/`today`/`to-utc`, zones, date arithmetic (v0.4) |
-| `errors.red` | `make error!`, `try`/`attempt`/`catch`/`cause-error`, structured fields (v0.4) |
-| `maps.red` | `make map!`, heterogeneous keys, path access (v0.4) |
-| `pair-tuple.red` | `pair!`/`tuple!` literals, arithmetic, component paths (v0.4) |
-| `trig.red` | `sin`/`cos`/`sqrt`/`log-*`/`atan2`/`degrees`/`radians`, `pi`/`e` (v0.4) |
+| `char.red` | `#"..."` literals, char arithmetic, char pick/poke |
+| `binary.red` | `#{hex}` literals, `to-binary`, `read/binary`/`write/binary` |
+| `compose.red` | `compose`/`compose/deep`/`compose/only` |
+| `dates.red` | `date!`/`time!` literals, `now`/`today`/`to-utc`, zones, date arithmetic |
+| `errors.red` | `make error!`, `try`/`attempt`/`catch`/`cause-error`, structured fields |
+| `maps.red` | `make map!`, heterogeneous keys, path access |
+| `pair-tuple.red` | `pair!`/`tuple!` literals, arithmetic, component paths |
+| `trig.red` | `sin`/`cos`/`sqrt`/`log-*`/`atan2`/`degrees`/`radians`, `pi`/`e` |
 
 ## Repository layout
 
@@ -348,7 +360,7 @@ rebol-clone/
 │   │   ├── src/{lib,interp,interp_runner,interp_walker,binding,series,parse,
 │   │   │        strings,math,convert,object,path,io}.rs
 │   │   ├── src/natives/       # split by concern: compare/control/eval/func/io/words/registry
-│   │   ├── src/net/           # M113 port!/networking facade: mod/protocol/request/response/error/http
+│   │   ├── src/net/           # port!/networking facade: mod/protocol/request/response/error/http
 │   │   ├── src/vm/            # compiler.rs, vm.rs, lex.rs, pool.rs
 │   │   ├── benches/eval.rs    # criterion A/B bench harness (VM vs walker)
 │   │   └── tests/{programs,programs_errors,disasm,property,parity,bench_fixtures}.rs
@@ -357,11 +369,11 @@ rebol-clone/
 │       └── tests/cli.rs
 ├── fuzz/                      # cargo-fuzz targets (nightly-only, excluded from workspace)
 ├── examples/                  # sample .red programs
-├── BENCHMARKS.md              # VM + walker bench numbers (v0.3 → v0.7)
+├── BENCHMARKS.md              # VM + walker bench numbers
 ├── KNOWN_ISSUES.md            # pre-existing bugs + VM/walker divergences
 ├── project-brief.md           # feature scope and design decisions
 ├── architecture.md            # implementation sketch (lexer/parser/compiler/VM/eval internals)
-└── plan*.md                   # per-version build checklists (v0.1 → v0.7)
+└── plan*.md                    # per-version build checklists
 ```
 
 ## Design notes
@@ -377,61 +389,59 @@ rebol-clone/
 - **No native pre-binding.** Unbound words at eval time fall back to a
   `HashMap<Symbol, NativeFn>` lookup. Real Red pre-binds native references at
   load; deferred.
-- **v0.4 value types are immutable where Red is immutable** (`char!`/`pair!`/
+- **Value types are immutable where Red is immutable** (`char!`/`pair!`/
   `tuple!`/`date!`/`binary!`/`bitset!`). Set-paths on these return a new value
   and rebind; aliases don't see updates (mirrors Red semantics). `map!` uses
   `Rc<RefCell<MapDef>>` for in-place mutation like `object!`.
 
-## Known gaps (v0.7)
+## Known gaps
 
 See [`project-brief.md`](./project-brief.md) and
 [`plan8-missing-types.md`](./plan8-missing-types.md) for the
 authoritative list. Headlines:
 
-- **Type-completeness gaps deferred to v0.8:** `regex!` (M82 skipped —
-  powers a future `parse` extension and `find`/`replace` with `/regex`),
-  `struct!`/`handle!` (M88 skipped — FFI-adjacent opaque types; ship
-  alongside the `routine!` FFI binding layer in v0.8), `ref!` (internal
+- **Type-completeness gaps deferred:** `regex!` (powers a future `parse` extension and `find`/`replace` with `/regex`),
+  `struct!`/`handle!` (FFI-adjacent opaque types; ship
+  alongside the `routine!` FFI binding layer), `ref!` (internal
   C-level reference type with no script surface — closest POC equivalent
   is the deferred `handle!`). The `typeset!` algebra (`union`/`intersect`/
-  `complement`) is also deferred to v0.8. Advanced `bitset!`/`logic!` ops
+  `complement`) is also deferred. Advanced `bitset!`/`logic!` ops
   beyond membership remain deferred.
 - **Networking is a synchronous, GET-only subset** — `read http://`/`read
   https://` and `open`/`close`/`create`/`read port`/`write port` work (via
   `ureq`, TLS on by default), but: non-HTTP protocols (FTP/SMTP/POP3/NNTP/
   DNS/TCP/UDP/WHOIS/Finger/Daytime) are reserved `PortScheme` variants
-  that error in v0.6; HTTP methods beyond GET, request headers/cookies/
+  that error out; HTTP methods beyond GET, request headers/cookies/
   auth, redirect control, `write http://` (POST/PUT), and the async/
-  `Channel`-backed port model are deferred to v0.8+. Network access is
+  `Channel`-backed port model are deferred. Network access is
   gated behind `--allow-network` (default off).
 - **Closure capture is snapshot, not shared-cell** — each `closure` copies
   freevar values at creation time; outer writes after creation don't
   propagate inward, and SetWord inside a closure body is treated as a local
   (not a capture write — use block-as-state via `poke` for mutable closure
   state). Real Red `closure!` shares the cell across closures and across
-  outer/inner; shared-cell is a v0.8 candidate.
-- **`unimport` deferred to v0.8** — `import` aliases exports into `user_ctx`
+  outer/inner; shared-cell is a future candidate.
+- **`unimport` deferred** — `import` aliases exports into `user_ctx`
   but there's no native to remove the aliases.
 - **Timezones: fixed UTC offsets only** (`±HH:MM`/`Z`) — no named zones, no
-  DST. Matches Red parity; named-zone support (`chrono-tz`) deferred to v0.8+.
+  DST. Matches Red parity; named-zone support (`chrono-tz`) deferred.
 - **`DD/MM/YYYY` date form not supported** — `/` is a lexer delimiter so the
   run splits before the date scanner. Use `DD-Mon-YYYY` or `YYYY-MM-DD`.
 - **`pair!`/`tuple!` `same?`** returns `false` (immutable value types; use `=`
   for structural equality). `same?` is for reference-identity comparisons.
-- **`--unset-on-unbound` is default-off** — the v0.7 M86 gate makes a
+- **`--unset-on-unbound` is default-off** — the gate makes a
   truly-unbound word evaluate to `unset!` instead of erroring, but only
   when the flag is set (back-compat with the strict-binding contract).
-  Revisit the default in v0.8.
+  Revisit the default.
 - **Object path method calls** work for `o/method` followed by trailing
   block args; `func/refinement` bound refinements references are deferred.
-- **Reactivity (`react`/`is-thunk`) is a v0.8 candidate** (see
-  `future-plan-reactivity.md`); concurrency (actors/channels) is a v0.8+
-  candidate. GUI / `draw` / `vid` dialects are permanently out of scope.
-- **Calendar `period!` deferred** — `duration!` (v0.11) is the fixed-length
+- **Reactivity (`react`/`is-thunk`) is a future candidate** (see
+  `future-plan-reactivity.md`); concurrency (actors/channels) is a future candidate. GUI / `draw` / `vid` dialects are permanently out of scope.
+- **Calendar `period!` deferred** — `duration!` is the fixed-length
   physical-time subset (days and below); months/years are calendar-bound and
   cannot be represented as nanoseconds. A future `period!` type could cover
   these.
-- **`date - date` returns `duration!` (v0.11 behavior change)** — was
+- **`date - date` returns `duration!`** — was
   `integer!` day count; now full nanosecond precision. Use
   `to-integer (date - date) / 86400` for the old day count.
 

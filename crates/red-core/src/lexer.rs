@@ -15,6 +15,15 @@ use crate::value::{DateValue, MoneyValue, Span, Symbol};
 pub enum TokenKind {
     Integer(i64),
     Float(f64),
+    /// `3.14dec` — a decimal! literal (M150). Backed by
+    /// `rust_decimal::Decimal` (28-digit precision, 96-bit mantissa, no
+    /// NaN/Inf). Produced by `scan_number` when a digit run is immediately
+    /// followed by the `dec` suffix (collision-free — duration unit
+    /// suffixes are 1-2 chars `s`/`m`/`h`/`d`/`ms`/`us`/`ns`, never
+    /// `dec`). The suffix must be followed by a delimiter/EOF (not a
+    /// word-extending char) to commit — `3.14decal` lexes as float `3.14`
+    /// + word `decal`.
+    Decimal(rust_decimal::Decimal),
     /// `50%` — a percent! literal (M80). Stored as the fractional float
     /// (`50%` ⇒ 0.5). Produced by `scan_number` when a digit run is
     /// immediately followed by `%` (the `%` does not collide with file!
@@ -877,6 +886,36 @@ fn scan_number(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError>
     // fall through to the Integer/Float assembly below.
     if let Some((dur_end, duration)) = try_scan_duration(src, i, start, end, bytes)? {
         return Ok((dur_end, TokenKind::Duration(duration)));
+    }
+
+    // M150: a digit run immediately followed by `dec` is a decimal! literal
+    // (`3.14dec`/`100dec`/`1e9dec`). Collision-free — duration unit suffixes
+    // are 1-2 chars (`s`/`m`/`h`/`d`/`ms`/`us`/`ns`), never `dec`, and `%`
+    // (percent) is checked above. The suffix must be followed by a delimiter
+    // or EOF (not a word-extending char) to commit — `3.14decal` lexes as
+    // float `3.14` + word `decal`. A following digit (e.g. `3dec1`) is also
+    // rejected — that would be a word boundary (digit-runs in words are
+    // allowed mid-word, but the digit immediately after `dec` would make it
+    // `dec1`, not a clean suffix). Matching the duration guard's policy:
+    // delimiter/EOF commits, anything else falls through.
+    if end + 3 <= bytes.len() && &bytes[end..end + 3] == b"dec" {
+        let after = end + 3;
+        let committed = after >= bytes.len() || is_delimiter(bytes[after]);
+        if committed {
+            let text = &src[start..end];
+            match text.parse::<rust_decimal::Decimal>() {
+                Ok(d) => {
+                    *i = after;
+                    return Ok((after, TokenKind::Decimal(d)));
+                }
+                Err(_) => {
+                    return Err(LexError::InvalidNumber {
+                        span: Span::new(start, after),
+                        chars: src[start..after].to_string(),
+                    });
+                }
+            }
+        }
     }
 
     let kind = if is_float {

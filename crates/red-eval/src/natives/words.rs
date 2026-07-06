@@ -281,6 +281,18 @@ pub(crate) fn float_predicate(
     pred1(args, "float?", |v| matches!(v, Value::Float { .. }))
 }
 
+/// `decimal?` — true for `decimal!` (`Value::Decimal`). M150. A distinct
+/// scalar type from `float!` (unlike Red where `decimal!` ≡ `float!`); our
+/// `decimal!` is a true fixed-decimal via `rust_decimal` (28-digit precision,
+/// no NaN/Inf).
+pub(crate) fn decimal_predicate(
+    args: &[Value],
+    _r: &RefineArgs,
+    _e: &mut Env,
+) -> Result<Value, EvalError> {
+    pred1(args, "decimal?", |v| matches!(v, Value::Decimal { .. }))
+}
+
 /// `percent?` — true for `percent!` (`Value::Percent`). M80. Red parity: a
 /// distinct scalar type; NOT a member of `number!` (per Red's `types-of`).
 pub(crate) fn percent_predicate(
@@ -682,6 +694,7 @@ pub(crate) fn register_word_predicate_natives(env: &mut Env) {
     // Scalar type predicates.
     reg(env, "integer?", integer_predicate);
     reg(env, "float?", float_predicate);
+    reg(env, "decimal?", decimal_predicate);
     reg(env, "percent?", percent_predicate);
     reg(env, "money?", money_predicate);
     reg(env, "issue?", issue_predicate);

@@ -20,6 +20,10 @@ indexmap = "2"
 # M45: `chrono` for the `date!`/`time!`/`now` types. `clock` enables `Local`
 # (system TZ + offset) for `now`; no `std`/`wasmbind`/`alloc` features needed.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# M150: `rust_decimal` for the `decimal!` value type (28-digit precision,
+# 96-bit mantissa, no NaN/Inf). Pure-Rust, no native deps. Used for exact
+# fixed-decimal arithmetic where `float!` (f64) rounding surprises.
+rust_decimal = "1.36"
 
 [dev-dependencies]
 proptest = "1"

@@ -265,6 +265,17 @@ pub enum Value {
     Integer { n: i64, span: Span },
     /// `3.14`, `1e3` — float literal.
     Float { f: f64, span: Span },
+    /// `3.14dec` — a decimal! literal (M150). Backed by `rust_decimal::Decimal`
+    /// (28-digit precision, 96-bit mantissa, no NaN/Inf). Exact fixed-decimal
+    /// arithmetic — `0.1dec + 0.2dec = 0.3dec` holds (unlike `float!`).
+    /// Coexists with `Float`; promotion rules: `Decimal + Integer → Decimal`,
+    /// `Decimal + Float → Float` (Float wins on mix; precision already lost).
+    /// Transcendentals (`sin`/`cos`/`log`/`sqrt`/`exp`) auto-convert to f64
+    /// and return `Float` (rust_decimal has no transcendental ops).
+    Decimal {
+        d: rust_decimal::Decimal,
+        span: Span,
+    },
     /// `50%` — a percent! literal (M80). Source-origin (the lexer scans a
     /// digit run immediately followed by `%`); carries the byte-offset span of
     /// the whole token. Stored as the *fractional* float (`50%` ⇒ 0.5); molds
@@ -1456,6 +1467,7 @@ pub fn type_name_for(v: &Value) -> &'static str {
         Value::Logic(_) => "logic!",
         Value::Integer { .. } => "integer!",
         Value::Float { .. } => "float!",
+        Value::Decimal { .. } => "decimal!",
         Value::Percent { .. } => "percent!",
         Value::Money { .. } => "money!",
         Value::String { .. } => "string!",
@@ -1509,6 +1521,7 @@ pub const TYPE_WORDS: &[&str] = &[
     "logic!",
     "integer!",
     "float!",
+    "decimal!",
     "percent!",
     "money!",
     "string!",
@@ -1566,7 +1579,7 @@ pub fn group_members(group: &str) -> Option<&'static [&'static str]> {
     const ANY_BLOCK: &[&str] = &["block!", "paren!"];
     const ANY_OBJECT: &[&str] = &["object!", "module!"];
     const ANY_FUNCTION: &[&str] = &["function!", "closure!", "native!", "op!"];
-    const NUMBER: &[&str] = &["integer!", "float!", "percent!"];
+    const NUMBER: &[&str] = &["integer!", "float!", "decimal!", "percent!"];
     const SERIES: &[&str] = &[
         "block!", "paren!", "string!", "binary!", "issue!", "email!", "tag!", "file!", "url!",
         "hash!", "vector!", "image!",
@@ -2203,6 +2216,7 @@ impl Value {
         match self {
             Value::Integer { span, .. }
             | Value::Float { span, .. }
+            | Value::Decimal { span, .. }
             | Value::Percent { span, .. }
             | Value::Money { span, .. }
             | Value::Issue { span, .. }
@@ -2301,6 +2315,14 @@ impl Value {
     pub fn float(f: f64) -> Self {
         Value::Float {
             f,
+            span: Span::default(),
+        }
+    }
+
+    /// Constructor shorthand for a decimal! literal (zero span).
+    pub fn decimal(d: rust_decimal::Decimal) -> Self {
+        Value::Decimal {
+            d,
             span: Span::default(),
         }
     }

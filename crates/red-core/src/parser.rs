@@ -143,6 +143,10 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok(Value::Float { f, span: tok.span })
             }
+            TokenKind::Decimal(d) => {
+                self.advance()?;
+                Ok(Value::Decimal { d, span: tok.span })
+            }
             TokenKind::Percent(value) => {
                 self.advance()?;
                 Ok(Value::Percent {

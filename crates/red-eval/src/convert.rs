@@ -106,6 +106,7 @@ fn to_integer(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Valu
     Ok(match v {
         Value::Integer { n, .. } => Value::integer(*n),
         Value::Float { f, .. } => Value::integer(*f as i64),
+        Value::Decimal { d, .. } => Value::integer((*d).try_into().unwrap_or(0)),
         Value::Logic(b) => Value::integer(if *b { 1 } else { 0 }),
         Value::None => Value::integer(0),
         Value::String { s, .. } => Value::integer(parse_i64(s, v)?),
@@ -190,6 +191,7 @@ fn to_float(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value,
     Ok(match v {
         Value::Integer { n, .. } => Value::float(*n as f64),
         Value::Float { f, .. } => Value::float(*f),
+        Value::Decimal { d, .. } => Value::float((*d).try_into().unwrap_or(f64::NAN)),
         // M80: percent promotes to its fractional float value.
         Value::Percent { value, .. } => Value::float(*value),
         // M140: duration → total seconds as f64.
@@ -203,6 +205,54 @@ fn to_float(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value,
                 expected: "integer!, float!, or string!",
                 found: type_name(other),
                 span: other.span_or_default(),
+            })
+        }
+    })
+}
+
+/// `to-decimal value` — M150. Coerce to `decimal!` (rust_decimal).
+/// - `integer!` → exact Decimal
+/// - `float!`   → Decimal::try_from (errors on NaN/Inf)
+/// - `decimal!` → identity
+/// - `percent!` → fractional value as Decimal
+/// - `money!`   → cents as Decimal with 2 decimal places (currency discarded)
+/// - `string!`  → parse as Decimal (error on unparseable)
+fn to_decimal(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 1 {
+        return Err(arity_err(args, "to-decimal", 1, args.len()));
+    }
+    let v = &args[0];
+    let span = v.span_or_default();
+    Ok(match v {
+        Value::Integer { n, .. } => Value::decimal(rust_decimal::Decimal::from(*n)),
+        Value::Float { f, .. } => rust_decimal::Decimal::try_from(*f)
+            .map(Value::decimal)
+            .map_err(|_| EvalError::Native {
+                message: format!(
+                    "to-decimal: cannot convert {f:?} (NaN/Inf not representable as decimal!)"
+                ),
+                span,
+            })?,
+        Value::Decimal { d, .. } => Value::decimal(*d),
+        Value::Percent { value, .. } => rust_decimal::Decimal::try_from(*value)
+            .map(Value::decimal)
+            .map_err(|_| EvalError::Native {
+                message: "to-decimal: percent value out of decimal! range".into(),
+                span,
+            })?,
+        Value::Money { amount, .. } => Value::decimal(rust_decimal::Decimal::new(amount.cents, 2)),
+        Value::String { s, .. } => s
+            .parse::<rust_decimal::Decimal>()
+            .map(Value::decimal)
+            .map_err(|_| EvalError::Native {
+                message: format!("to-decimal: cannot parse {:?} as decimal!", s),
+                span,
+            })?,
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "integer!, float!, decimal!, percent!, money!, or string!",
+                found: type_name(other),
+                span,
             })
         }
     })
@@ -420,6 +470,10 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
     Ok(match t {
         "integer!" | "integer" => make_integer(spec)?,
         "float!" | "float" => make_float(spec)?,
+        // M150: decimal! — route through to-decimal.
+        "decimal!" | "decimal" => {
+            to_decimal(std::slice::from_ref(spec), &RefineArgs::empty(), env)?
+        }
         "percent!" | "percent" => make_percent(spec)?,
         "money!" | "money" => make_money(spec)?,
         "issue!" | "issue" => make_issue(spec)?,
@@ -1347,6 +1401,7 @@ fn to_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
     match t {
         "integer!" | "integer" => to_integer(one, &RefineArgs::empty(), env),
         "float!" | "float" => to_float(one, &RefineArgs::empty(), env),
+        "decimal!" | "decimal" => to_decimal(one, &RefineArgs::empty(), env),
         "percent!" | "percent" => to_percent(one, &RefineArgs::empty(), env),
         "money!" | "money" => to_money(one, &RefineArgs::empty(), env),
         "issue!" | "issue" => to_issue(one, &RefineArgs::empty(), env),
@@ -1447,6 +1502,7 @@ pub fn register_convert_natives(env: &mut Env) {
     // to-* family (arity 1)
     reg(env, "to-integer", to_integer as NF, 1);
     reg(env, "to-float", to_float as NF, 1);
+    reg(env, "to-decimal", to_decimal as NF, 1);
     reg(env, "to-percent", to_percent as NF, 1);
     reg(env, "to-money", to_money as NF, 1);
     reg(env, "to-issue", to_issue as NF, 1);

@@ -143,3 +143,20 @@ the `try` block instead of returning to the caller's frame. Likely
 involves the `TryFrame` / catch-target stack not being popped after
 `try` completes when the call site is a user func.
 
+
+## `float!` NaN/Inf propagation — `1.0 / 0.0` yields `inf` silently
+
+**Status:** By design (f64 parity). `float!` is backed by Rust's `f64`,
+which produces `inf`/`-inf`/`NaN` for `1.0 / 0.0`, `0.0 / 0.0`,
+`(-1.0).sqrt()`, etc. These values propagate silently through arithmetic
+and break `sort`/`<`/`>` invariants (NaN compares unordered). Red itself
+has this same behavior (Red's `decimal!`/`float!` are both f64).
+
+**Workaround:** Use `decimal!` (`3.14dec` literal or `to-decimal`) for
+exact arithmetic where float rounding surprises matter. `decimal!` is
+backed by `rust_decimal` (28-digit precision, 96-bit mantissa, no
+NaN/Inf) — `1dec / 0dec` raises a structured `math error: divide by
+zero` instead of producing `inf`. `0.1dec + 0.2dec = 0.3dec` holds.
+Transcendentals (`sin`/`cos`/`log`/`sqrt`/`exp`) on `decimal!`
+auto-convert to f64 and return `float!` (rust_decimal has no
+transcendental ops; the result is f64-precision anyway).

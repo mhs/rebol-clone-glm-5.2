@@ -18,6 +18,26 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Integer { n: x, .. }, Value::Integer { n: y, .. }) => x == y,
         (Value::Float { f: x, .. }, Value::Float { f: y, .. }) => x == y,
+        // M150: decimal! equality — exact (rust_decimal implements Eq). Cross-
+        // type with Integer promotes the int to Decimal (exact). Cross-type
+        // with Float converts Decimal to f64 (Float wins; precision already
+        // lost on the Float side). Matches the Integer/Float precedent at
+        // lines 35-36.
+        (Value::Decimal { d: x, .. }, Value::Decimal { d: y, .. }) => x == y,
+        (Value::Integer { n: x, .. }, Value::Decimal { d: y, .. }) => {
+            rust_decimal::Decimal::from(*x) == *y
+        }
+        (Value::Decimal { d: x, .. }, Value::Integer { n: y, .. }) => {
+            *x == rust_decimal::Decimal::from(*y)
+        }
+        (Value::Float { f: x, .. }, Value::Decimal { d: y, .. }) => {
+            let yf: f64 = (*y).try_into().unwrap_or(f64::NAN);
+            *x == yf
+        }
+        (Value::Decimal { d: x, .. }, Value::Float { f: y, .. }) => {
+            let xf: f64 = (*x).try_into().unwrap_or(f64::NAN);
+            xf == *y
+        }
         // M80: percent! strict equality — distinct from Float (cross-type `=` is
         // false). `50% = 0.5` ⇒ false (different types). Ordering (`<`/`>`)
         // promotes via `as_number` below.
@@ -331,12 +351,17 @@ fn money_parts(v: &Value) -> (i64, &str) {
 enum Num {
     Int(i64),
     Float(f64),
+    Dec(rust_decimal::Decimal),
 }
 
 fn as_number(v: &Value) -> Option<Num> {
     match v {
         Value::Integer { n, .. } => Some(Num::Int(*n)),
         Value::Float { f, .. } => Some(Num::Float(*f)),
+        // M150: decimal! promotes to its exact Decimal value for ordering
+        // (`<`/`>`/`<=`/`>=`). Equality stays strict (above). Cross-type
+        // with Float converts Decimal to f64 (Float wins on mix).
+        Value::Decimal { d, .. } => Some(Num::Dec(*d)),
         // M80: percent! promotes to its fractional float value for ordering
         // (`<`/`>`/`<=`/`>=`). Equality stays strict (above).
         Value::Percent { value, .. } => Some(Num::Float(*value)),
@@ -353,7 +378,7 @@ pub(crate) fn num_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalEr
         Some(n) => n,
         None => {
             return Err(EvalError::TypeError {
-                expected: "integer! or float!",
+                expected: "integer!, float!, or decimal!",
                 found: type_name(a),
                 span: a.span_or_default(),
             })
@@ -363,7 +388,7 @@ pub(crate) fn num_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalEr
         Some(n) => n,
         None => {
             return Err(EvalError::TypeError {
-                expected: "integer! or float!",
+                expected: "integer!, float!, or decimal!",
                 found: type_name(b),
                 span: b.span_or_default(),
             })
@@ -378,6 +403,20 @@ pub(crate) fn num_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EvalEr
             .partial_cmp(&(y as f64))
             .unwrap_or(std::cmp::Ordering::Equal),
         (Num::Float(x), Num::Float(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+        // M150: Decimal comparisons. Dec/Dec and Dec/Int use exact Decimal
+        // ordering (precision-preserving). Dec/Float converts Decimal to f64
+        // (Float wins — precision already lost on the Float side).
+        (Num::Dec(x), Num::Dec(y)) => x.cmp(&y),
+        (Num::Int(x), Num::Dec(y)) => rust_decimal::Decimal::from(x).cmp(&y),
+        (Num::Dec(x), Num::Int(y)) => x.cmp(&rust_decimal::Decimal::from(y)),
+        (Num::Dec(x), Num::Float(y)) => {
+            let xf: f64 = x.try_into().unwrap_or(f64::NAN);
+            xf.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (Num::Float(x), Num::Dec(y)) => {
+            let yf: f64 = y.try_into().unwrap_or(f64::NAN);
+            x.partial_cmp(&yf).unwrap_or(std::cmp::Ordering::Equal)
+        }
     })
 }
 
