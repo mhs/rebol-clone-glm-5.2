@@ -2237,18 +2237,90 @@ fn resolve_word(
 ) -> Result<Value, EvalError> {
     match binding {
         Binding::Local(ctx, idx) => Ok(ctx.slot_value(*idx)),
+        // M29/v0.11: lexical binding set by the VM compiler's lexical
+        // analyzer (`vm/lex.rs::attach_lexical`) on func-body words. The
+        // walker reaches here when a block-taking native (`try`/`loop`/
+        // `while`/`foreach`) lifts a func body block into the const pool and
+        // `dispatch_block` routes it to the walker via
+        // `has_foreign_bindings`. `depth` is the number of frames to walk
+        // up from the current frame — mirrors the VM's
+        // `self.frames[len-1-d].locals` (`LoadLocal`).
+        Binding::Lexical(depth, slot) => {
+            let len = env.call_stack.len();
+            if len > 0 {
+                let frame_idx = len
+                    .checked_sub(1 + *depth)
+                    .ok_or_else(|| EvalError::Native {
+                        message: format!(
+                            "lexical binding for {:?}: depth {} exceeds call stack len {}",
+                            sym.as_str(),
+                            depth,
+                            len
+                        ),
+                        span,
+                    })?;
+                let frame = env
+                    .call_stack
+                    .get(frame_idx)
+                    .ok_or_else(|| EvalError::Native {
+                        message: format!(
+                            "lexical binding for {:?}: no frame at depth {}",
+                            sym.as_str(),
+                            depth
+                        ),
+                        span,
+                    })?;
+                Ok(frame.ctx.slot_value(*slot))
+            } else {
+                // v0.11: VM-invoked func fallback. The enclosing func is
+                // running on the VM (not the walker), so `env.call_stack` is
+                // empty. The VM's `call_native` bridged the current frame's
+                // locals into `env.current_vm_locals` before calling us. Only
+                // depth 0 is supported (same func); deeper lexical references
+                // through nested VM-invoked funcs would need ancestor frame
+                // bridging — not yet implemented.
+                if *depth == 0 {
+                    env.current_vm_locals
+                        .as_ref()
+                        .and_then(|locals| locals.get(*slot))
+                        .cloned()
+                        .ok_or_else(|| EvalError::Native {
+                            message: format!(
+                                "lexical binding for {:?}: no VM locals bridged (slot {})",
+                                sym.as_str(),
+                                slot
+                            ),
+                            span,
+                        })
+                } else {
+                    Err(EvalError::Native {
+                        message: format!(
+                            "lexical binding for {:?}: depth {} not supported for VM-invoked funcs",
+                            sym.as_str(),
+                            depth
+                        ),
+                        span,
+                    })
+                }
+            }
+        }
         Binding::Func(idx) => {
             // Function-local slot: read from the current call frame's
             // per-call context clone. `call_stack` is non-empty whenever
-            // a function body is being evaluated.
-            let frame = env
-                .call_stack
-                .last()
+            // a function body is being evaluated via the walker. v0.11: when
+            // the enclosing func is VM-invoked, `call_stack` is empty — fall
+            // back to `env.current_vm_locals` (bridged by `Vm::call_native`).
+            if let Some(frame) = env.call_stack.last() {
+                return Ok(frame.ctx.slot_value(*idx));
+            }
+            env.current_vm_locals
+                .as_ref()
+                .and_then(|locals| locals.get(*idx))
+                .cloned()
                 .ok_or_else(|| EvalError::UnboundWord {
                     sym: sym.clone(),
                     span,
-                })?;
-            Ok(frame.ctx.slot_value(*idx))
+                })
         }
         // M60: closure capture cell — read from the active frame's captures.
         Binding::Closure(idx) => {
@@ -2296,18 +2368,6 @@ fn resolve_word(
                 })
             }
         }
-        // Lexical bindings are set by the v0.3 compiler (M23) and resolved
-        // by the VM (M25); the tree-walker never sees them. If one reaches
-        // here it indicates a `bind`/`use`/`do`-on-data block that should
-        // have been routed to the walker — surface as a clear runtime error
-        // rather than silently misresolving.
-        Binding::Lexical(_, _) => Err(EvalError::Native {
-            message: format!(
-                "lexical binding for {:?} not yet supported in the tree-walker",
-                sym.as_str()
-            ),
-            span,
-        }),
     }
 }
 
@@ -2328,16 +2388,101 @@ fn write_setword(
             Ok(())
         }
         Binding::Func(idx) => {
-            // Write to the current call frame's function-local slot.
-            let frame = env
-                .call_stack
-                .last_mut()
+            // Write to the current call frame's function-local slot. v0.11:
+            // when the enclosing func is VM-invoked, fall back to
+            // `env.current_vm_locals` (bridged by `Vm::call_native`).
+            if let Some(frame) = env.call_stack.last_mut() {
+                frame.ctx.set_slot(*idx, val);
+                return Ok(());
+            }
+            let locals = env
+                .current_vm_locals
+                .as_mut()
                 .ok_or_else(|| EvalError::UnboundWord {
                     sym: sym.clone(),
                     span,
                 })?;
-            frame.ctx.set_slot(*idx, val);
-            Ok(())
+            if *idx < locals.len() {
+                locals[*idx] = val;
+                Ok(())
+            } else {
+                Err(EvalError::UnboundWord {
+                    sym: sym.clone(),
+                    span,
+                })
+            }
+        }
+        // M29/v0.11: see `resolve_word` — write a func-body lexical slot.
+        Binding::Lexical(depth, slot) => {
+            let len = env.call_stack.len();
+            if len > 0 {
+                let frame_idx = len
+                    .checked_sub(1 + *depth)
+                    .ok_or_else(|| EvalError::Native {
+                        message: format!(
+                            "lexical setword for {:?}: depth {} exceeds call stack len {}",
+                            sym.as_str(),
+                            depth,
+                            len
+                        ),
+                        span,
+                    })?;
+                let frame = env
+                    .call_stack
+                    .get_mut(frame_idx)
+                    .ok_or_else(|| EvalError::Native {
+                        message: format!(
+                            "lexical setword for {:?}: no frame at depth {}",
+                            sym.as_str(),
+                            depth
+                        ),
+                        span,
+                    })?;
+                frame.ctx.set_slot(*slot, val);
+                Ok(())
+            } else {
+                // v0.11: VM-invoked func fallback — write to the bridged
+                // `env.current_vm_locals`. The write persists because
+                // `call_native` writes the locals back to the VM frame after
+                // the native returns. Only depth 0 is supported.
+                if *depth == 0 {
+                    let locals =
+                        env.current_vm_locals
+                            .as_mut()
+                            .ok_or_else(|| EvalError::Native {
+                                message: format!(
+                                    "lexical setword for {:?}: no VM locals bridged (slot {})",
+                                    sym.as_str(),
+                                    slot
+                                ),
+                                span,
+                            })?;
+                    let idx = *slot;
+                    if idx < locals.len() {
+                        locals[idx] = val;
+                        Ok(())
+                    } else {
+                        Err(EvalError::Native {
+                            message: format!(
+                                "lexical setword for {:?}: slot {} out of bounds (len {})",
+                                sym.as_str(),
+                                slot,
+                                locals.len()
+                            ),
+                            span,
+                        })
+                    }
+                } else {
+                    Err(EvalError::Native {
+                        message: format!(
+                            "lexical setword for {:?}: depth {} not supported for VM-invoked funcs",
+                            sym.as_str(),
+                            depth
+                        ),
+                        span,
+                    })
+                }
+            }
         }
         // M60: closure capture cell — write to the active frame's captures.
         Binding::Closure(idx) => {
@@ -2369,14 +2514,5 @@ fn write_setword(
             env.user_ctx.set(sym.clone(), val);
             Ok(())
         }
-        // See `resolve_word`: lexical bindings are VM-only; the walker never
-        // writes through one. Surface as an error if reached.
-        Binding::Lexical(_, _) => Err(EvalError::Native {
-            message: format!(
-                "lexical binding for {:?} not yet supported in the tree-walker",
-                sym.as_str()
-            ),
-            span,
-        }),
     }
 }

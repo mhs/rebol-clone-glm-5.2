@@ -266,6 +266,15 @@ pub struct Env {
     /// so `LoadCapture`/`SetCapture` instrs in closure-body sub-blocks find
     /// their capture cell. `None` outside a closure context.
     pub current_vm_captures: Option<Rc<Vec<RefCell<Value>>>>,
+    /// v0.11: the active VM frame's function-local slots, bridged to the
+    /// tree-walker so block-taking natives (`try`/`loop`/`while`/`foreach`)
+    /// whose body blocks carry `Binding::Lexical(0, slot)` can resolve func
+    /// params/locals when the enclosing func is VM-invoked (walker's
+    /// `env.call_stack` is empty in that case). `Vm::call_native` saves/
+    /// restores this around each native call, cloning `self.frames.last()`
+    /// .locals in + writing back out so `SetWord`s in loop bodies persist.
+    /// `None` outside a func call (root script scope) or in pure `Walk` mode.
+    pub current_vm_locals: Option<Vec<Value>>,
     /// M63: cache of the auto-imported stdlib module (parsed + evaluated
     /// once on first `ensure_stdlib` call). Re-aliased into `user_ctx` on
     /// every `run_source*` call so a fresh REPL-line ctx still gets the
@@ -346,6 +355,7 @@ impl Env {
             modules_by_path: HashMap::new(),
             loading_modules: Vec::new(),
             current_vm_captures: None,
+            current_vm_locals: None,
             stdlib: None,
             collect_stack: Vec::new(),
             protected_series: HashSet::new(),

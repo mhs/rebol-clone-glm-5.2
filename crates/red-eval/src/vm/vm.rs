@@ -1096,6 +1096,19 @@ impl<'env> Vm<'env> {
             &mut self.env.current_vm_captures,
             self.frames.last().and_then(|f| f.captures.clone()),
         );
+        // v0.11: bridge the current VM frame's function-local slots to the
+        // tree-walker. When a block-taking native (`try`/`loop`/`while`/
+        // `foreach`) inside a VM-invoked func lifts a body block that carries
+        // `Binding::Lexical(0, slot)`, `dispatch_block` routes it to the
+        // walker; the walker's `resolve_word`/`write_setword` read/write
+        // `env.current_vm_locals` as a fallback when `env.call_stack` is empty
+        // (the enclosing func was VM-invoked, not walker-invoked). We clone
+        // the locals in before the call and write them back out after, so
+        // `SetWord`s in loop bodies persist to the VM frame.
+        let prev_locals = std::mem::replace(
+            &mut self.env.current_vm_locals,
+            self.frames.last().map(|f| f.locals.clone()),
+        );
         let result = if argc <= INLINE_ARGS_CAP {
             // M30.1.A: stack-allocated args fast path. `[Value; 8]` lives on
             // the call frame (512 bytes) — cheaper than a heap alloc for the
@@ -1121,6 +1134,14 @@ impl<'env> Vm<'env> {
         self.stack.truncate(start);
         // Bug 3: restore the captures context.
         self.env.current_vm_captures = prev_captures;
+        // v0.11: write the (possibly-mutated) locals back to the VM frame,
+        // then restore the previous bridge value.
+        if let Some(locals) = self.env.current_vm_locals.take() {
+            if let Some(frame) = self.frames.last_mut() {
+                frame.locals = locals;
+            }
+        }
+        self.env.current_vm_locals = prev_locals;
         match result {
             Ok(v) => self.stack.push(v),
             Err(EvalError::Return(v)) => {

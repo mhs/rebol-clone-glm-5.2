@@ -74,6 +74,48 @@ advance the cursor before type-checking `if`'s block argument. Tracked
 separately from any milestone since the impact is limited to invalid
 input.
 
+## `loop` ignores its integer count argument — only supports the infinite `loop block` form
+
+**Status:** Pre-existing. The `loop` native (`natives/control.rs::loop_native`)
+only supports the `loop block` form (infinite loop, exit via `break`). The
+standard Red `loop count block` form (evaluate `block` `count` times) is not
+implemented — `loop 3 [print "hi"]` reports `expected block!, found integer!`
+because `loop_native` treats `args[0]` as the body block.
+
+**Spec (per Red docs):**
+
+> The word loop executes a given block! a given number of times.
+>
+> Has 2 parameters:
+>   1. a number! (number of times to evaluate the block!)
+>   2. a block! (to be evaluated the specified number of times)
+>
+> loop has no return value.
+
+**Minimal reproducer:**
+
+```red
+loop 3 [print "hi"]
+```
+
+**Observed behavior:**
+
+```
+*** Error: 1:3: expected block!, found integer!
+```
+
+**Workaround:** Use `repeat i count block` instead:
+
+```red
+repeat i 3 [print "hi"]
+```
+
+**Proper fix:** `loop_native` should accept either `(count, block)` or
+`(block)` — when `args[0]` is an integer, take `args[1]` as the body and
+iterate `count` times; when `args[0]` is a block, loop forever (current
+behavior). Mirror the walker's `repeat` body-dispatch path.
+
+
 ## `try` inside a `func` body infinite-loops in the VM
 
 **Status:** Pre-existing (surfaced during M38–M45 example writing; not

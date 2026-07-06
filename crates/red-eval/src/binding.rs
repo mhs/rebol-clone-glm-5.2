@@ -791,7 +791,10 @@ fn set_closure_bindings_inner(
 ///   `dispatch_block` on a block containing `Func` bindings (e.g. a func
 ///   body's branch block), the VM must fall back to the walker. (M29 fix —
 ///   was the root cause of the user-func refinement test failures.)
-///   `Binding::Lexical`/`Unbound` are VM-safe.
+///   `Binding::Unbound` is VM-safe. `Binding::Lexical` is foreign: it is
+///   set by the VM compiler's lexical analyzer on func-body words and must
+///   be read against a func call frame, which the standalone VM (root
+///   scope) cannot address — so route to the walker (v0.11 fix).
 ///
 /// Used by `interp::dispatch_block` to pick walker vs. VM for plain `Block`
 /// values passed to `do`/`reduce`/loop natives (which carry no cached
@@ -807,10 +810,9 @@ fn has_foreign_binding_value(v: &Value, user_ctx: &Rc<Context>) -> bool {
         | Value::SetWord { binding, .. }
         | Value::GetWord { binding, .. } => match binding {
             Binding::Local(ctx, _) => !Rc::ptr_eq(ctx, user_ctx),
-            Binding::Func(_) => true, // M29: VM can't resolve via env.call_stack
-            // M60: Closure bindings resolve via the frame's captures cell,
-            // not a foreign context — VM-safe.
+            Binding::Func(_) => true,
             Binding::Closure(_) => false,
+            Binding::Lexical(_, _) => true,
             _ => false,
         },
         Value::Block { series, .. } | Value::Paren { series, .. } => {

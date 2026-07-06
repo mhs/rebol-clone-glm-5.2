@@ -152,6 +152,10 @@ pub(crate) enum LoopSlot {
     Frame(usize),
     /// Write into the active frame's closure capture cell (`Binding::Closure`).
     Captures(usize),
+    /// v0.11: Write into the VM's current func frame locals (bridged via
+    /// `env.current_vm_locals`). Used when the enclosing func is VM-invoked
+    /// and `env.call_stack` is empty.
+    VmLocals(usize),
 }
 
 /// Resolve `word` (the loop-variable operand) to a `LoopSlot` the loop native
@@ -175,13 +179,16 @@ pub(crate) fn resolve_loop_slot(word: &Value, env: &Env) -> Result<LoopSlot, Eva
                 Ok(LoopSlot::Ctx(std::rc::Rc::clone(ctx), *idx))
             }
             red_core::value::Binding::Func(idx) => {
-                if env.call_stack.is_empty() {
-                    return Err(EvalError::UnboundWord {
+                if env.call_stack.last().is_some() {
+                    Ok(LoopSlot::Frame(*idx))
+                } else if env.current_vm_locals.is_some() {
+                    Ok(LoopSlot::VmLocals(*idx))
+                } else {
+                    Err(EvalError::UnboundWord {
                         sym: sym.clone(),
                         span,
-                    });
+                    })
                 }
-                Ok(LoopSlot::Frame(*idx))
             }
             red_core::value::Binding::Closure(idx) => {
                 if env.call_stack.is_empty()
@@ -208,13 +215,35 @@ pub(crate) fn resolve_loop_slot(word: &Value, env: &Env) -> Result<LoopSlot, Eva
                     })?;
                 Ok(LoopSlot::Ctx(std::rc::Rc::clone(&env.user_ctx), idx))
             }
-            red_core::value::Binding::Lexical(_, _) => Err(EvalError::Native {
-                message: format!(
-                    "lexical loop binding for {:?} not supported in walker",
-                    sym.as_str()
-                ),
-                span,
-            }),
+            red_core::value::Binding::Lexical(depth, idx) => {
+                // v0.11: lexical loop var binding. When the enclosing func is
+                // walker-invoked, resolve via `env.call_stack` at the right
+                // depth. When VM-invoked, use the bridged `current_vm_locals`
+                // (depth 0 only).
+                if *depth == 0 {
+                    if env.call_stack.last().is_some() {
+                        Ok(LoopSlot::Frame(*idx))
+                    } else if env.current_vm_locals.is_some() {
+                        Ok(LoopSlot::VmLocals(*idx))
+                    } else {
+                        Err(EvalError::UnboundWord {
+                            sym: sym.clone(),
+                            span,
+                        })
+                    }
+                } else if env
+                    .call_stack
+                    .get(env.call_stack.len().wrapping_sub(1 + *depth))
+                    .is_some()
+                {
+                    Ok(LoopSlot::Frame(*idx))
+                } else {
+                    Err(EvalError::UnboundWord {
+                        sym: sym.clone(),
+                        span,
+                    })
+                }
+            }
         },
         other => Err(EvalError::TypeError {
             expected: "word!",
@@ -237,6 +266,16 @@ pub(crate) fn write_loop_slot(slot: &LoopSlot, val: Value, env: &mut Env) {
             if let Some(frame) = env.call_stack.last_mut() {
                 if let Some(caps) = frame.captures.as_ref() {
                     *caps[*idx].borrow_mut() = val;
+                }
+            }
+        }
+        LoopSlot::VmLocals(idx) => {
+            if let Some(locals) = env.current_vm_locals.as_mut() {
+                if *idx < locals.len() {
+                    locals[*idx] = val;
+                } else {
+                    locals.resize(*idx + 1, Value::None);
+                    locals[*idx] = val;
                 }
             }
         }
