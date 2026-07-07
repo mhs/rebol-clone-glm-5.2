@@ -20,7 +20,6 @@ pub mod error;
 pub mod http;
 pub mod protocol;
 pub mod request;
-pub mod response;
 
 use std::path::Path;
 use std::rc::Rc;
@@ -532,5 +531,44 @@ mod tests {
         let src = format!("p: open %{} q: p same? p q", pstr);
         let v = run_capture(&src, false).expect("same? port");
         assert_eq!(mold_to_string(&v), "true");
+    }
+
+    // ----- M135: HTTP error-path coverage -----
+    // The existing in-process tests only exercise the 200-OK happy path.
+    // These add 404 (HttpStatus arm) and connection-refused (HttpTransport
+    // arm) to cover the two error branches in `http::open_http`.
+
+    #[test]
+    fn port_http_404_returns_status_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = std::io::Read::read(&mut stream, &mut buf);
+                let resp = "HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        let src = format!("open http://127.0.0.1:{}/", port);
+        let err = run_capture(&src, true).unwrap_err();
+        assert!(
+            err.contains("status 404"),
+            "expected status 404 error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn port_http_connection_refused_returns_transport_error() {
+        // Connect to a port that nothing is listening on → connection refused.
+        // Use a port that's almost certainly free (1 is privileged, so it'll
+        // be refused on most systems without privileges).
+        let src = "open http://127.0.0.1:1/";
+        let err = run_capture(src, true).unwrap_err();
+        assert!(
+            err.contains("transport error") || err.contains("Connection refused"),
+            "expected transport error, got: {err}"
+        );
     }
 }

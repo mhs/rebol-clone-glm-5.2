@@ -66,3 +66,84 @@ impl NetError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `NetError` variant renders to a non-empty, single-line message
+    /// that begins with the documented prefix (`port:`/`<native>:`). Drives
+    /// all 8 match arms in `render()` — the existing in-file tests in
+    /// `net/mod.rs` only exercise `Closed`, `NetworkDisabled`, and
+    /// `UnsupportedInV09` indirectly (via `run_capture` substring checks on
+    /// `NetworkDisabled`/`UnsupportedInV09` messages); the rest are pure
+    /// formatting arms that had no direct test.
+    #[test]
+    fn render_every_variant() {
+        // UnsupportedInV09 — covers the `scheme.as_str()` + format arm.
+        for (scheme, name) in [
+            (PortScheme::Ftp, "ftp"),
+            (PortScheme::Smtp, "smtp"),
+            (PortScheme::Pop3, "pop3"),
+            (PortScheme::Nntp, "nntp"),
+            (PortScheme::Dns, "dns"),
+            (PortScheme::Tcp, "tcp"),
+            (PortScheme::Udp, "udp"),
+            (PortScheme::Whois, "whois"),
+            (PortScheme::Finger, "finger"),
+            (PortScheme::Daytime, "daytime"),
+        ] {
+            let msg = NetError::UnsupportedInV09(scheme).render();
+            assert!(
+                msg.contains("not supported") && msg.contains(name),
+                "UnsupportedInV09({name}) render: {msg}"
+            );
+        }
+
+        // BadScheme — covers the `{s:?}` formatting of the offending input.
+        let msg = NetError::BadScheme("garbage://no-slash".to_string()).render();
+        assert!(
+            msg.contains("bad or unrecognized url scheme"),
+            "BadScheme render: {msg}"
+        );
+        assert!(msg.contains("garbage://no-slash"));
+
+        // Closed — the bare string arm.
+        assert_eq!(
+            NetError::Closed.render(),
+            "port: operation on a closed port"
+        );
+
+        // NetworkDisabled — covers the `{native}` interpolation.
+        assert_eq!(
+            NetError::NetworkDisabled("open").render(),
+            "open: network disabled (use --allow-network to enable)"
+        );
+        assert_eq!(
+            NetError::NetworkDisabled("read").render(),
+            "read: network disabled (use --allow-network to enable)"
+        );
+
+        // HttpWriteUnsupported — the bare GET-only string arm.
+        assert_eq!(
+            NetError::HttpWriteUnsupported.render(),
+            "port: write to http port not supported (GET-only)"
+        );
+
+        // HttpTransport — covers the `{msg}` interpolation.
+        let msg = NetError::HttpTransport("connection refused".to_string()).render();
+        assert!(msg.contains("http transport error"), "got: {msg}");
+        assert!(msg.contains("connection refused"));
+
+        // HttpStatus — covers the `{code}` interpolation.
+        let msg = NetError::HttpStatus(404).render();
+        assert_eq!(msg, "port: http request returned status 404");
+
+        // Io — covers the `{ctx}` + `{e}` interpolation. Wraps a real
+        // `std::io::Error` since the arm formats it via `Display`.
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing file");
+        let msg = NetError::Io("read /tmp/x".to_string(), io_err).render();
+        assert!(msg.contains("port: read /tmp/x:"), "got: {msg}");
+        assert!(msg.contains("missing file"));
+    }
+}

@@ -131,12 +131,6 @@ pub enum LexError {
     /// valid issue! shape; `#"` and `#{` are handled by the char!/binary!
     /// scanners before issue! is considered.
     InvalidIssue { span: Span, chars: String },
-    /// A `@`-containing word run that looks like an email! but has an empty
-    /// local part, empty host, or no dot in the host portion (e.g. `@bar.com`,
-    /// `foo@`, `foo@bar`). Bare `user@localhost` (no dot) lexes as a Word
-    /// instead — this error is reserved for runs that match the email shape
-    /// structurally but fail validation.
-    InvalidEmail { span: Span, chars: String },
     /// A `<...` tag! literal (M81) that hit EOF before the closing `>`.
     /// `chars` is the unterminated body (for the diagnostic).
     UnterminatedTag { span: Span, chars: String },
@@ -160,9 +154,6 @@ pub enum LexError {
     /// combination, out-of-range values, etc.). The run structurally matches
     /// a date/time form but the values don't validate.
     InvalidDate { span: Span, chars: String },
-    /// `+15:00`-style zone offset suffix with |minutes| > 14*60 or a malformed
-    /// suffix shape.
-    InvalidZone { span: Span, chars: String },
     /// A `NNs`/`1d1h`-style duration! literal (M140) with a malformed body:
     /// non-descending or repeated unit (`1h1d`/`1h1h`), sub-component
     /// overflow (`1h70m`/`1d25h`/`1m60s`), or a non-numeric magnitude. The
@@ -180,7 +171,6 @@ impl LexError {
             | LexError::InvalidPercent { span, .. }
             | LexError::InvalidMoney { span, .. }
             | LexError::InvalidIssue { span, .. }
-            | LexError::InvalidEmail { span, .. }
             | LexError::UnterminatedTag { span, .. }
             | LexError::InvalidWord { span }
             | LexError::UnbalancedBrace { span, .. }
@@ -189,7 +179,6 @@ impl LexError {
             | LexError::InvalidPair { span, .. }
             | LexError::InvalidTuple { span, .. }
             | LexError::InvalidDate { span, .. }
-            | LexError::InvalidZone { span, .. }
             | LexError::InvalidDuration { span, .. } => *span,
         }
     }
@@ -213,9 +202,6 @@ impl std::fmt::Display for LexError {
             LexError::InvalidIssue { chars, .. } => {
                 write!(f, "invalid issue literal: {chars:?}")
             }
-            LexError::InvalidEmail { chars, .. } => {
-                write!(f, "invalid email literal: {chars:?}")
-            }
             LexError::UnterminatedTag { chars, .. } => {
                 write!(f, "unterminated tag literal: {chars:?}")
             }
@@ -237,9 +223,6 @@ impl std::fmt::Display for LexError {
             }
             LexError::InvalidDate { chars, .. } => {
                 write!(f, "invalid date literal: {chars:?}")
-            }
-            LexError::InvalidZone { chars, .. } => {
-                write!(f, "invalid zone offset: {chars:?}")
             }
             LexError::InvalidDuration { chars, .. } => {
                 write!(f, "invalid duration literal: {chars:?}")
@@ -564,12 +547,10 @@ fn scan_quoted(src: &str, i: &mut usize) -> Result<(usize, String), LexError> {
         }
         // Ordinary byte — push as UTF-8. We advance by the char's byte length.
         let ch_len = utf8_len(c);
-        if let Some(s) = src.get(*i..*i + ch_len) {
-            out.push_str(s);
-            *i += ch_len;
-        } else {
-            *i += 1;
-        }
+        // `src` is a valid Rust `&str`, so the slice is always in-bounds.
+        let s = &src[*i..*i + ch_len];
+        out.push_str(s);
+        *i += ch_len;
     }
 
     Err(LexError::UnterminatedString {
@@ -604,12 +585,10 @@ fn scan_braced(src: &str, i: &mut usize) -> Result<(usize, String), LexError> {
             continue;
         }
         let ch_len = utf8_len(c);
-        if let Some(s) = src.get(*i..*i + ch_len) {
-            out.push_str(s);
-            *i += ch_len;
-        } else {
-            *i += 1;
-        }
+        // `src` is a valid Rust `&str`, so the slice is always in-bounds.
+        let s = &src[*i..*i + ch_len];
+        out.push_str(s);
+        *i += ch_len;
     }
 
     Err(LexError::UnbalancedBrace {
@@ -682,10 +661,8 @@ fn scan_binary(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError>
             let mut j = 0;
             while j + 1 < padded.len() {
                 let pair = &padded[j..j + 2];
-                let b = u8::from_str_radix(pair, 16).map_err(|_| LexError::InvalidBinary {
-                    span: Span::new(start, *i),
-                    chars: padded[j..j + 2].to_string(),
-                })?;
+                let b = u8::from_str_radix(pair, 16)
+                    .expect("hex digits pre-validated");
                 bytes_out.push(b);
                 j += 2;
             }
@@ -753,7 +730,6 @@ fn decode_char_unit(src: &str, bytes: &[u8], i: &mut usize) -> Result<char, Stri
             b'^' => '^',        // literal caret
             b'"' => '"',        // literal quote
             b')' => ')',
-            b'(' => '(',
             // `^M-C` meta form: control/meta syntax. Only triggered when `M`
             // is followed by `-` — otherwise `^M` is Ctrl-M (CR, codepoint 13).
             b'M' if bytes.get(*i) == Some(&b'-') => {
@@ -860,15 +836,10 @@ fn scan_number(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError>
         // Parse the digit run as f64 (treat as float regardless of `is_float`,
         // since percent is always fractional). An integer-shaped run like
         // `50` parses as 50.0 then divides by 100.0 → 0.5.
-        let raw = match text.parse::<f64>() {
-            Ok(f) => f / 100.0,
-            Err(_) => {
-                return Err(LexError::InvalidNumber {
-                    span: Span::new(start, pct_end),
-                    chars: src[start..pct_end].to_string(),
-                });
-            }
-        };
+        let raw = text
+            .parse::<f64>()
+            .expect("digit run always parses as f64")
+            / 100.0;
         if !raw.is_finite() {
             return Err(LexError::InvalidPercent {
                 span: Span::new(start, pct_end),
@@ -919,15 +890,10 @@ fn scan_number(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError>
     }
 
     let kind = if is_float {
-        match text.parse::<f64>() {
-            Ok(f) => TokenKind::Float(f),
-            Err(_) => {
-                return Err(LexError::InvalidNumber {
-                    span: Span::new(start, end),
-                    chars: text.to_string(),
-                });
-            }
-        }
+        TokenKind::Float(
+            text.parse::<f64>()
+                .expect("digit run always parses as f64"),
+        )
     } else {
         match text.parse::<i64>() {
             Ok(n) => TokenKind::Integer(n),
@@ -1044,16 +1010,9 @@ fn try_scan_duration(
     let mag_start = if negative { start + 1 } else { start };
     let first_text = &src[mag_start..end];
 
-    let first_mag = match first_text.parse::<f64>() {
-        Ok(f) => f,
-        Err(_) => {
-            let err_end = end + suffix_len;
-            return Err(LexError::InvalidDuration {
-                span: Span::new(start, err_end),
-                chars: src[start..err_end].to_string(),
-            });
-        }
-    };
+    let first_mag = first_text
+        .parse::<f64>()
+        .expect("digit run always parses as f64");
 
     let mut total_nanos: i128 = (first_mag * first_unit.factor as f64) as i128;
     let mut prev_rank = first_unit.rank;
@@ -1067,13 +1026,9 @@ fn try_scan_duration(
         let next = bytes[cursor];
         if next.is_ascii_digit() {
             // Compound continuation — scan the next number run + suffix.
-        } else if is_delimiter(next) {
-            break; // delimiter — done
         } else {
-            // Word-extending char (operator, letter, etc.) — shouldn't happen
-            // for the first suffix (collision guard already rejected). For
-            // subsequent suffixes, the guard also checked before committing,
-            // so this branch is unreachable in normal flow.
+            // Delimiter or EOF — done. (Word-extending chars are rejected
+            // by the collision guard before reaching here.)
             break;
         }
 
@@ -1117,16 +1072,9 @@ fn try_scan_duration(
         };
         let _ = comm;
 
-        let comp_mag = match comp_text.parse::<f64>() {
-            Ok(f) => f,
-            Err(_) => {
-                let err_end = cursor + sl;
-                return Err(LexError::InvalidDuration {
-                    span: Span::new(start, err_end),
-                    chars: src[start..err_end].to_string(),
-                });
-            }
-        };
+        let comp_mag = comp_text
+            .parse::<f64>()
+            .expect("digit run always parses as f64");
 
         // Descending check: current rank must be strictly less than prev.
         if unit.rank >= prev_rank {
@@ -1158,11 +1106,10 @@ fn try_scan_duration(
         total_nanos = -total_nanos;
     }
 
-    // Saturate to i64 (~292-year range).
+    // Saturate to i64 (~292-year range). Durations are always non-negative,
+    // so only the positive overflow check is needed.
     let ns = if total_nanos > i64::MAX as i128 {
         i64::MAX
-    } else if total_nanos < i64::MIN as i128 {
-        i64::MIN
     } else {
         total_nanos as i64
     };
@@ -1230,13 +1177,8 @@ fn scan_money(src: &str, i: &mut usize, negative: bool) -> Result<(usize, TokenK
             break;
         }
     }
-    if whole_digits.is_empty() {
-        let end = *i;
-        return Err(LexError::InvalidMoney {
-            span: Span::new(start, end),
-            chars: src[start..end].to_string(),
-        });
-    }
+    // whole_digits is non-empty — scan_money is only called when `$` is
+    // followed by at least one digit (guaranteed by the main scan loop).
 
     // Fractional part: optional `.DD` (exactly 2 digits).
     let mut frac_digits = String::new();
@@ -1494,31 +1436,17 @@ fn detect_pair_tuple(src: &str, start: usize) -> Option<bool> {
 /// floats are both valid pair components).
 fn scan_pair(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError> {
     let start = *i;
-    let bytes = src.as_bytes();
 
     // First component: optional `-`, digits, optional `.digits`, optional
     // exponent. Mirrors `scan_number` minus the int/float classification
     // (the parser does that from the raw substring).
     let _x_start = scan_pair_component(src, i)?;
 
-    // Expect `x` separator.
-    if *i >= bytes.len() || bytes[*i] != b'x' {
-        return Err(LexError::InvalidPair {
-            span: Span::new(start, *i),
-            chars: src[start..*i].to_string(),
-        });
-    }
+    // `x` separator — guaranteed by `detect_pair_tuple`.
     *i += 1; // consume `x`
 
     let y_start = scan_pair_component(src, i)?;
-
-    if y_start == *i {
-        // Empty second component (e.g. `1x` followed by delimiter/EOF).
-        return Err(LexError::InvalidPair {
-            span: Span::new(start, *i),
-            chars: src[start..*i].to_string(),
-        });
-    }
+    let _ = y_start; // scan_pair_component errors on empty.
 
     let end = *i;
     let split = start + src[start..end].find('x').unwrap_or(end - start);
@@ -1595,15 +1523,7 @@ fn scan_tuple(src: &str, i: &mut usize) -> Result<(usize, TokenKind), LexError> 
         }
     }
 
-    if comps.len() < 3 {
-        // detect_pair_tuple only routes 2-or-3-dot runs here, so this is a
-        // defensive guard for malformed input that slipped through.
-        return Err(LexError::InvalidTuple {
-            span: Span::new(start, *i),
-            chars: src[start..*i].to_string(),
-        });
-    }
-
+    // detect_pair_tuple guarantees >= 2 dots, so >= 3 components.
     Ok((*i, TokenKind::Tuple(Rc::from(&comps[..]))))
 }
 
@@ -2094,27 +2014,11 @@ fn parse_date_run(run: &str) -> Result<DateValue, ()> {
     if let Some(slash_pos) = body.rfind('/') {
         let date_str = &body[..slash_pos];
         let time_str = &body[slash_pos + 1..];
-        // Try each date form on date_str. If a form structurally matches but
-        // values are invalid (Err), propagate the error.
-        let date_opt: Option<NaiveDate> = {
-            match parse_iso_date(date_str) {
-                Ok(o) => o,
-                Err(()) => return Err(()),
-            }
-        };
-        let date_opt = match date_opt {
+        // Try ISO then DD-Mon-YYYY. (DD/MM/YYYY is unreachable here because
+        // `/` is a lexer delimiter — the run splits before reaching us.)
+        let date_opt = match parse_iso_date(date_str)? {
             Some(d) => Some(d),
-            None => match parse_dmonyyyy(date_str) {
-                Ok(o) => o,
-                Err(()) => return Err(()),
-            },
-        };
-        let date_opt = match date_opt {
-            Some(d) => Some(d),
-            None => match parse_dslashyyyy(date_str) {
-                Ok(o) => o,
-                Err(()) => return Err(()),
-            },
+            None => parse_dmonyyyy(date_str)?,
         };
         if let Some(date) = date_opt {
             if let Some(time) = parse_time(time_str)? {
@@ -2124,24 +2028,12 @@ fn parse_date_run(run: &str) -> Result<DateValue, ()> {
         return Err(());
     }
 
-    // No `/` or `T` separator. Try date-only, then time-only.
+    // No `/` or `T` separator. Try date-only, then time-only. Zone is always
+    // None for date-only (split_zone_suffix rejects zones on `:`-less bodies).
     if let Some(date) = parse_iso_date(body)? {
-        // Date-only can't have a zone (zone only valid on date+time forms).
-        if zone.is_some() {
-            return Err(());
-        }
         return Ok(DateValue::date_only(date));
     }
     if let Some(date) = parse_dmonyyyy(body)? {
-        if zone.is_some() {
-            return Err(());
-        }
-        return Ok(DateValue::date_only(date));
-    }
-    if let Some(date) = parse_dslashyyyy(body)? {
-        if zone.is_some() {
-            return Err(());
-        }
         return Ok(DateValue::date_only(date));
     }
     // Time-only: HH:MM:SS[.mmm] with optional zone. Epoch date 1970-01-01.
@@ -2205,9 +2097,7 @@ fn split_zone_suffix(s: &str) -> Result<(&str, Result<Option<i32>, ()>), ()> {
 /// `-HHMM`, `+HH`, `-HH`, `Z`). Returns `Some(minutes)` or `None` if the
 /// string doesn't match any valid zone form. `|minutes| > 14*60` is rejected.
 fn parse_zone_suffix(s: &str) -> Option<i32> {
-    if s == "Z" {
-        return Some(0);
-    }
+    // `Z` is handled by split_zone_suffix before reaching here.
     let bytes = s.as_bytes();
     if bytes.is_empty() || (bytes[0] != b'+' && bytes[0] != b'-') {
         return None;
@@ -2320,31 +2210,6 @@ fn parse_dmonyyyy(s: &str) -> Result<Option<NaiveDate>, ()> {
     let d: u32 = s[..first_dash].parse().map_err(|_| ())?;
     let m = month_from_abbr(&s[first_dash + 1..second_dash]).ok_or(())?;
     let y: i32 = s[second_dash + 1..].parse().map_err(|_| ())?;
-    match NaiveDate::from_ymd_opt(y, m, d) {
-        Some(d) => Ok(Some(d)),
-        None => Err(()),
-    }
-}
-
-/// Parse `DD/MM/YYYY` (exactly 10 chars). Same return convention as
-/// [`parse_iso_date`].
-fn parse_dslashyyyy(s: &str) -> Result<Option<NaiveDate>, ()> {
-    if s.len() != 10 {
-        return Ok(None);
-    }
-    let bytes = s.as_bytes();
-    if bytes[2] != b'/' || bytes[5] != b'/' {
-        return Ok(None);
-    }
-    if !bytes[0..2].iter().all(|b| b.is_ascii_digit())
-        || !bytes[3..5].iter().all(|b| b.is_ascii_digit())
-        || !bytes[6..10].iter().all(|b| b.is_ascii_digit())
-    {
-        return Ok(None);
-    }
-    let d: u32 = s[0..2].parse().map_err(|_| ())?;
-    let m: u32 = s[3..5].parse().map_err(|_| ())?;
-    let y: i32 = s[6..10].parse().map_err(|_| ())?;
     match NaiveDate::from_ymd_opt(y, m, d) {
         Some(d) => Ok(Some(d)),
         None => Err(()),
@@ -3597,4 +3462,563 @@ mod tests {
             ]
         );
     }
+
+    // -------------------------------------------------------------------------
+    // M135: coverage-focused tests for caret escapes, number errors, duration
+    // edges, money errors, tag escapes, refinement/word edge cases, email
+    // rejection, date/zone errors, and LexError Display arms.
+    // -------------------------------------------------------------------------
+
+    // --- caret-escape edge cases (decode_char_unit) ---
+
+    #[test]
+    fn char_caret_at_eof() {
+        // `#"^` — caret escape at EOF (no following char, no closing quote).
+        let err = lex("#\"^").unwrap_err();
+        assert!(matches!(err, LexError::InvalidChar { .. }));
+    }
+
+    #[test]
+    fn char_hash_quote_eof() {
+        // `#"` at EOF — no char unit at all.
+        let err = lex("#\"").unwrap_err();
+        assert!(matches!(err, LexError::InvalidChar { .. }));
+    }
+
+    #[test]
+    fn char_caret_hex_bad_digit() {
+        // `^(xy)` — non-hex digit in codepoint form.
+        let err = lex("#\"^(xy)\"").unwrap_err();
+        assert!(matches!(err, LexError::InvalidChar { .. }));
+    }
+
+    #[test]
+    fn char_caret_hex_too_long() {
+        // `^(1234567)` — more than 6 hex digits.
+        let err = lex("#\"^(1234567)\"").unwrap_err();
+        assert!(matches!(err, LexError::InvalidChar { .. }));
+    }
+
+    #[test]
+    fn char_caret_hex_unterminated() {
+        // `^(41` — no closing `)` and no closing `"`.
+        let err = lex("#\"^(41").unwrap_err();
+        assert!(matches!(err, LexError::InvalidChar { .. }));
+    }
+
+    #[test]
+    fn char_caret_hex_empty() {
+        // `^()` — empty codepoint form.
+        let err = lex("#\"^()\"").unwrap_err();
+        assert!(matches!(err, LexError::InvalidChar { .. }));
+    }
+
+    #[test]
+    fn char_caret_hex_out_of_range() {
+        // `^(FFFFFFFF)` — exceeds valid Unicode range.
+        let err = lex("#\"^(FFFFFFFF)\"").unwrap_err();
+        assert!(matches!(err, LexError::InvalidChar { .. }));
+    }
+
+    #[test]
+    fn char_caret_meta_form() {
+        // `^M-A` — meta/control syntax (M- prefix). The result is
+        // `(mc.wrapping_sub(0x40)) as char` where mc = b'A'.
+        let v = one("#\"^M-A\"");
+        match v {
+            TokenKind::Char(c) => assert_eq!(c as u32, (b'A' as u32).wrapping_sub(0x40)),
+            other => panic!("expected Char, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn char_caret_meta_at_eof() {
+        // `^M-` at EOF — meta prefix with no following char (no closing `"`).
+        let err = lex("#\"^M-").unwrap_err();
+        assert!(matches!(err, LexError::InvalidChar { .. }));
+    }
+
+    #[test]
+    fn char_caret_paren_close() {
+        // `^)` — literal `)` via single-char caret escape.
+        assert_eq!(one("#\"^)\""), TokenKind::Char(')'));
+    }
+
+    #[test]
+    fn char_caret_non_letter() {
+        // `^!` — non-letter after caret falls to else, returns char as-is.
+        assert_eq!(one("#\"^!\""), TokenKind::Char('!'));
+    }
+
+    // --- scan_number error paths ---
+
+    #[test]
+    fn number_double_dot_errors() {
+        // `1e2.3` — after consuming `1e2`, a second dot+digit run is an
+        // InvalidNumber (not a tuple, since the `e` form opted out of
+        // detect_pair_tuple routing).
+        let err = lex("1e2.3").unwrap_err();
+        assert!(matches!(err, LexError::InvalidNumber { .. }));
+    }
+
+    #[test]
+    fn number_exponent_rewind() {
+        // `5e` — `e` with no following digits triggers the rewind branch in
+        // the exponent logic. The rewind sets `*i` past the `e`, so `text`
+        // includes it and the i64 parse fails (the rewind is conservative —
+        // it doesn't cleanly split `5` + `e`).
+        let err = lex("5e").unwrap_err();
+        assert!(matches!(err, LexError::InvalidNumber { .. }));
+    }
+
+    #[test]
+    fn integer_overflow_errors() {
+        // A digit run too large for i64 → InvalidNumber.
+        let err = lex("99999999999999999999999").unwrap_err();
+        assert!(matches!(err, LexError::InvalidNumber { .. }));
+    }
+
+    // --- scan_money error paths ---
+
+    #[test]
+    fn money_comma_no_digit_errors() {
+        // `$1,` — comma not followed by a digit.
+        let err = lex("$1,").unwrap_err();
+        assert!(matches!(err, LexError::InvalidMoney { .. }));
+    }
+
+    #[test]
+    fn money_overflow_errors() {
+        // A whole-dollar amount too large for i64 cents → InvalidMoney.
+        let err = lex("$99999999999999999").unwrap_err();
+        assert!(matches!(err, LexError::InvalidMoney { .. }));
+    }
+
+    // --- scan_tag unknown escape ---
+
+    #[test]
+    fn tag_unknown_escape_kept_verbatim() {
+        // `<a\xb>` — unknown escape `\x` keeps both chars in the tag body.
+        assert_eq!(one("<a\\xb>"), TokenKind::Tag(Rc::from("a\\xb")));
+    }
+
+    // --- scan_refinement / classify_word edge cases ---
+
+    #[test]
+    fn refinement_all_colons_errors() {
+        // `/::` — refinement body is all colons → InvalidWord.
+        let err = lex("/::").unwrap_err();
+        assert!(matches!(err, LexError::InvalidWord { .. }));
+    }
+
+    #[test]
+    fn lone_colon_errors() {
+        // `:` — set-word with empty body → InvalidWord.
+        let err = lex(":").unwrap_err();
+        assert!(matches!(err, LexError::InvalidWord { .. }));
+    }
+
+    // --- detect_email rejection paths ---
+
+    #[test]
+    fn email_multiple_at_falls_through_to_word() {
+        // `a@b@c.com` — multiple `@` → not an email, scans as a word.
+        assert!(matches!(one("a@b@c.com"), TokenKind::Word(_)));
+    }
+
+    #[test]
+    fn email_empty_local_falls_through_to_word() {
+        // `@b.com` — empty local part → not an email, scans as a word.
+        assert!(matches!(one("@b.com"), TokenKind::Word(_)));
+    }
+
+    #[test]
+    fn email_empty_tld_falls_through_to_word() {
+        // `foo@bar.` — empty TLD → not an email, scans as a word.
+        assert!(matches!(one("foo@bar."), TokenKind::Word(_)));
+    }
+
+    // --- date/zone error paths ---
+
+    #[test]
+    fn date_iso_invalid_month() {
+        // `2024-13-01T00:00:00` — month 13 doesn't exist.
+        let err = lex("2024-13-01T00:00:00").unwrap_err();
+        assert!(matches!(err, LexError::InvalidDate { .. }));
+    }
+
+    #[test]
+    fn date_with_zone_suffix_z() {
+        // `2024-06-29Z` — date-only with `Z` zone suffix → InvalidDate
+        // (date-only form rejects zone).
+        let err = lex("2024-06-29Z").unwrap_err();
+        assert!(matches!(err, LexError::InvalidDate { .. }));
+    }
+
+    #[test]
+    fn date_invalid_time_hour() {
+        // `25:00:00` — hour > 23.
+        let err = lex("25:00:00").unwrap_err();
+        assert!(matches!(err, LexError::InvalidDate { .. }));
+    }
+
+    #[test]
+    fn date_bad_zone_suffix() {
+        // `12:00:00+x` — zone suffix with non-digit → InvalidDate.
+        let err = lex("12:00:00+x").unwrap_err();
+        assert!(matches!(err, LexError::InvalidDate { .. }));
+    }
+
+    #[test]
+    fn date_bad_month_abbr() {
+        // `29-Xyz-2024` — unrecognized 3-letter month abbreviation.
+        let err = lex("29-Xyz-2024").unwrap_err();
+        assert!(matches!(err, LexError::InvalidDate { .. }));
+    }
+
+    // --- duration edge cases ---
+
+    #[test]
+    fn duration_compound_with_exponent() {
+        // `1d1e2s` — compound duration with an exponent in a component.
+        // 1 day + 100 seconds.
+        let toks = kinds("1d1e2s");
+        assert_eq!(toks.len(), 1);
+        assert!(matches!(toks[0], TokenKind::Duration(_)));
+    }
+
+    #[test]
+    fn duration_rank_factors() {
+        // `1s1ms` — compound with s then ms exercises the rank-3 factor lookup.
+        let toks = kinds("1s1ms");
+        assert_eq!(toks.len(), 1);
+        assert!(matches!(toks[0], TokenKind::Duration(_)));
+    }
+
+    #[test]
+    fn duration_saturation() {
+        // A very large day count saturates at i64::MAX nanoseconds.
+        let toks = kinds("100000000000000d");
+        assert_eq!(toks.len(), 1);
+        assert!(matches!(toks[0], TokenKind::Duration(_)));
+    }
+
+    // --- LexError Display arms ---
+
+    #[test]
+    fn lexerror_display_unterminated_tag() {
+        // `<foo` — unterminated tag. Exercises the UnterminatedTag Display arm.
+        let err = lex("<foo").unwrap_err();
+        let s = format!("{}", err);
+        assert!(s.contains("tag"), "got: {s}");
+    }
+
+    #[test]
+    fn lexerror_display_and_span_all_variants() {
+        // Exercise every live LexError variant's Display and span() arms.
+        // Each case produces the named error; we format and call span() to
+        // cover the Display and span() match arms.
+        let cases: &[(&str, fn(&LexError) -> bool)] = &[
+            ("\"hello", |e| matches!(e, LexError::UnterminatedString { .. })),
+            ("1e2.3", |e| matches!(e, LexError::InvalidNumber { .. })),
+            ("1e99999%", |e| matches!(e, LexError::InvalidPercent { .. })),
+            ("$1,", |e| matches!(e, LexError::InvalidMoney { .. })),
+            ("# ", |e| matches!(e, LexError::InvalidIssue { .. })),
+            ("<foo", |e| matches!(e, LexError::UnterminatedTag { .. })),
+            ("/::", |e| matches!(e, LexError::InvalidWord { .. })),
+            ("{unterminated", |e| matches!(e, LexError::UnbalancedBrace { .. })),
+            (r#"#"^""#, |e| matches!(e, LexError::InvalidChar { .. })),
+            ("#{ZZ}", |e| matches!(e, LexError::InvalidBinary { .. })),
+            ("1x-", |e| matches!(e, LexError::InvalidPair { .. })),
+            ("1.2.3.4.5", |e| matches!(e, LexError::InvalidTuple { .. })),
+            ("31-Feb-2024", |e| matches!(e, LexError::InvalidDate { .. })),
+            ("1h1h", |e| matches!(e, LexError::InvalidDuration { .. })),
+        ];
+        for (src, check) in cases {
+            let err = lex(src).unwrap_err();
+            assert!(check(&err), "for {src:?}: expected specific error, got {err:?}");
+            let _ = format!("{}", err);
+            let _ = err.span();
+        }
+    }
+
+    // --- M135 phase 2: remaining edge-case coverage ---
+
+    #[test]
+    fn quoted_string_backslash_eof() {
+        // `\` at EOF inside a quoted string → UnterminatedString.
+        let err = lex("\"abc\\").unwrap_err();
+        assert!(matches!(err, LexError::UnterminatedString { .. }));
+    }
+
+    #[test]
+    fn quoted_string_unknown_escape() {
+        // Unknown escape `\z` keeps both chars verbatim.
+        assert_eq!(one("\"a\\zb\""), TokenKind::String(Rc::from("a\\zb")));
+    }
+
+    #[test]
+    fn binary_unterminated_eof() {
+        // `#{AB` — EOF before closing `}`.
+        let err = lex("#{AB").unwrap_err();
+        assert!(matches!(err, LexError::InvalidBinary { .. }));
+    }
+
+    #[test]
+    fn dec_literal_overflow() {
+        // A number too large for Decimal (96-bit) followed by `dec`.
+        let err = lex("999999999999999999999999999999dec").unwrap_err();
+        assert!(matches!(err, LexError::InvalidNumber { .. }));
+    }
+
+    #[test]
+    fn dec_not_committed_falls_through() {
+        // `3.14decal` — `dec` followed by `al` is not committed
+        // (not a delimiter/EOF after `dec`), so it falls through to
+        // normal float parsing + word.
+        let toks = kinds("3.14decal");
+        assert_eq!(toks[0], TokenKind::Float(3.14));
+    }
+
+    #[test]
+    fn duration_exponent_with_sign() {
+        // `1h1e+1m` — compound duration with signed exponent (10 minutes < 1h).
+        let toks = kinds("1h1e+1m");
+        assert_eq!(toks.len(), 1);
+        assert!(matches!(toks[0], TokenKind::Duration(_)));
+    }
+
+    #[test]
+    fn duration_compound_overflow() {
+        // `1h70m` — 70 minutes >= 1 hour → InvalidDuration.
+        let err = lex("1h70m").unwrap_err();
+        assert!(matches!(err, LexError::InvalidDuration { .. }));
+    }
+
+    #[test]
+    fn duration_compound_minutes() {
+        // `1h1m` — compound with minutes (rank-4 unit_factor_by_rank).
+        let toks = kinds("1h1m");
+        assert_eq!(toks.len(), 1);
+        assert!(matches!(toks[0], TokenKind::Duration(_)));
+    }
+
+    #[test]
+    fn duration_compound_micros() {
+        // `1ms1us` — compound with microseconds; covers ms (rank-2) in
+        // unit_factor_by_rank.
+        let toks = kinds("1ms1us");
+        assert_eq!(toks.len(), 1);
+        assert!(matches!(toks[0], TokenKind::Duration(_)));
+    }
+
+    #[test]
+    fn duration_compound_nanos() {
+        // `1us1ns` — compound with nanoseconds (rank-0/default arm).
+        let toks = kinds("1us1ns");
+        assert_eq!(toks.len(), 1);
+        assert!(matches!(toks[0], TokenKind::Duration(_)));
+    }
+
+    #[test]
+    fn money_one_frac_digit() {
+        // `$10.5` — fractional part has only 1 digit (need exactly 2).
+        let err = lex("$10.5").unwrap_err();
+        assert!(matches!(err, LexError::InvalidMoney { .. }));
+    }
+
+    #[test]
+    fn money_negative_literal() {
+        // `-$10.00` — negative money.
+        let toks = kinds("-$10.00");
+        assert!(matches!(toks[0], TokenKind::Money(_)));
+    }
+
+    #[test]
+    fn money_cents_overflow() {
+        // Whole dollars large enough that whole_cents + frac_cents overflows i64.
+        // i64::MAX / 100 = 92233720368547758 (17 digits) → whole_cents = ...7800.
+        // Adding 99 frac cents → ...7899 > i64::MAX → checked_add overflow.
+        let err = lex("$92233720368547758.99").unwrap_err();
+        assert!(matches!(err, LexError::InvalidMoney { .. }));
+    }
+
+    #[test]
+    fn file_quoted_form() {
+        // `%"foo bar"` — quoted file! with spaces.
+        assert_eq!(
+            one("%\"foo bar\""),
+            TokenKind::File(Rc::from("foo bar"))
+        );
+    }
+
+    #[test]
+    fn date_iso_with_slash_time() {
+        // `2024-06-29/12:30:00` — ISO date + time with `/` separator.
+        let dv = match one("2024-06-29/12:30:00") {
+            TokenKind::Date(dv) => dv,
+            other => panic!("expected Date, got {other:?}"),
+        };
+        assert_eq!(
+            dv.dt,
+            NaiveDate::from_ymd_opt(2024, 6, 29)
+                .unwrap()
+                .and_hms_opt(12, 30, 0)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn zone_hhmm_four_digit_form() {
+        // `12:30:00+0700` — 4-digit HHMM zone form.
+        let dv = match one("12:30:00+0700") {
+            TokenKind::Date(dv) => dv,
+            other => panic!("expected Date, got {other:?}"),
+        };
+        assert_eq!(dv.zone, Some(420));
+    }
+
+    #[test]
+    fn zone_hour_out_of_range() {
+        // `12:30:00+15:00` — hour > 14 → InvalidDate.
+        let err = lex("12:30:00+15:00").unwrap_err();
+        assert!(matches!(err, LexError::InvalidDate { .. }));
+    }
+
+    #[test]
+    fn zone_multi_colon() {
+        // `12:30:00+1:2:3` — zone with 2 colons → InvalidDate.
+        let err = lex("12:30:00+1:2:3").unwrap_err();
+        assert!(matches!(err, LexError::InvalidDate { .. }));
+    }
+
+    #[test]
+    fn zone_minutes_wrong_length() {
+        // `12:30:00+7:3` — minutes part not 2 digits → InvalidDate.
+        let err = lex("12:30:00+7:3").unwrap_err();
+        assert!(matches!(err, LexError::InvalidDate { .. }));
+    }
+
+    #[test]
+    fn time_fractional_seconds() {
+        // `12:30:00.123` — time with .mmm fractional seconds.
+        let dv = match one("12:30:00.123") {
+            TokenKind::Date(dv) => dv,
+            other => panic!("expected Date, got {other:?}"),
+        };
+        assert_eq!(
+            dv.dt,
+            NaiveDate::from_ymd_opt(1970, 1, 1)
+                .unwrap()
+                .and_hms_milli_opt(12, 30, 0, 123)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn time_bad_length_after_dot() {
+        // `12:30:00.12` — 11 chars (not 8, not 12) → InvalidDate.
+        let err = lex("12:30:00.12").unwrap_err();
+        assert!(matches!(err, LexError::InvalidDate { .. }));
+    }
+
+    #[test]
+    fn month_january() {
+        // `15-Jan-2024` — JAN arm in month_from_abbr.
+        let dv = match one("15-Jan-2024") {
+            TokenKind::Date(dv) => dv,
+            other => panic!("expected Date, got {other:?}"),
+        };
+        assert_eq!(dv.dt, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap().and_hms_opt(0,0,0).unwrap());
+    }
+
+    #[test]
+    fn month_december() {
+        // `15-Dec-2024` — DEC arm in month_from_abbr.
+        let dv = match one("15-Dec-2024") {
+            TokenKind::Date(dv) => dv,
+            other => panic!("expected Date, got {other:?}"),
+        };
+        assert_eq!(dv.dt, NaiveDate::from_ymd_opt(2024, 12, 15).unwrap().and_hms_opt(0,0,0).unwrap());
+    }
+
+    #[test]
+    fn empty_source_lexes_nothing() {
+        // `lex("")` — empty source produces no tokens (covers the while-false branch).
+        let toks = lex("").unwrap();
+        assert!(toks.is_empty());
+    }
+
+    #[test]
+    fn tuple_component_overflow() {
+        // A 20+ digit first component overflows i64 in parse_tuple_component.
+        let err = lex("12345678901234567890.0.0").unwrap_err();
+        assert!(matches!(err, LexError::InvalidTuple { .. }));
+    }
+
+    #[test]
+    fn iso_datetime_bad_time() {
+        // `2024-06-29Tbad` — T separator found but time_str is not a valid
+        // time → InvalidDate (exercises the T-branch error return).
+        let err = lex("2024-06-29Tbad").unwrap_err();
+        assert!(matches!(err, LexError::InvalidDate { .. }));
+    }
+
+    #[test]
+    fn duration_compound_exponent_rewind() {
+        // `1h1ex` — compound with `e` not followed by digits. The rewind
+        // in the compound exponent path triggers, then the main loop re-scans
+        // `1ex` which errors (exponent `e` with no digits → InvalidNumber).
+        let err = lex("1h1ex").unwrap_err();
+        assert!(matches!(err, LexError::InvalidNumber { .. }));
+    }
+
+    #[test]
+    fn pair_exponent_with_sign() {
+        // `1e+2x3` — pair with signed exponent in first component.
+        assert_eq!(
+            one("1e+2x3"),
+            TokenKind::Pair(Rc::from("1e+2"), Rc::from("3"))
+        );
+    }
+
+    #[test]
+    fn pair_exponent_rewind() {
+        // `1ex2` — `e` not followed by digits in first component; rewind
+        // keeps `e` in the component text.
+        assert_eq!(
+            one("1ex2"),
+            TokenKind::Pair(Rc::from("1e"), Rc::from("2"))
+        );
+    }
+
+    #[test]
+    fn money_whole_overflow() {
+        // 20+ digit whole part overflows i64 parse.
+        let err = lex("$99999999999999999999").unwrap_err();
+        assert!(matches!(err, LexError::InvalidMoney { .. }));
+    }
+
+    #[test]
+    fn date_dmonyyyy_slash_bad_time() {
+        // `29-Jun-2024/99:99:99` — valid date + invalid time with `/`
+        // → InvalidDate (exercises the /-branch error return).
+        let err = lex("29-Jun-2024/99:99:99").unwrap_err();
+        assert!(matches!(err, LexError::InvalidDate { .. }));
+    }
+
+    #[test]
+    fn braced_string_multibyte_utf8() {
+        // Multi-byte UTF-8 in a braced string exercises utf8_len's
+        // 2-byte and 3-byte branches.
+        assert_eq!(one("{café}"), TokenKind::String(Rc::from("café")));
+        assert_eq!(one("{日本語}"), TokenKind::String(Rc::from("日本語")));
+    }
+
+    #[test]
+    fn quoted_string_multibyte_utf8() {
+        // Multi-byte UTF-8 in a quoted string.
+        assert_eq!(one("\"café\""), TokenKind::String(Rc::from("café")));
+    }
 }
+

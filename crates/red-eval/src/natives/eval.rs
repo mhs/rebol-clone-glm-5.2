@@ -1,9 +1,9 @@
-//! Eval natives: `do`, `load`, `reduce`.
+//! Eval natives: `do`, `reduce`.
 //!
-//! `do` evaluates a block (or a string parsed as Red source); `load`
-//! lexes+parses a string into a `block!` value (unbound — callers that want
-//! to evaluate it should pass it to `do`); `reduce` evaluates each
-//! expression in a block, collecting the results into a new block.
+//! `do` evaluates a block (or a string parsed as Red source). `reduce`
+//! evaluates each expression in a block, collecting the results into a new
+//! block. (`load` is registered by `io::register_io_natives` with the
+//! file-aware `load_extended` impl, which also handles the string! case.)
 
 use red_core::parser::load_source;
 use red_core::value::Value;
@@ -38,35 +38,6 @@ pub(crate) fn do_native(
         }
         other => Err(EvalError::TypeError {
             expected: "block! or string!",
-            found: type_name(other),
-            span: other.span_or_default(),
-        }),
-    }
-}
-
-/// `load string` — lexes+parses a string of Red source, returns the body as a
-/// `block!` value (unbound — callers that want to evaluate it should pass it
-/// to `do`, which binds it to the user context). Mirrors `load_source` from
-/// `red-core::parser` exposed as a runtime native. This is the string→block
-/// half of the load dialect; file loading lands in M20.
-pub(crate) fn load_native(
-    args: &[Value],
-    _refs: &RefineArgs,
-    _env: &mut Env,
-) -> Result<Value, EvalError> {
-    if args.len() != 1 {
-        return Err(arity_err(args, "load", 1, args.len()));
-    }
-    match &args[0] {
-        Value::String { s, span } => {
-            let body = load_source(s).map_err(|e| EvalError::Native {
-                message: e.to_string(),
-                span: *span,
-            })?;
-            Ok(Value::block(body))
-        }
-        other => Err(EvalError::TypeError {
-            expected: "string!",
             found: type_name(other),
             span: other.span_or_default(),
         }),

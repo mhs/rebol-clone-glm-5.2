@@ -532,4 +532,267 @@ mod tests {
         fn assert_copy<T: Copy>() {}
         assert_copy::<Instr>();
     }
+
+    // -------------------------------------------------------------------------
+    // M135: coverage-focused disasm tests. The original suite exercised only
+    // ~7 of the 28 `Instr` variants; these build `CompiledBlock`s by hand to
+    // drive every match arm + the `<bad idx>` fallbacks + `position_prefix`
+    // short-circuits. No VM/compiler/runtime is involved — `disasm` is pure
+    // string formatting over the IR types.
+    // -------------------------------------------------------------------------
+
+    /// Helper: build a `CompiledBlock` with the given instrs and side tables
+    /// sized so every index is in range. Spans default to `Span::default()`
+    /// so the position prefix is blank (matches `disasm`'s no-source form).
+    fn block_with(
+        instrs: &[Instr],
+        pool: &[Value],
+        symbols: &[&str],
+        freevars_table: &[Vec<&str>],
+        captures_table: &[Vec<(String, usize, usize)>],
+    ) -> CompiledBlock {
+        let pool: Rc<[Value]> = Rc::from(pool);
+        let symbols: Rc<[Symbol]> =
+            Rc::from(symbols.iter().map(|s| Symbol::new(s)).collect::<Vec<_>>());
+        let freevars_table: Rc<[Vec<Symbol>]> = Rc::from(
+            freevars_table
+                .iter()
+                .map(|v| v.iter().map(|s| Symbol::new(s)).collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+        );
+        let captures_table: Rc<[Vec<(Symbol, usize, usize)>]> = Rc::from(
+            captures_table
+                .iter()
+                .map(|v| {
+                    v.iter()
+                        .map(|(s, d, slot)| (Symbol::new(s), *d, *slot))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+        );
+        let n = instrs.len();
+        CompiledBlock {
+            instrs: Rc::from(instrs),
+            pool,
+            symbols,
+            freevars_table,
+            captures_table,
+            n_locals: 0,
+            freevars: Vec::new(),
+            source_span: Span::new(0, 0),
+            spans: Rc::from(vec![Span::new(0, 0); n]),
+            needs_rebind: false,
+            arity: 0,
+        }
+    }
+
+    /// One of every `Instr` variant: `disasm` must emit a line for each, with
+    /// the documented mnemonic. Drives all 28 match arms in `disasm_with_spans`
+    /// (the file/file-with-spans forms are equivalent when spans are default —
+    /// the position prefix is blank either way).
+    #[test]
+    fn disasm_renders_every_instr_variant() {
+        let instrs: Vec<Instr> = vec![
+            Instr::Const(0),
+            Instr::ConstInt(42),
+            Instr::ConstNone,
+            Instr::ConstBool(true),
+            Instr::LoadLocal(0, 1),
+            Instr::LoadGlobal(2),
+            Instr::LoadDynamic(0),
+            Instr::SetLocal(0, 1),
+            Instr::SetGlobal(2),
+            Instr::SetDynamic(0),
+            Instr::Call(3, 2),
+            Instr::CallUser(0, 1),
+            Instr::CallUserGlobal(1, 1),
+            Instr::TailCall(0, 1),
+            Instr::TailReenter(0, 1),
+            Instr::Jump(5),
+            Instr::JumpIfFalse(5),
+            Instr::Pop,
+            Instr::Return,
+            Instr::MakeFunc(0, 1, 0),
+            Instr::MakeClosure(0, 1, 0),
+            Instr::LoadCapture(0),
+            Instr::SetCapture(0),
+            Instr::EnterBlock,
+            Instr::DropTo(0),
+            Instr::GetPath,
+            Instr::SetPath,
+            Instr::MarkRefine(0),
+            Instr::EndRefine,
+            Instr::Halt,
+        ];
+        let block = block_with(
+            &instrs,
+            &[Value::integer(5)],
+            &["foo"],
+            &[vec!["x", "y"]],
+            &[vec![("z".to_string(), 1, 2)]],
+        );
+        let out = disasm(&block);
+        // Every mnemonic must appear. Index-armed variants render their args.
+        for needle in [
+            "Const(0)  ; Integer",
+            "ConstInt(42)",
+            "ConstNone",
+            "ConstBool(true)",
+            "LoadLocal(0, 1)",
+            "LoadGlobal(2)",
+            "LoadDynamic(0)  ; \"foo\"",
+            "SetLocal(0, 1)",
+            "SetGlobal(2)",
+            "SetDynamic(0)  ; \"foo\"",
+            "Call(3, 2)",
+            "CallUser(0, 1)",
+            "CallUserGlobal(1, 1)",
+            "TailCall(0, 1)",
+            "TailReenter(0, 1)",
+            "Jump(5)",
+            "JumpIfFalse(5)",
+            "Pop",
+            "Return",
+            "MakeFunc(0, 1, [\"x\", \"y\"])",
+            "MakeClosure(0, 1, [\"z\"@1:2])",
+            "LoadCapture(0)",
+            "SetCapture(0)",
+            "EnterBlock",
+            "DropTo(0)",
+            "GetPath",
+            "SetPath",
+            "MarkRefine(0)  ; \"foo\"",
+            "EndRefine",
+            "Halt",
+        ] {
+            assert!(
+                out.contains(needle),
+                "disasm missing {needle:?}\nfull output:\n{out}"
+            );
+        }
+        assert_eq!(out.lines().count(), instrs.len());
+    }
+
+    /// Out-of-range pool index → `<bad pool idx>` fallback (covers the
+    /// `unwrap_or_else` branch on the `Const` arm).
+    #[test]
+    fn disasm_bad_pool_idx_fallback() {
+        let block = block_with(&[Instr::Const(99)], &[], &[], &[], &[]);
+        let out = disasm(&block);
+        assert!(out.contains("Const(99)  ; <bad pool idx>"), "got: {out}");
+    }
+
+    /// Out-of-range symbol index → `<bad sym idx>` fallback. Covers the
+    /// `LoadDynamic`/`SetDynamic`/`MarkRefine` lookup branches.
+    #[test]
+    fn disasm_bad_sym_idx_fallback() {
+        let block = block_with(
+            &[Instr::LoadDynamic(7), Instr::SetDynamic(7), Instr::MarkRefine(7)],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        let out = disasm(&block);
+        assert!(out.contains("LoadDynamic(7)  ; <bad sym idx>"), "got: {out}");
+        assert!(out.contains("SetDynamic(7)  ; <bad sym idx>"), "got: {out}");
+        assert!(out.contains("MarkRefine(7)  ; <bad sym idx>"), "got: {out}");
+    }
+
+    /// Out-of-range freevars/captures index → `<bad fv idx>` / `<bad captures
+    /// idx>` fallback. Covers the `MakeFunc`/`MakeClosure` lookup branches.
+    #[test]
+    fn disasm_bad_fv_and_captures_idx_fallback() {
+        let block = block_with(
+            &[Instr::MakeFunc(0, 0, 9), Instr::MakeClosure(0, 0, 9)],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        let out = disasm(&block);
+        assert!(out.contains("MakeFunc(0, 0, [<bad fv idx>])"), "got: {out}");
+        assert!(
+            out.contains("MakeClosure(0, 0, [<bad captures idx>])"),
+            "got: {out}"
+        );
+    }
+
+    /// `position_prefix` short-circuits: a `None` span, a default span, a
+    /// missing `line_map`, and an overlong position all return a blank or
+    /// un-truncated prefix of the right shape. Built via `disasm_with_spans`
+    /// with carefully chosen span/src/file inputs.
+    #[test]
+    fn position_prefix_short_circuits() {
+        // (a) None span: spans table shorter than instrs → `spans.get(i)` is
+        //     `None`. Disasm must still emit the instr (with a blank prefix).
+        let pool: Rc<[Value]> = Rc::new([Value::integer(5)]);
+        let block = CompiledBlock {
+            instrs: Rc::new([Instr::Const(0)]),
+            pool,
+            symbols: Rc::from(&Vec::<Symbol>::new()[..]),
+            freevars_table: Rc::from(&Vec::<Vec<Symbol>>::new()[..]),
+            captures_table: Rc::from(&Vec::<Vec<(Symbol, usize, usize)>>::new()[..]),
+            n_locals: 0,
+            freevars: Vec::new(),
+            source_span: Span::new(0, 0),
+            // Empty spans table: `spans.get(0)` returns `None`.
+            spans: Rc::from(&Vec::<Span>::new()[..]),
+            needs_rebind: false,
+            arity: 0,
+        };
+        let out = disasm_with_spans(&block, Some("x: 5"), Some("test.red"));
+        assert!(out.contains("Const(0)  ; Integer"));
+        assert!(
+            !out.contains("test.red:"),
+            "None span should not annotate: {out}"
+        );
+
+        // (b) Default span (zero) with src+file present: `is_default()` true →
+        //     blank prefix.
+        let block_default = block_with(&[Instr::Const(0)], &[Value::integer(5)], &[], &[], &[]);
+        let out_default = disasm_with_spans(&block_default, Some("x: 5"), Some("test.red"));
+        assert!(
+            !out_default.contains("test.red:"),
+            "default span should not annotate: {out_default}"
+        );
+
+        // (c) Non-default span but src=None → `line_map` is None → blank prefix.
+        let pool2: Rc<[Value]> = Rc::new([Value::integer(5)]);
+        let block_no_src = CompiledBlock {
+            instrs: Rc::new([Instr::Const(0)]),
+            pool: pool2,
+            symbols: Rc::from(&Vec::<Symbol>::new()[..]),
+            freevars_table: Rc::from(&Vec::<Vec<Symbol>>::new()[..]),
+            captures_table: Rc::from(&Vec::<Vec<(Symbol, usize, usize)>>::new()[..]),
+            n_locals: 0,
+            freevars: Vec::new(),
+            source_span: Span::new(3, 4),
+            spans: Rc::from(&[Span::new(3, 4)][..]),
+            needs_rebind: false,
+            arity: 0,
+        };
+        let out_no_src = disasm_with_spans(&block_no_src, None, Some("test.red"));
+        assert!(
+            !out_no_src.contains("test.red:"),
+            "missing line_map should not annotate: {out_no_src}"
+        );
+        assert!(out_no_src.contains("Const(0)  ; Integer"));
+
+        // (d) Overlong file path: position longer than WIDTH (24) hits the
+        //     `pos.len() >= WIDTH` arm and emits `pos` + a single space (no
+        //     left-pad). A short file path takes the `format!({pos:<WIDTH})`
+        //     arm. Both must still prefix the instr line.
+        let long_file = "a-very-long-source-file-name-here.red";
+        let out_long = disasm_with_spans(&block_no_src, Some("x: 5"), Some(long_file));
+        assert!(
+            out_long.contains(&format!("{long_file}:1:4")),
+            "overlong path should still annotate: {out_long}"
+        );
+        let short_out = disasm_with_spans(&block_no_src, Some("x: 5"), Some("t.red"));
+        assert!(
+            short_out.contains("t.red:1:4"),
+            "short path should annotate: {short_out}"
+        );
+    }
 }

@@ -2141,4 +2141,436 @@ mod tests {
         let out = run_capture("print to-string [a b c]");
         assert_eq!(s(&out), "a b c\n");
     }
+
+    // -------------------------------------------------------------------------
+    // M135: coverage-focused tests for to-char / make_char / make_money /
+    // make_pair / make_tuple / error-* accessors / to-native exotic-type arms.
+    // The existing suite exercised only the happy paths; these drive the error
+    // branches and the arms that delegate to other crates.
+    // -------------------------------------------------------------------------
+
+    // --- to-char (native): arity + error paths via the interpreter ---
+
+    #[test]
+    fn to_char_from_integer() {
+        let v = val("to-char 65");
+        match v {
+            Value::Char { c, .. } => assert_eq!(c, 'A'),
+            other => panic!("expected char!, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn to_char_from_float() {
+        let v = val("to-char 66.0");
+        match v {
+            Value::Char { c, .. } => assert_eq!(c, 'B'),
+            other => panic!("expected char!, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn to_char_from_logic() {
+        match val("to-char true") {
+            Value::Char { c, .. } => assert_eq!(c, '\u{1}'),
+            other => panic!("expected char!, got {:?}", other),
+        }
+        match val("to-char false") {
+            Value::Char { c, .. } => assert_eq!(c, '\u{0}'),
+            other => panic!("expected char!, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn to_char_identity() {
+        match val("to-char #\"X\"") {
+            Value::Char { c, .. } => assert_eq!(c, 'X'),
+            other => panic!("expected char!, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn to_char_invalid_integer_codepoint_errors() {
+        let err = run_capture_val("to-char 1114112").unwrap_err();
+        assert!(err.contains("not a valid codepoint"), "got: {err}");
+    }
+
+    #[test]
+    fn to_char_empty_string_errors() {
+        let err = run_capture_val("to-char \"\"").unwrap_err();
+        assert!(err.contains("empty string"), "got: {err}");
+    }
+
+    #[test]
+    fn to_char_multi_char_string_errors() {
+        let err = run_capture_val("to-char \"ab\"").unwrap_err();
+        assert!(err.contains("more than one char"), "got: {err}");
+    }
+
+    #[test]
+    fn to_char_wrong_type_errors() {
+        let err = run_capture_val("to-char [1 2]").unwrap_err();
+        assert!(err.contains("block!"), "got: {err}");
+    }
+
+    // --- make_char (internal helper): direct calls for each input-type arm ---
+
+    #[test]
+    fn make_char_identity() {
+        let v = make_char(&Value::char('Z')).unwrap();
+        match v {
+            Value::Char { c, .. } => assert_eq!(c, 'Z'),
+            other => panic!("expected char!, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn make_char_from_integer() {
+        let v = make_char(&Value::integer(97)).unwrap();
+        match v {
+            Value::Char { c, .. } => assert_eq!(c, 'a'),
+            other => panic!("expected char!, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn make_char_invalid_codepoint_errors() {
+        assert!(make_char(&Value::integer(0x110000)).is_err());
+    }
+
+    #[test]
+    fn make_char_from_single_char_string() {
+        let v = make_char(&Value::string("Q")).unwrap();
+        match v {
+            Value::Char { c, .. } => assert_eq!(c, 'Q'),
+            other => panic!("expected char!, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn make_char_empty_string_errors() {
+        assert!(make_char(&Value::string("")).is_err());
+    }
+
+    #[test]
+    fn make_char_multi_char_string_errors() {
+        assert!(make_char(&Value::string("xy")).is_err());
+    }
+
+    #[test]
+    fn make_char_wrong_type_errors() {
+        assert!(make_char(&Value::None).is_err());
+    }
+
+    // --- make_money (block form) ---
+
+    #[test]
+    fn make_money_from_block_cents_only() {
+        let v = make_money(&Value::block(Series::new(vec![Value::integer(500)]))).unwrap();
+        match v {
+            Value::Money { amount, .. } => {
+                assert_eq!(amount.cents, 500);
+                assert_eq!(amount.currency.as_ref(), "USD");
+            }
+            other => panic!("expected money!, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn make_money_from_block_cents_and_currency_word() {
+        let v = make_money(&Value::block(Series::new(vec![
+            Value::integer(1000),
+            Value::lit_word("EUR"),
+        ])))
+        .unwrap();
+        match v {
+            Value::Money { amount, .. } => {
+                assert_eq!(amount.cents, 1000);
+                assert_eq!(amount.currency.as_ref(), "EUR");
+            }
+            other => panic!("expected money!, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn make_money_from_block_cents_and_currency_string() {
+        let v = make_money(&Value::block(Series::new(vec![
+            Value::integer(750),
+            Value::string("JPY"),
+        ])))
+        .unwrap();
+        match v {
+            Value::Money { amount, .. } => assert_eq!(amount.currency.as_ref(), "JPY"),
+            other => panic!("expected money!, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn make_money_from_block_wrong_cents_type_errors() {
+        let err = make_money(&Value::block(Series::new(vec![Value::string("not-cents")]))).unwrap_err();
+        match err {
+            EvalError::TypeError { expected, .. } => {
+                assert!(expected.contains("integer!"), "got: {expected}");
+            }
+            other => panic!("expected TypeError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn make_money_from_block_wrong_currency_type_errors() {
+        let err = make_money(&Value::block(Series::new(vec![
+            Value::integer(100),
+            Value::integer(999),
+        ])))
+        .unwrap_err();
+        match err {
+            EvalError::TypeError { expected, .. } => {
+                assert!(expected.contains("string! or word!"), "got: {expected}");
+            }
+            other => panic!("expected TypeError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn make_money_from_empty_block_errors() {
+        let err = make_money(&Value::block(Series::empty())).unwrap_err();
+        match err {
+            EvalError::TypeError { expected, .. } => {
+                assert!(expected.contains("integer!"), "got: {expected}");
+            }
+            other => panic!("expected TypeError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn make_money_wrong_spec_type_errors() {
+        let err = make_money(&Value::None).unwrap_err();
+        match err {
+            EvalError::TypeError { expected, .. } => assert!(expected.contains("integer!")),
+            other => panic!("expected TypeError, got {:?}", other),
+        }
+    }
+
+    // --- make_pair (block form error paths) ---
+
+    #[test]
+    fn make_pair_from_wrong_length_block_errors() {
+        let err = make_pair(&Value::block(Series::new(vec![Value::integer(1)]))).unwrap_err();
+        match err {
+            EvalError::Native { message, .. } => {
+                assert!(message.contains("exactly 2 elements"), "got: {message}");
+            }
+            other => panic!("expected Native error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn make_pair_wrong_spec_type_errors() {
+        let err = make_pair(&Value::None).unwrap_err();
+        match err {
+            EvalError::TypeError { expected, .. } => assert!(expected.contains("pair!")),
+            other => panic!("expected TypeError, got {:?}", other),
+        }
+    }
+
+    // --- make_tuple (error paths) ---
+
+    #[test]
+    fn make_tuple_integer_wrong_count_errors() {
+        let err = make_tuple(&Value::integer(5)).unwrap_err();
+        match err {
+            EvalError::Native { message, .. } => {
+                assert!(message.contains("3 or 4"), "got: {message}");
+            }
+            other => panic!("expected Native error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn make_tuple_block_wrong_length_errors() {
+        let err = make_tuple(&Value::block(Series::new(vec![
+            Value::integer(1),
+            Value::integer(2),
+        ])))
+        .unwrap_err();
+        match err {
+            EvalError::Native { message, .. } => {
+                assert!(message.contains("3 or 4 elements"), "got: {message}");
+            }
+            other => panic!("expected Native error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn make_tuple_block_wrong_element_type_errors() {
+        let err = make_tuple(&Value::block(Series::new(vec![
+            Value::integer(1),
+            Value::integer(2),
+            Value::string("not-int"),
+        ])))
+        .unwrap_err();
+        match err {
+            EvalError::TypeError { expected, .. } => assert!(expected.contains("integer!")),
+            other => panic!("expected TypeError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn make_tuple_component_out_of_range_errors() {
+        let err = make_tuple(&Value::block(Series::new(vec![
+            Value::integer(1),
+            Value::integer(2),
+            Value::integer(300),
+        ])))
+        .unwrap_err();
+        match err {
+            EvalError::Native { message, .. } => {
+                assert!(message.contains("out of range"), "got: {message}");
+            }
+            other => panic!("expected Native error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn make_tuple_wrong_spec_type_errors() {
+        let err = make_tuple(&Value::None).unwrap_err();
+        match err {
+            EvalError::TypeError { expected, .. } => assert!(expected.contains("tuple!")),
+            other => panic!("expected TypeError, got {:?}", other),
+        }
+    }
+
+    // --- error-* accessors: happy paths + None-field + TypeError arms ---
+
+    #[test]
+    fn error_type_returns_litword_when_present() {
+        let v = val("error-type make error! [type: 'math message: \"boom\"]");
+        match v {
+            Value::LitWord { sym, .. } => assert_eq!(sym.as_str(), "math"),
+            other => panic!("expected lit-word!, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn error_type_returns_none_when_absent() {
+        let v = val("error-type make error! \"msg\"");
+        assert!(matches!(v, Value::None), "expected none, got {v:?}");
+    }
+
+    #[test]
+    fn error_type_wrong_arg_type_errors() {
+        let err = run_capture_val("error-type 42").unwrap_err();
+        assert!(err.contains("error!"), "got: {err}");
+    }
+
+    #[test]
+    fn error_code_returns_integer_when_present() {
+        let v = val("error-code make error! [code: 42 message: \"x\"]");
+        match v {
+            Value::Integer { n, .. } => assert_eq!(n, 42),
+            other => panic!("expected integer!, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn error_code_returns_none_when_absent() {
+        let v = val("error-code make error! \"msg\"");
+        assert!(matches!(v, Value::None), "expected none, got {v:?}");
+    }
+
+    #[test]
+    fn error_code_wrong_arg_type_errors() {
+        let err = run_capture_val("error-code 42").unwrap_err();
+        assert!(err.contains("error!"), "got: {err}");
+    }
+
+    #[test]
+    fn error_args_returns_block_when_present() {
+        let v = val("error-args make error! [args: [1 2 3] message: \"x\"]");
+        match v {
+            Value::Block { series, .. } => {
+                assert_eq!(series.data.borrow().len(), 3);
+            }
+            other => panic!("expected block!, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn error_args_returns_empty_block_when_absent() {
+        let v = val("error-args make error! \"msg\"");
+        match v {
+            Value::Block { series, .. } => {
+                assert!(series.data.borrow().is_empty());
+            }
+            other => panic!("expected block!, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn error_args_wrong_arg_type_errors() {
+        let err = run_capture_val("error-args 42").unwrap_err();
+        assert!(err.contains("error!"), "got: {err}");
+    }
+
+    #[test]
+    fn error_near_returns_value_when_present() {
+        let v = val("error-near make error! [near: [1 2] message: \"x\"]");
+        assert!(matches!(v, Value::Block { .. }), "got: {v:?}");
+    }
+
+    #[test]
+    fn error_near_returns_none_when_absent() {
+        let v = val("error-near make error! \"msg\"");
+        assert!(matches!(v, Value::None), "expected none, got {v:?}");
+    }
+
+    #[test]
+    fn error_near_wrong_arg_type_errors() {
+        let err = run_capture_val("error-near 42").unwrap_err();
+        assert!(err.contains("error!"), "got: {err}");
+    }
+
+    // --- to-native dispatcher: exotic-type arms that delegate to other crates ---
+
+    #[test]
+    fn to_map_from_block() {
+        let v = val("to map! [a 1 b 2]");
+        assert!(matches!(v, Value::Map { .. }), "got: {v:?}");
+    }
+
+    #[test]
+    fn to_hash_from_block() {
+        let v = val("to hash! [a 1 b 2]");
+        assert!(matches!(v, Value::Hash { .. }), "got: {v:?}");
+    }
+
+    #[test]
+    fn to_vector_from_block() {
+        let v = val("to vector! [1 2 3]");
+        assert!(matches!(v, Value::Vector { .. }), "got: {v:?}");
+    }
+
+    #[test]
+    fn to_image_from_block() {
+        let v = val("to image! [1 1 [0 0 0 0]]");
+        assert!(matches!(v, Value::Image { .. }), "got: {v:?}");
+    }
+
+    #[test]
+    fn to_bitset_from_string() {
+        let v = val("to bitset! \"ABC\"");
+        assert!(matches!(v, Value::Bitset { .. }), "got: {v:?}");
+    }
+
+    #[test]
+    fn to_typeset_from_block() {
+        let v = val("to typeset! [integer!]");
+        assert!(matches!(v, Value::Typeset { .. }), "got: {v:?}");
+    }
+
+    #[test]
+    fn to_native_unknown_type_errors() {
+        let err = run_capture_val("to bogus! 5").unwrap_err();
+        assert!(err.contains("not supported"), "got: {err}");
+    }
 }

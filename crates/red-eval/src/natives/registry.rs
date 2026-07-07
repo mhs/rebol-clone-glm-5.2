@@ -23,7 +23,7 @@ use super::control::{
     forever_native, if_native, loop_native, repeat, switch_native, throw_native, try_native,
     unless_native, until, while_native,
 };
-use super::eval::{do_native, load_native, reduce};
+use super::eval::{do_native, reduce};
 use super::func::{
     any_function_predicate, closure_native, closure_predicate, does_native, func_native,
     function_native, function_predicate, native_predicate, op_predicate, return_native,
@@ -270,14 +270,13 @@ pub fn register_natives(env: &mut Env) {
     );
 
     // Eval (M7 + M16.1)
+    // `load` is registered by `io::register_io_natives` below with the
+    // file-aware `load_extended` impl (which also handles the string! case
+    // `load_native` used to cover).
     env.natives
         .insert(Symbol::new("do"), fixed_native(do_native as NativeFn, 1));
     env.natives
         .insert(Symbol::new("reduce"), fixed_native(reduce as NativeFn, 1));
-    env.natives.insert(
-        Symbol::new("load"),
-        fixed_native(load_native as NativeFn, 1),
-    );
 
     // Functions (M9)
     env.natives.insert(
