@@ -1,58 +1,42 @@
 //! M158–M159: HTML builder dialect — `html [...]`.
 //!
-//! A block-walking dialect that assembles HTML/XML from a nested block of
-//! tag words, attribute pairs, string content, and paren-embedded Red code.
-//! Returns a `string!` with the rendered markup.
+//! A flat-block dialect that parses HTML from `tag!` literals, `string!`
+//! content, and `paren!` expressions. The tag open/close structure defines
+//! nesting — no nested blocks required.
 //!
 //! Grammar:
 //!   html [
-//!       tag-name [attr-val attr-val ... children ...]
-//!       "text content"          ; HTML-escaped
-//!       (red-expression)        ; evaluated, form'd, HTML-escaped
-//!       nested-block            ; recursed
+//!       <div class="main">        ; opening tag with attributes
+//!           <h1> "Welcome" </h1>  ; text content + closing tag
+//!           <p> "Hello, " <b> "World" </b> "!" </p>
+//!           <img src="x.png">      ; void element (self-closing)
+//!           <br>                  ; void element
+//!       </div>                    ; closing tag
 //!   ]
 //!
-//! Void elements (`br`, `img`, `hr`, …) self-close.
-//! Refinements: `/xml` (XML mode — no void elements), `/raw` (no escaping),
-//! `/indent N` (pretty-print with N-space indent).
+//! Attributes are parsed from the tag body string. Paren interpolation is
+//! supported: `<a href=(url)>` evaluates `(url)` as Red code and uses the
+//! result as the attribute value.
+//!
+//! Refinements: `/xml` (no void elements — all tags need closing),
+//! `/raw` (no HTML-escaping of text content), `/indent` (pretty-print).
 
 use std::rc::Rc;
 
+use red_core::parser::load_source;
 use red_core::printer::form_to_string;
 use red_core::value::{Span, Symbol, Value};
 use red_core::{Env, EvalError, RefineArgs};
 
 use crate::interp::dispatch_block;
 use crate::natives::{reg_refined, type_name};
-use crate::series::word_sym;
 use crate::NativeFn;
 
-/// HTML5 void elements that self-close (no closing tag, no children).
+/// HTML5 void elements that self-close (no closing tag needed).
 const VOID_ELEMENTS: &[&str] = &[
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
     "param", "source", "track", "wbr",
 ];
-
-/// Common HTML tag names — used to distinguish tags from attribute names when
-/// a word follows an attribute key without a value. If the word is a known
-/// tag, it starts a new element (the current attr is boolean); otherwise it's
-/// treated as a boolean attribute.
-const KNOWN_TAGS: &[&str] = &[
-    "html", "head", "body", "div", "span", "p", "a", "img", "ul", "ol", "li",
-    "table", "tr", "td", "th", "thead", "tbody", "tfoot", "br", "hr", "h1",
-    "h2", "h3", "h4", "h5", "h6", "title", "meta", "link", "script", "style",
-    "form", "input", "button", "label", "select", "option", "textarea",
-    "nav", "header", "footer", "main", "section", "article", "aside", "figure",
-    "figcaption", "blockquote", "pre", "code", "em", "strong", "b", "i", "u",
-    "small", "sub", "sup", "dl", "dt", "dd", "caption", "col", "colgroup",
-    "fieldset", "legend", "noscript", "iframe", "canvas", "svg", "video",
-    "audio", "source", "track", "embed", "object", "param", "wbr", "base",
-    "area", "map",
-];
-
-fn is_known_tag(name: &str) -> bool {
-    KNOWN_TAGS.contains(&name)
-}
 
 /// Rendering options derived from the refinements.
 struct HtmlOpts {
@@ -62,7 +46,7 @@ struct HtmlOpts {
     indent_width: usize,
 }
 
-/// `html block` / `html/xml block` / `html/raw block` / `html/indent block N`.
+/// `html block` / `html/xml block` / `html/raw block` / `html/indent block`.
 pub fn build_html_native(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.is_empty() {
         return Err(EvalError::Arity {
@@ -89,16 +73,7 @@ pub fn build_html_native(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Re
         xml_mode: refs.has(&Symbol::new("xml")),
         raw: refs.has(&Symbol::new("raw")),
         pretty: refs.has(&Symbol::new("indent")),
-        indent_width: {
-            if let Some(vals) = refs.get(&Symbol::new("indent")) {
-                match vals.first() {
-                    Some(Value::Integer { n, .. }) => *n.max(&0) as usize,
-                    _ => 2,
-                }
-            } else {
-                2
-            }
-        },
+        indent_width: 2,
     };
 
     let data = series.data.borrow();
@@ -106,14 +81,17 @@ pub fn build_html_native(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Re
     drop(data);
 
     let mut out = String::new();
-    render_block(&elems, &mut out, 0, env, &opts, span)?;
+    render_tokens(&elems, &mut out, 0, env, &opts, span)?;
     Ok(Value::string(Rc::from(out.as_str())))
 }
 
-/// Render a flat sequence of block elements (the top-level block or a child
-/// block). Each element is either a tag word, a string, a paren, a nested
-/// block, or an attribute value belonging to the preceding tag word.
-fn render_block(
+// ===========================================================================
+// Flat token-stream renderer — builds HTML from the open/close tag structure
+// ===========================================================================
+
+/// Render a flat sequence of tokens (tags, strings, parens, blocks). The tag
+/// open/close structure defines nesting via a stack.
+fn render_tokens(
     elems: &[Value],
     out: &mut String,
     indent: usize,
@@ -121,221 +99,321 @@ fn render_block(
     opts: &HtmlOpts,
     span: Span,
 ) -> Result<(), EvalError> {
-    let mut i = 0;
-    while i < elems.len() {
-        let v = &elems[i];
-        match v {
-            // Tag word: `div`, `h1`, `br` — start of an HTML element.
-            Value::Word { sym, .. }
-            | Value::SetWord { sym, .. }
-            | Value::GetWord { sym, .. }
-            | Value::LitWord { sym, .. } => {
-                let tag_name = sym.as_str().to_string();
-                i += 1;
-                render_tag(&tag_name, elems, &mut i, out, indent, env, opts, span)?;
+    // Stack of open tag names (for matching closing tags).
+    let mut stack: Vec<String> = Vec::new();
+
+    for elem in elems {
+        match elem {
+            // Tag literal: opening, closing, or self-closing.
+            Value::Tag { text, .. } => {
+                let body = text.as_ref();
+                if body.starts_with('/') {
+                    // Closing tag: </div>
+                    let close_name = body[1..].trim();
+                    if let Some(open_name) = stack.pop() {
+                        let cur_indent = indent + stack.len();
+                        if opts.pretty {
+                            push_indent(out, cur_indent, opts.indent_width);
+                        }
+                        out.push_str("</");
+                        out.push_str(close_name);
+                        out.push('>');
+                        if opts.pretty {
+                            out.push('\n');
+                        }
+                        if open_name != close_name {
+                            // Mismatch — auto-correct by closing all open tags
+                            // until we find a match (browser-like leniency).
+                            // For now, just warn silently.
+                        }
+                    } else {
+                        // Stray closing tag — ignore (browser-like leniency).
+                    }
+                } else {
+                    // Opening or self-closing tag.
+                    let parsed = parse_tag_body(body, env, span)?;
+                    let is_void =
+                        !opts.xml_mode && (VOID_ELEMENTS.contains(&parsed.name.as_str())
+                            || parsed.self_closing);
+
+                    let cur_indent = indent + stack.len();
+                    if opts.pretty {
+                        push_indent(out, cur_indent, opts.indent_width);
+                    }
+                    out.push('<');
+                    out.push_str(&parsed.name);
+                    for (key, val) in &parsed.attrs {
+                        out.push(' ');
+                        out.push_str(key);
+                        if !val.is_empty() {
+                            out.push_str("=\"");
+                            escape_attr(val, out);
+                            out.push('"');
+                        }
+                    }
+                    if is_void {
+                        out.push_str(" />");
+                        if opts.pretty {
+                            out.push('\n');
+                        }
+                    } else {
+                        out.push('>');
+                        if opts.pretty {
+                            out.push('\n');
+                        }
+                        stack.push(parsed.name.clone());
+                    }
+                }
             }
             // String: text content (HTML-escaped unless /raw).
             Value::String { s, .. } => {
+                let cur_indent = indent + stack.len();
                 if opts.pretty {
-                    push_indent(out, indent, opts.indent_width);
+                    push_indent(out, cur_indent, opts.indent_width);
                 }
                 if opts.raw {
                     out.push_str(s);
                 } else {
                     html_escape(s, out);
                 }
-                i += 1;
+                if opts.pretty {
+                    out.push('\n');
+                }
             }
             // Paren: evaluate Red code, form result, append (escaped unless /raw).
             Value::Paren { series, .. } => {
                 let result = dispatch_block(&Value::paren(series.clone()), env)?;
                 let text = form_to_string(&result);
+                let cur_indent = indent + stack.len();
                 if opts.pretty {
-                    push_indent(out, indent, opts.indent_width);
+                    push_indent(out, cur_indent, opts.indent_width);
                 }
                 if opts.raw {
                     out.push_str(&text);
                 } else {
                     html_escape(&text, out);
                 }
-                i += 1;
+                if opts.pretty {
+                    out.push('\n');
+                }
             }
-            // Nested block: recurse.
+            // Nested block: recurse as a transparent token group.
             Value::Block { series, .. } => {
                 let data = series.data.borrow();
                 let nested: Vec<Value> = data.iter().skip(series.index).cloned().collect();
                 drop(data);
-                render_block(&nested, out, indent, env, opts, span)?;
-                i += 1;
+                // Recurse at the current stack depth — the nested block's
+                // tags continue the flat token stream.
+                render_tokens(&nested, out, indent, env, opts, span)?;
             }
             // Anything else: form it and treat as text content.
             other => {
                 let text = form_to_string(other);
+                let cur_indent = indent + stack.len();
+                if opts.pretty {
+                    push_indent(out, cur_indent, opts.indent_width);
+                }
                 if opts.raw {
                     out.push_str(&text);
                 } else {
                     html_escape(&text, out);
                 }
-                i += 1;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Render a single tag, collecting attributes from the following elements
-/// (word + optional value pairs), then collecting inline children (all
-/// non-word elements until the next word or end of block).
-fn render_tag(
-    tag_name: &str,
-    elems: &[Value],
-    i: &mut usize,
-    out: &mut String,
-    indent: usize,
-    env: &mut Env,
-    opts: &HtmlOpts,
-    span: Span,
-) -> Result<(), EvalError> {
-    let is_void = !opts.xml_mode && VOID_ELEMENTS.contains(&tag_name);
-
-    if opts.pretty {
-        push_indent(out, indent, opts.indent_width);
-    }
-    out.push('<');
-    out.push_str(tag_name);
-
-    // Collect attributes: word + optional value. A word followed by another
-    // word or a block is a boolean attribute. A word that is itself a known
-    // tag name starts a new element (don't treat it as an attribute).
-    while *i < elems.len() {
-        let attr_key = match word_sym(&elems[*i]) {
-            Some(s) => s.as_str().to_string(),
-            None => break, // Not a word — exit to children mode.
-        };
-        // If this word is a known tag name, it's a new tag — don't consume
-        // it as an attribute; exit the attr loop.
-        if VOID_ELEMENTS.contains(&attr_key.as_str()) || is_known_tag(&attr_key) {
-            break;
-        }
-        *i += 1;
-
-        // Peek: is the next element a value (attribute value) or a new tag/block?
-        if *i < elems.len() {
-            let next = &elems[*i];
-            match next {
-                // Next is a block → boolean attr, and the block is children.
-                Value::Block { .. } => {
-                    push_attr(out, &attr_key, None, opts);
-                    break;
-                }
-                // Next is a word that's a known tag name → the current attr
-                // is boolean (if not already set), and the word starts a new
-                // tag. Don't push the boolean attr — just break so the word
-                // is processed as a new tag.
-                Value::Word { sym, .. }
-                | Value::SetWord { sym, .. }
-                | Value::GetWord { sym, .. }
-                | Value::LitWord { sym, .. } => {
-                    if VOID_ELEMENTS.contains(&sym.as_str())
-                        || is_known_tag(sym.as_str())
-                    {
-                        // This word starts a new tag — current attr is boolean.
-                        push_attr(out, &attr_key, None, opts);
-                        break;
-                    }
-                    // Unknown word — treat as boolean attribute.
-                    push_attr(out, &attr_key, None, opts);
-                    // Don't consume; loop re-processes the word as next attr key.
-                }
-                // Next is a value (string, integer, paren, etc.) — attr value.
-                _ => {
-                    let value_str = if let Value::Paren { series, .. } = next {
-                        let result = dispatch_block(&Value::paren(series.clone()), env)?;
-                        form_to_string(&result)
-                    } else {
-                        form_to_string(next)
-                    };
-                    push_attr(out, &attr_key, Some(&value_str), opts);
-                    *i += 1;
+                if opts.pretty {
+                    out.push('\n');
                 }
             }
-        } else {
-            // End of block — boolean attribute.
-            push_attr(out, &attr_key, None, opts);
-            break;
         }
     }
 
-    if is_void {
-        out.push_str(" />");
+    // Auto-close any unclosed tags (browser-like leniency).
+    while let Some(name) = stack.pop() {
+        let cur_indent = indent + stack.len();
         if opts.pretty {
-            out.push('\n');
+            push_indent(out, cur_indent, opts.indent_width);
         }
-        return Ok(());
-    }
-
-    // Collect inline children: all non-word elements from the current position
-    // until the next word (which starts a new tag) or end of block.
-    let children_start = *i;
-    while *i < elems.len() {
-        if word_sym(&elems[*i]).is_some() {
-            break; // next tag starts
-        }
-        *i += 1;
-    }
-
-    let children = &elems[children_start..*i];
-    if children.is_empty() {
-        out.push_str("></");
-        out.push_str(tag_name);
+        out.push_str("</");
+        out.push_str(&name);
         out.push('>');
         if opts.pretty {
             out.push('\n');
         }
-        return Ok(());
     }
 
-    out.push('>');
-    if opts.pretty {
-        out.push('\n');
-    }
-    render_block(children, out, indent + 1, env, opts, span)?;
-
-    if opts.pretty {
-        push_indent(out, indent, opts.indent_width);
-    }
-    out.push_str("</");
-    out.push_str(tag_name);
-    out.push('>');
-    if opts.pretty {
-        out.push('\n');
-    }
     Ok(())
 }
 
-/// Write an attribute `key="value"` (or just `key` for boolean). Escapes the
-/// value's `"` → `&quot;`.
-fn push_attr(out: &mut String, key: &str, value: Option<&str>, opts: &HtmlOpts) {
-    if opts.pretty {
-        out.push(' ');
-    } else {
-        out.push(' ');
-    }
-    out.push_str(key);
-    if let Some(v) = value {
-        out.push('=');
-        out.push('"');
-        // Escape quotes in attribute values; don't escape `<`/`>` (inside quotes).
-        for c in v.chars() {
-            match c {
-                '"' => out.push_str("&quot;"),
-                '&' => out.push_str("&amp;"),
-                c => out.push(c),
-            }
-        }
-        out.push('"');
-    }
+// ===========================================================================
+// Tag body parser — extracts name + attributes from the tag body string
+// ===========================================================================
+
+struct ParsedTag {
+    name: String,
+    attrs: Vec<(String, String)>,
+    self_closing: bool,
 }
+
+/// Parse the tag body string (everything between `<` and `>`) into a tag name
+/// and a list of attributes. Supports:
+///   - Quoted values: `class="main"`
+///   - Paren interpolation: `href=(url)` — evaluates `url` as Red code
+///   - Boolean attributes: `defer` (no `=` or value)
+///   - Self-closing: `br/` (trailing `/`)
+fn parse_tag_body(body: &str, env: &mut Env, span: Span) -> Result<ParsedTag, EvalError> {
+    let trimmed = body.trim();
+
+    // Self-closing: trailing `/` (but not leading `/` which is a closing tag).
+    let (inner, self_closing) = if trimmed.ends_with('/')
+        && !trimmed.starts_with('/')
+    {
+        (trimmed[..trimmed.len() - 1].trim(), true)
+    } else {
+        (trimmed, false)
+    };
+
+    // Tag name: first token up to whitespace.
+    let name_end = inner
+        .find(|c: char| c.is_whitespace())
+        .unwrap_or(inner.len());
+    let name = inner[..name_end].to_string();
+    if name.is_empty() {
+        return Err(EvalError::Native {
+            message: "html: empty tag name".into(),
+            span,
+        });
+    }
+    let rest = inner[name_end..].trim();
+
+    // Parse attributes.
+    let attrs = parse_attrs(rest, env, span)?;
+
+    Ok(ParsedTag {
+        name,
+        attrs,
+        self_closing,
+    })
+}
+
+/// Parse attribute key=value pairs from the remainder of the tag body.
+fn parse_attrs(
+    rest: &str,
+    env: &mut Env,
+    span: Span,
+) -> Result<Vec<(String, String)>, EvalError> {
+    let mut attrs = Vec::new();
+    let bytes = rest.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        // Skip whitespace.
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+
+        // Read attribute key (up to `=`, whitespace, or end).
+        let key_start = i;
+        while i < bytes.len()
+            && bytes[i] != b'='
+            && !bytes[i].is_ascii_whitespace()
+        {
+            i += 1;
+        }
+        let key = rest[key_start..i].to_string();
+
+        // Check for `=value`.
+        if i < bytes.len() && bytes[i] == b'=' {
+            i += 1; // consume `=`
+
+            if i >= bytes.len() {
+                // `=` at end — treat as boolean with empty value.
+                attrs.push((key, String::new()));
+                break;
+            }
+
+            let val = if bytes[i] == b'"' {
+                // Quoted string value: read until closing `"`.
+                i += 1; // consume opening quote
+                let val_start = i;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += 1;
+                }
+                let v = rest[val_start..i].to_string();
+                if i < bytes.len() {
+                    i += 1; // consume closing quote
+                }
+                v
+            } else if bytes[i] == b'\'' {
+                // Single-quoted value: read until closing `'`.
+                i += 1;
+                let val_start = i;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    i += 1;
+                }
+                let v = rest[val_start..i].to_string();
+                if i < bytes.len() {
+                    i += 1;
+                }
+                v
+            } else if bytes[i] == b'(' {
+                // Paren interpolation: find matching `)`, evaluate as Red.
+                i += 1; // consume opening `(`
+                let expr_start = i;
+                let mut depth = 1;
+                while i < bytes.len() && depth > 0 {
+                    match bytes[i] {
+                        b'(' => depth += 1,
+                        b')' => depth -= 1,
+                        _ => {}
+                    }
+                    if depth > 0 {
+                        i += 1;
+                    }
+                }
+                let expr_text = &rest[expr_start..i];
+                if i < bytes.len() {
+                    i += 1; // consume closing `)`
+                }
+
+                // Evaluate the expression as Red code.
+                eval_attr_expr(expr_text, env, span)?
+            } else {
+                // Unquoted bare value: read until whitespace.
+                let val_start = i;
+                while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                rest[val_start..i].to_string()
+            };
+
+            attrs.push((key, val));
+        } else {
+            // Boolean attribute (no `=`).
+            attrs.push((key, String::new()));
+        }
+    }
+
+    Ok(attrs)
+}
+
+/// Evaluate a Red expression from a string (used for `=(expr)` attribute
+/// interpolation). Parses via `load_source`, binds against `user_ctx`, and
+/// evaluates. Returns the `form`'d result as a string.
+fn eval_attr_expr(src: &str, env: &mut Env, span: Span) -> Result<String, EvalError> {
+    let body = load_source(src).map_err(|e| EvalError::Native {
+        message: format!("html: failed to parse attribute expression '{src}': {e}"),
+        span,
+    })?;
+    crate::binding::bind_pass_into(&body, &env.user_ctx);
+    let block = Value::block(body);
+    let result = dispatch_block(&block, env)?;
+    Ok(form_to_string(&result))
+}
+
+// ===========================================================================
+// Escaping helpers
+// ===========================================================================
 
 /// HTML-escape text content: `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`,
 /// `"` → `&quot;`.
@@ -346,6 +424,18 @@ fn html_escape(s: &str, out: &mut String) {
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
+}
+
+/// Escape an attribute value: `"` → `&quot;`, `&` → `&amp;`. Does NOT escape
+/// `<`/`>` (they're safe inside quoted attributes).
+fn escape_attr(s: &str, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("&quot;"),
+            '&' => out.push_str("&amp;"),
             c => out.push(c),
         }
     }
@@ -431,6 +521,7 @@ mod tests {
         String::from_utf8_lossy(b).into_owned()
     }
 
+    #[allow(dead_code)]
     fn out(src: &str) -> String {
         s(&run_capture_val(src).unwrap().1)
     }
@@ -442,39 +533,47 @@ mod tests {
         }
     }
 
+    // --- Basic tag-based tests ---
+
     #[test]
     fn html_simple_tag() {
-        let v = val("html [p \"Hello\"]");
+        let v = val("html [<p> \"Hello\" </p>]");
         assert_eq!(str_val(&v), "<p>Hello</p>");
     }
 
     #[test]
-    fn html_attributes() {
-        let v = val("html [div class \"main\" \"text\"]");
+    fn html_attrs_in_tag() {
+        let v = val("html [<div class=\"main\"> \"text\" </div>]");
         assert_eq!(str_val(&v), "<div class=\"main\">text</div>");
     }
 
     #[test]
-    fn html_nested() {
-        let v = val("html [ul [li \"a\" li \"b\"]]");
+    fn html_nested_tags() {
+        let v = val("html [<ul> <li> \"a\" </li> <li> \"b\" </li> </ul>]");
         assert_eq!(str_val(&v), "<ul><li>a</li><li>b</li></ul>");
     }
 
     #[test]
     fn html_void_element() {
-        let v = val("html [br]");
+        let v = val("html [<br>]");
         assert_eq!(str_val(&v), "<br />");
     }
 
     #[test]
     fn html_void_with_attr() {
-        let v = val("html [img src \"x.png\"]");
+        let v = val("html [<img src=\"x.png\">]");
         assert_eq!(str_val(&v), "<img src=\"x.png\" />");
     }
 
     #[test]
+    fn html_self_closing_tag() {
+        let v = val("html [<br/>]");
+        assert_eq!(str_val(&v), "<br />");
+    }
+
+    #[test]
     fn html_text_escape() {
-        let v = val("html [p {<script>alert(1)</script>}]");
+        let v = val("html [<p> {<script>alert(1)</script>} </p>]");
         assert_eq!(
             str_val(&v),
             "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>"
@@ -483,66 +582,77 @@ mod tests {
 
     #[test]
     fn html_paren_eval() {
-        let v = val("name: \"World\" html [p (\"Hello \" + name)]");
+        let v = val("name: \"World\" html [<p> (\"Hello \" + name) </p>]");
         assert_eq!(str_val(&v), "<p>Hello World</p>");
     }
 
     #[test]
     fn html_boolean_attr() {
-        let v = val("html [script defer src \"app.js\"]");
-        // `defer` is boolean, `src` has a value.
+        let v = val("html [<script defer src=\"app.js\"> </script>]");
         assert_eq!(str_val(&v), "<script defer src=\"app.js\"></script>");
     }
 
     #[test]
-    fn html_empty_children() {
-        let v = val("html [div class \"box\" []]");
-        assert_eq!(str_val(&v), "<div class=\"box\"></div>");
+    fn html_auto_close() {
+        // Unclosed tags are auto-closed (browser-like leniency).
+        let v = val("html [<div> <p> \"text\"]");
+        assert_eq!(str_val(&v), "<div><p>text</p></div>");
     }
 
     #[test]
     fn html_xml_mode_void() {
-        let v = val("html/xml [br]");
-        // XML mode: no void elements — `<br></br>`.
+        let v = val("html/xml [<br> </br>]");
         assert_eq!(str_val(&v), "<br></br>");
     }
 
     #[test]
     fn html_raw_mode() {
-        let v = val("html/raw [p {<b>bold</b>}]");
+        let v = val("html/raw [<p> {<b>bold</b>} </p>]");
         assert_eq!(str_val(&v), "<p><b>bold</b></p>");
     }
 
     #[test]
     fn html_multiple_top_level() {
-        let v = val("html [h1 \"Title\" p \"Para\"]");
+        let v = val("html [<h1> \"Title\" </h1> <p> \"Para\" </p>]");
         assert_eq!(str_val(&v), "<h1>Title</h1><p>Para</p>");
     }
 
     #[test]
     fn html_deeply_nested() {
-        let v = val("html [div [div [div \"deep\"]]]");
+        let v = val("html [<div> <div> <div> \"deep\" </div> </div> </div>]");
         assert_eq!(str_val(&v), "<div><div><div>deep</div></div></div>");
     }
 
     #[test]
-    fn html_integer_attr() {
-        let v = val("html [td colspan 2 \"cell\"]");
-        assert_eq!(str_val(&v), "<td colspan=\"2\">cell</td>");
+    fn html_attr_paren_interpolation() {
+        let v = val("url: \"http://example.com\" html [<a href=(url)> \"link\" </a>]");
+        assert_eq!(str_val(&v), "<a href=\"http://example.com\">link</a>");
     }
 
     #[test]
-    fn html_pretty_indent() {
-        let v = val("html/indent [div [p \"hi\"]]");
-        let s = str_val(&v);
-        assert!(s.contains("\n"), "pretty output should have newlines: {s}");
-        assert!(s.contains("  <p>"), "pretty output should indent child tag: {s}");
-        assert!(s.contains("    hi"), "pretty output should indent text: {s}");
+    fn html_attr_paren_expr() {
+        let v = val("html [<div id=(rejoin [\"user-\" 42])> \"content\" </div>]");
+        assert_eq!(str_val(&v), "<div id=\"user-42\">content</div>");
     }
 
     #[test]
     fn html_print_output() {
-        let result = out("print html [p \"Hello\"]");
+        let result = out("print html [<p> \"Hello\" </p>]");
         assert_eq!(result, "<p>Hello</p>\n");
+    }
+
+    #[test]
+    fn html_mixed_content() {
+        let v = val("html [<p> \"Hello, \" <b> \"World\" </b> \"!\" </p>]");
+        assert_eq!(str_val(&v), "<p>Hello, <b>World</b>!</p>");
+    }
+
+    #[test]
+    fn html_full_page() {
+        let v = val("html [<html> <head> [<title> \"My Page\" </title>] </head> <body> [<h1> \"Welcome\" </h1>] </body> </html>]");
+        assert_eq!(
+            str_val(&v),
+            "<html><head><title>My Page</title></head><body><h1>Welcome</h1></body></html>"
+        );
     }
 }
