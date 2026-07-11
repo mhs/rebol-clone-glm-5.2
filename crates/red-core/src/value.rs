@@ -1980,6 +1980,62 @@ impl PortDef {
     }
 }
 
+// ===========================================================================
+// M70: Test dialect types
+// ===========================================================================
+
+/// A registered unit test (M70). `test` and `suite` natives push these into
+/// `Env::tests`; `run-tests` drains them. The body is stored verbatim as a
+/// `Series` and dispatched via `dispatch_block` at run time.
+#[derive(Clone, Debug)]
+pub struct TestDef {
+    /// The test's name (from `test "name" [...]`).
+    pub name: String,
+    /// Suite path (e.g. `["math" "trig"]` for a test inside
+    /// `suite "math" [suite "trig" [...]]`). Empty = top level.
+    pub path: Vec<Symbol>,
+    /// The test body block, stored verbatim — dispatched at run time.
+    pub body: Series,
+    /// Inherited hook chain (parent-first), captured at registration time.
+    /// `before`/`after` from each enclosing `suite`, in outer-to-inner order.
+    pub hooks: Vec<TestHooks>,
+    /// Source span of the `test` call for error reporting.
+    pub span: Span,
+}
+
+/// Before/after hooks for a single `suite` frame (M70). `before` runs before
+/// each test in the suite (parent-first); `after` runs after (child-first).
+#[derive(Clone, Debug, Default)]
+pub struct TestHooks {
+    pub before: Option<Series>,
+    pub after: Option<Series>,
+}
+
+/// Test outcome: `Pass`, `Fail` (assertion), or `Crash` (unexpected error).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TestStatus {
+    Pass,
+    Fail,
+    Crash,
+}
+
+/// A completed test's result (M70). Filled by `run-tests` and used for TAP
+/// output.
+#[derive(Clone, Debug)]
+pub struct TestResult {
+    /// Full path: `"suite/name"` joined with `/`.
+    pub path: String,
+    pub status: TestStatus,
+    /// Error message (for Fail/Crash).
+    pub message: Option<String>,
+    /// Molded actual value (for `assert-equal` Fail).
+    pub found: Option<String>,
+    /// Molded expected value (for `assert-equal` Fail).
+    pub expected: Option<String>,
+    /// The asserting word (`'assert-equal`, `'assert`, `'fail`, …).
+    pub where_word: Option<Symbol>,
+}
+
 /// A `money!` payload (M80): a fixed-point decimal currency value stored as
 /// integer cents (`i64`) plus a 3-letter currency code (`Rc<str>`, default
 /// `"USD"`). No floating point — exact arithmetic. `$10.00` ⇒ cents = 1000.

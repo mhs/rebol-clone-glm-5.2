@@ -84,6 +84,8 @@ pub struct RunOptions {
     pub trace: bool,
     pub module_paths: Vec<std::path::PathBuf>,
     pub no_stdlib: bool,
+    /// M70: `--test` mode — auto-invoke `run-tests` after script eval.
+    pub test_mode: bool,
 }
 
 /// Like `run_source_with_exit_output` but applies CLI `RunOptions` (allow-shell
@@ -244,7 +246,18 @@ fn run_series_inner_opts(
     // `EvalError::Quit` via the VM's own `run` wrapper (vm.rs catches
     // `Quit` and returns it, matching the walker's contract).
     match dispatch_block(&block, &mut env) {
-        Ok(v) => Ok((v, 0)),
+        Ok(v) => {
+            // M70: auto-invoke run-tests in --test mode.
+            if opts.test_mode && !env.tests_run {
+                let _ = crate::natives::run_tests_native(
+                    &[],
+                    &red_core::RefineArgs::default(),
+                    &mut env,
+                );
+            }
+            let code = if opts.test_mode && env.test_failed > 0 { 1 } else { 0 };
+            Ok((v, code))
+        }
         Err(EvalError::Quit(code)) => Ok((Value::None, code)),
         Err(e) => Err(Error::Eval(e)),
     }

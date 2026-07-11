@@ -18,6 +18,7 @@ red — a Red subset clone
 
 USAGE:
     red [--allow-shell] [--allow-network] [--unset-on-unbound] [--walk] [--trace] [--module-path <dir>...] [--no-stdlib] <file.red> [args...]   Load and evaluate a Red source file
+    red --test <file.red>                                          Run test/suite declarations and report (TAP-14)
     red --disasm <file.red>                                       Compile and disassemble the script (no run)
     red --disasm-func <name> <file.red>                           Disassemble a named top-level func
     red                                                           Interactive REPL (quit with `quit`/`exit` or Ctrl-D)
@@ -72,6 +73,7 @@ fn main() -> ExitCode {
     let mut trace = false;
     let mut disasm = false;
     let mut no_stdlib = false;
+    let mut test_mode = false;
     let mut module_paths: Vec<std::path::PathBuf> = Vec::new();
     // `--disasm-func <name>` consumes the next arg as the func name.
     let mut disasm_func: Option<String> = None;
@@ -93,6 +95,8 @@ fn main() -> ExitCode {
             disasm = true;
         } else if a == "--no-stdlib" {
             no_stdlib = true;
+        } else if a == "--test" {
+            test_mode = true;
         } else if a == "--module-path" {
             // Consume the next arg as a directory; repeatable.
             if i + 1 >= args.len() {
@@ -118,6 +122,10 @@ fn main() -> ExitCode {
 
     // `--disasm` / `--disasm-func` take precedence over running.
     if disasm || disasm_func.is_some() {
+        if test_mode {
+            eprintln!("*** Error: --test and --disasm are mutually exclusive");
+            return ExitCode::from(1);
+        }
         let Some(path) = positional.first() else {
             eprintln!("*** Error: --disasm requires a file path");
             return ExitCode::from(1);
@@ -144,6 +152,7 @@ fn main() -> ExitCode {
             walk,
             trace,
             no_stdlib,
+            test_mode,
             &module_paths,
         ),
     }
@@ -159,6 +168,7 @@ fn run_file(
     walk: bool,
     trace: bool,
     no_stdlib: bool,
+    test_mode: bool,
     module_paths: &[std::path::PathBuf],
 ) -> ExitCode {
     let src = match std::fs::read_to_string(path) {
@@ -176,6 +186,7 @@ fn run_file(
         walk,
         trace,
         no_stdlib,
+        test_mode,
         module_paths: module_paths.to_vec(),
     };
     match red_eval::run_source_with_exit_opts(&src, Box::new(io::stdout()), &opts) {

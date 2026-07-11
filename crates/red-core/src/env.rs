@@ -309,6 +309,23 @@ pub struct Env {
     /// M162: set of tasks already run in the current `build` invocation,
     /// for dependency dedup and cycle detection.
     pub ran_tasks: HashSet<Symbol>,
+    /// M70: test dialect registry. `test` natives push `TestDef`s here;
+    /// `run-tests` drains them. Empty unless test natives are used.
+    pub tests: Vec<crate::value::TestDef>,
+    /// M70: stack of suite names — push on `suite` enter, pop on exit.
+    /// Empty = top level. Used to build `TestDef.path`.
+    pub current_suite: Vec<Symbol>,
+    /// M70: stack of `TestHooks` frames — one per active `suite`.
+    /// `test` copies the full stack into `TestDef.hooks` at registration.
+    pub test_hooks: Vec<crate::value::TestHooks>,
+    /// M70: filled by `run-tests` — one `TestResult` per test.
+    pub test_results: Vec<crate::value::TestResult>,
+    /// M70: guard — `run-tests` is idempotent within a single `--test`
+    /// invocation (auto-invoke skips if already called).
+    pub tests_run: bool,
+    /// M70: count of failed tests — read by the CLI for the exit code
+    /// (0 = all pass, >0 = failures).
+    pub test_failed: usize,
     /// High-water mark of `call_stack.len()` since the last
     /// [`Self::reset_stats`] call. Used by the v0.3 VM milestones to prove
     /// tail-call stack bounds. Only present under the `stats` cargo feature;
@@ -373,6 +390,12 @@ impl Env {
             tasks: HashMap::new(),
             default_task: None,
             ran_tasks: HashSet::new(),
+            tests: Vec::new(),
+            current_suite: Vec::new(),
+            test_hooks: Vec::new(),
+            test_results: Vec::new(),
+            tests_run: false,
+            test_failed: 0,
             #[cfg(feature = "stats")]
             max_frame_depth: 0,
             #[cfg(feature = "stats")]

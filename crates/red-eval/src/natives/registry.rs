@@ -410,6 +410,9 @@ pub fn register_natives(env: &mut Env) {
     // Build/task dialect (M162): build [...], task, run-task
     crate::build::register_build_natives(env);
 
+    // Test dialect (M70–M72): test/suite/assert-*/run-tests
+    crate::natives::register_test_natives(env);
+
     // Eval reflection natives (M134): dump/errors
     crate::reflection::register_reflection_natives(env);
 
