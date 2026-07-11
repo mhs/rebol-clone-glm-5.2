@@ -266,7 +266,7 @@ fn resolve_source(v: &Value, env: &mut Env, span: Span) -> Result<Vec<Value>, Ev
             })?;
             extract_records(&val, env, span)
         }
-        Value::Block { series, .. } | Value::Paren { series, .. } => {
+        Value::Block { .. } | Value::Paren { .. } => {
             extract_records(v, env, span)
         }
         Value::LitWord { sym, .. } => {
@@ -289,7 +289,7 @@ fn resolve_source(v: &Value, env: &mut Env, span: Span) -> Result<Vec<Value>, Ev
 /// Extract records from a source value. If the source is a block, it's
 /// reduced first (so `make object! [...]` calls are evaluated). The result
 /// is a flat `Vec<Value>` of records.
-fn extract_records(v: &Value, env: &mut Env, span: Span) -> Result<Vec<Value>, EvalError> {
+fn extract_records(v: &Value, env: &mut Env, _span: Span) -> Result<Vec<Value>, EvalError> {
     match v {
         Value::Block { series, .. } | Value::Paren { series, .. } => {
             // Reduce the block to evaluate any `make object!` / other expressions.
@@ -316,7 +316,7 @@ fn extract_records(v: &Value, env: &mut Env, span: Span) -> Result<Vec<Value>, E
 }
 
 /// Parse the `select` argument: a block of field words, or the literal word `*`.
-fn parse_select(v: &Value, span: Span) -> Result<Option<Vec<Symbol>>, EvalError> {
+fn parse_select(v: &Value, _span: Span) -> Result<Option<Vec<Symbol>>, EvalError> {
     match v {
         Value::Block { series, .. } => {
             let data = series.data.borrow();
@@ -351,7 +351,7 @@ fn parse_select(v: &Value, span: Span) -> Result<Option<Vec<Symbol>>, EvalError>
 
 /// Parse the `order` argument: a block of field words, optionally followed by
 /// `asc` or `desc`.
-fn parse_order(v: &Value, span: Span) -> Result<Vec<(Symbol, bool)>, EvalError> {
+fn parse_order(v: &Value, _span: Span) -> Result<Vec<(Symbol, bool)>, EvalError> {
     let series = match v {
         Value::Block { series, .. } | Value::Paren { series, .. } => series.clone(),
         other => {
@@ -491,7 +491,7 @@ fn filter_rows(
 /// Sort rows by the specified fields. Uses a simple stable sort with
 /// lexicographic comparison of the field values.
 fn sort_rows(rows: &mut Vec<Value>, order: &[(Symbol, bool)], span: Span) -> Result<(), EvalError> {
-    let mut err: Option<EvalError> = None;
+    let err: Option<EvalError> = None;
     rows.sort_by(|a, b| {
         for (field, desc) in order {
             let av = get_field(a, field).unwrap_or(Value::None);
@@ -542,7 +542,7 @@ fn dedup_rows(rows: Vec<Value>) -> Vec<Value> {
 fn project_rows(rows: Vec<Value>, fields: &[Symbol], span: Span) -> Result<Vec<Value>, EvalError> {
     let mut result = Vec::new();
     for row in rows {
-        let mut proj = ObjectDef::new();
+        let proj = ObjectDef::new();
         for field in fields {
             let val = get_field(&row, field).unwrap_or(Value::None);
             proj.ctx.set(field.clone(), val);
