@@ -649,7 +649,7 @@ mod tests {
 
     #[test]
     fn html_full_page() {
-        let v = val("html [<html> <head> [<title> \"My Page\" </title>] </head> <body> [<h1> \"Welcome\" </h1>] </body> </html>]");
+        let v = val("html [<html> <head> <title> \"My Page\" </title> </head> <body> <h1> \"Welcome\" </h1> </body> </html>]");
         assert_eq!(
             str_val(&v),
             "<html><head><title>My Page</title></head><body><h1>Welcome</h1></body></html>"
