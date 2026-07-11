@@ -13,14 +13,17 @@
 
 pub mod binding;
 pub mod bitset;
+pub mod build;
 pub mod codec;
 pub mod convert;
 pub mod hash;
+pub mod html;
 pub mod image;
 pub mod interp;
 pub mod interp_runner;
 pub mod interp_walker;
 pub mod io;
+pub mod json;
 pub mod map;
 pub mod math;
 pub mod module;
@@ -29,6 +32,7 @@ pub mod net;
 pub mod object;
 pub mod parse;
 pub mod path;
+pub mod query;
 pub mod reflection;
 pub mod series;
 pub mod stdlib;

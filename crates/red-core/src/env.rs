@@ -299,6 +299,16 @@ pub struct Env {
     /// before evaluation. Distinct from the CLI `--trace` VM-instruction
     /// dump (`Env::trace_out`) — this is a script-level tracing mode.
     pub user_trace: Option<Box<dyn std::io::Write>>,
+    /// M162: build/task dialect registry. Maps task name → body block.
+    /// Populated by `task`/`build` natives; drained by `run-task`/`default`.
+    pub tasks: HashMap<Symbol, crate::value::Series>,
+    /// M162: the default task to run when `--build` is used without a
+    /// specific task name. Set by the `default` keyword inside a `build`
+    /// block.
+    pub default_task: Option<Symbol>,
+    /// M162: set of tasks already run in the current `build` invocation,
+    /// for dependency dedup and cycle detection.
+    pub ran_tasks: HashSet<Symbol>,
     /// High-water mark of `call_stack.len()` since the last
     /// [`Self::reset_stats`] call. Used by the v0.3 VM milestones to prove
     /// tail-call stack bounds. Only present under the `stats` cargo feature;
@@ -360,6 +370,9 @@ impl Env {
             collect_stack: Vec::new(),
             protected_series: HashSet::new(),
             user_trace: None,
+            tasks: HashMap::new(),
+            default_task: None,
+            ran_tasks: HashSet::new(),
             #[cfg(feature = "stats")]
             max_frame_depth: 0,
             #[cfg(feature = "stats")]

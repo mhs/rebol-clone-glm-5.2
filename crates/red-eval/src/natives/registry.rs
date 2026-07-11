@@ -398,6 +398,18 @@ pub fn register_natives(env: &mut Env) {
     // Codec natives (M130): checksum/compress/decompress/enbase/debase/encode/decode
     crate::codec::register_codec_natives(env);
 
+    // JSON codec (M155–M156): to-json / load-json
+    crate::json::register_json_natives(env);
+
+    // HTML builder dialect (M158): html [...]
+    crate::html::register_html_natives(env);
+
+    // Query dialect (M160): query [...]
+    crate::query::register_query_natives(env);
+
+    // Build/task dialect (M162): build [...], task, run-task
+    crate::build::register_build_natives(env);
+
     // Eval reflection natives (M134): dump/errors
     crate::reflection::register_reflection_natives(env);
 
