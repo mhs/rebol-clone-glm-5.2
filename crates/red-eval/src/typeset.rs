@@ -40,7 +40,7 @@ use crate::natives::{arity_err, type_name};
 /// - a single `Word`/`LitWord` — a one-element typeset (e.g. `make typeset!
 ///   integer!`).
 /// - a `typeset!` — shallow copy (new `Rc<TypesetDef>` with the same set).
-pub fn make_typeset(spec: &Value, env: &mut Env) -> Result<Value, EvalError> {
+pub fn make_typeset(spec: &Value, _env: &mut Env) -> Result<Value, EvalError> {
     match spec {
         Value::Block { series, .. } => {
             let data = series.data.borrow();

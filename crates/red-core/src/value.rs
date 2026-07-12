@@ -1652,7 +1652,7 @@ pub fn to_components(v: &Value) -> Value {
             span: *span,
         },
         Value::Date { dt, span } => {
-            use chrono::{Datelike, Timelike};
+            use chrono::Datelike;
             let d = &dt.dt;
             Value::Block {
                 series: Series::new(vec![

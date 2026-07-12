@@ -58,7 +58,7 @@ use crate::natives::{arity_err, type_name};
 pub fn make_semantic_type(spec: &Value, env: &mut Env) -> Result<Value, EvalError> {
     let def = build_def(spec, env)?;
     let def_rc = Rc::new(def);
-    let name = def_rc.name.clone();
+    let _name = def_rc.name.clone();
     env.register_semantic_type(def_rc.clone());
     Ok(Value::SemanticType(def_rc))
 }
@@ -1113,7 +1113,7 @@ fn register_predicate_and_constructor(
         SemanticShape::Positional => {
             // Count the fields in the schema (set-word + constraint pairs).
             let n_fields = count_positional_fields(&def.schema);
-            let mut params: Vec<Symbol> = (0..n_fields)
+            let params: Vec<Symbol> = (0..n_fields)
                 .map(|i| Symbol::new(&format!("__arg{i}")))
                 .collect();
             let arg_words: Vec<Value> = (0..n_fields)
@@ -1407,7 +1407,6 @@ fn validate_scalar(def: &SemanticTypeDef, components: &Value) -> Result<(), Eval
 /// failure, produce a generic streamed error. The parse cursor position
 /// would be ideal but requires deeper parse integration.
 fn validate_streamed(def: &SemanticTypeDef, value: &Value) -> Result<(), EvalError> {
-    let type_name_str = def.name.as_str().trim_end_matches('!');
     // For streamed schemas, fall back to `valid?` (parse-based check).
     // If it fails, produce a best-effort error. A full implementation would
     // inspect the parse cursor on failure.
