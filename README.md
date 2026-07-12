@@ -120,6 +120,14 @@ history per version.
   order; `date - date → duration!`).
 - **I/O handles:** `Port` (`open %file.red` / `open http://example.com/` —
   synchronous I/O handle, file or HTTP).
+- **Semantic types:** `semantic-type!` — parse-backed schemas over base
+  datatypes. `define-type 'rgb! 'tuple! [r: byte g: byte b: byte]` compiles
+  a schema to a `parse` rule; `valid? 'rgb! 255.0.0` checks it. Generated
+  predicates (`rgb?`) and constructors (`rgb 255 0 0`). Function-spec
+  validation: `func [c [rgb!]] [...]` rejects non-conforming args at call
+  time. Four schema shapes: positional (tuple/pair/date), scalar
+  (integer/number with `range`/`where`), streamed (string/block with
+  `some`/charsets), named (object with required/optional fields).
 
 ### Evaluation
 - **Bytecode compiler + stack VM** (default): blocks compile to a flat

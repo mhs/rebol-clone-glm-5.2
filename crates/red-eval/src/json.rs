@@ -236,6 +236,7 @@ fn encode(
         | Value::Module(_)
         | Value::Port(_)
         | Value::Typeset(_)
+        | Value::SemanticType(_)
         | Value::Vector(_)
         | Value::Image(_)
         | Value::Bitset(_)

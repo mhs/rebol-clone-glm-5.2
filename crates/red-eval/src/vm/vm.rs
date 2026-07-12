@@ -1280,12 +1280,33 @@ impl<'env> Vm<'env> {
             for (i, pt) in fd.param_types.iter().enumerate() {
                 if let Some(ts) = pt {
                     if let Some(arg) = self.stack.get(start + i) {
-                        if !ts.accepts(arg) {
+                        // M176: use `accepts_with_env` which also checks the
+                        // semantic ref (if any). The `arg` is cloned because
+                        // `accepts_with_env` takes `&Value` and we need to
+                        // pass `self.env` mutably (borrow conflict with
+                        // `self.stack`).
+                        let arg_clone = arg.clone();
+                        if !ts.accepts_with_env(&arg_clone, self.env) {
+                            // M177: rich error with semantic type name.
+                            let label = if ts.semantic.borrow().is_some() {
+                                let sem = ts.semantic.borrow();
+                                if let Some(def) = sem.as_ref() {
+                                    format!(
+                                        "{} (base {}!)",
+                                        def.name.as_str(),
+                                        def.base.as_str(),
+                                    )
+                                } else {
+                                    crate::typeset::typeset_label(ts)
+                                }
+                            } else {
+                                crate::typeset::typeset_label(ts)
+                            };
                             return Err(EvalError::Native {
                                 message: format!(
                                     "type error: arg {} expected {}, got {}",
                                     i + 1,
-                                    crate::typeset::typeset_label(ts),
+                                    label,
                                     crate::natives::type_name(arg),
                                 ),
                                 span: arg.span_or_default(),
@@ -1592,7 +1613,7 @@ impl<'env> Vm<'env> {
         freevars: Vec<Symbol>,
     ) -> Result<FuncDef, EvalError> {
         let spec = match &spec_val {
-            Value::Block { .. } => extract_spec(&spec_val).map_err(|e| EvalError::Native {
+            Value::Block { .. } => extract_spec(&spec_val, Some(self.env)).map_err(|e| EvalError::Native {
                 message: e.to_string(),
                 span: spec_val.span_or_default(),
             })?,
@@ -1649,7 +1670,7 @@ impl<'env> Vm<'env> {
         cap_specs: &[(Symbol, usize, usize)],
     ) -> Result<ClosureDef, EvalError> {
         let spec = match &spec_val {
-            Value::Block { .. } => extract_spec(&spec_val).map_err(|e| EvalError::Native {
+            Value::Block { .. } => extract_spec(&spec_val, Some(self.env)).map_err(|e| EvalError::Native {
                 message: e.to_string(),
                 span: spec_val.span_or_default(),
             })?,

@@ -457,7 +457,7 @@ fn analyze_func_form(data: &[Value], i: usize, scope: &mut Scope, result: &mut A
             param_types: Vec::new(),
         }
     } else {
-        match extract_spec(&data[i + 1]) {
+        match extract_spec(&data[i + 1], None) {
             Ok(s) => s,
             Err(_) => return, // Malformed spec — let the runtime native report it.
         }

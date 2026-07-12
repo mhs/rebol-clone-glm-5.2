@@ -702,7 +702,8 @@ fn compile_prefix(
         | Value::Image(_)
         | Value::Bitset(_)
         | Value::Port(_)
-        | Value::Typeset(_) => {
+        | Value::Typeset(_)
+        | Value::SemanticType(_) => {
             let idx = c.push_const(cur.clone());
             c.emit(Instr::Const(idx));
         }
@@ -1571,7 +1572,7 @@ fn compile_make_func(
             param_types: Vec::new(),
         }
     } else {
-        extract_spec(&spec_val).map_err(|_| CompileError {
+        extract_spec(&spec_val, None).map_err(|_| CompileError {
             span,
             kind: CompileErrorKind::MalformedSpec,
         })?
@@ -1656,7 +1657,7 @@ fn compile_make_closure(
             kind: CompileErrorKind::MalformedSpec,
         });
     }
-    let spec = extract_spec(&spec_val).map_err(|_| CompileError {
+    let spec = extract_spec(&spec_val, None).map_err(|_| CompileError {
         span,
         kind: CompileErrorKind::MalformedSpec,
     })?;
@@ -1766,7 +1767,7 @@ fn peek_func_arity(data: &[Value], i: usize) -> Option<usize> {
             return Some(0);
         }
         let spec_val = &data[i + 1];
-        return extract_spec(spec_val).ok().map(|s| s.params.len());
+        return extract_spec(spec_val, None).ok().map(|s| s.params.len());
     }
     // `make function! [[params][body]]` — the `make` native creates a FuncDef
     // at runtime, but we need the arity at compile time so subsequent calls
@@ -1778,7 +1779,7 @@ fn peek_func_arity(data: &[Value], i: usize) -> Option<usize> {
             // The packed block is `[spec body]` — two blocks.
             if !inner.is_empty() {
                 if let Value::Block { .. } = &inner[series.index] {
-                    return extract_spec(&inner[series.index])
+                    return extract_spec(&inner[series.index], None)
                         .ok()
                         .map(|s| s.params.len());
                 }

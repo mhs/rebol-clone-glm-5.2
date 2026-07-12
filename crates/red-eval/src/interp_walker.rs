@@ -399,7 +399,8 @@ fn eval_prefix(
         | Value::Duration { .. }
         | Value::Bitset(_)
         | Value::Port(_)
-        | Value::Typeset(_) => Ok(cur),
+        | Value::Typeset(_)
+        | Value::SemanticType(_) => Ok(cur),
 
         // Path: a function-headed path is a refined call (`copy/part`,
         // `find/case`); anything else is a data-path select (`block/2`,
@@ -2074,7 +2075,11 @@ fn collect_call_args(
 /// typeset and the actual type. Untyped params (`None`) are skipped —
 /// back-compat with all pre-M89 funcs. Refinement-arg types are not checked
 /// (v0.7 deferral); only positional params.
-pub(crate) fn check_param_types(fd: &Rc<FuncDef>, args: &[Value]) -> Result<(), EvalError> {
+pub(crate) fn check_param_types(
+    fd: &Rc<FuncDef>,
+    args: &[Value],
+    env: &mut Env,
+) -> Result<(), EvalError> {
     let pts = &fd.param_types;
     if pts.is_empty() {
         return Ok(());
@@ -2085,12 +2090,31 @@ pub(crate) fn check_param_types(fd: &Rc<FuncDef>, args: &[Value]) -> Result<(), 
                 Some(a) => a,
                 None => return Ok(()), // arity error caught elsewhere
             };
-            if !ts.accepts(arg) {
+            // M176: use `accepts_with_env` which also checks the semantic
+            // ref (if any). For ordinary typesets (no semantic ref), this
+            // is identical to `accepts`.
+            if !ts.accepts_with_env(arg, env) {
+                // M177: if the typeset has a semantic ref, produce a rich
+                // error message using the semantic type name.
+                let label = if ts.semantic.borrow().is_some() {
+                    let sem = ts.semantic.borrow();
+                    if let Some(def) = sem.as_ref() {
+                        format!(
+                            "{} (base {}!)",
+                            def.name.as_str(),
+                            def.base.as_str(),
+                        )
+                    } else {
+                        crate::typeset::typeset_label(ts)
+                    }
+                } else {
+                    crate::typeset::typeset_label(ts)
+                };
                 return Err(EvalError::Native {
                     message: format!(
                         "type error: arg {} expected {}, got {}",
                         i + 1,
-                        crate::typeset::typeset_label(ts),
+                        label,
                         crate::natives::type_name(arg),
                     ),
                     span: arg.span_or_default(),
@@ -2107,7 +2131,7 @@ pub(crate) fn call_user_func(
     refs: &RefineArgs,
     env: &mut Env,
 ) -> Result<Value, EvalError> {
-    check_param_types(fd, &args)?;
+    check_param_types(fd, &args, env)?;
     let call_ctx = fd.ctx.clone();
     let mut slot = 0;
     for arg in args.iter() {
@@ -2178,7 +2202,7 @@ pub(crate) fn call_closure_func(
     env: &mut Env,
     captures: &Rc<Vec<std::cell::RefCell<Value>>>,
 ) -> Result<Value, EvalError> {
-    check_param_types(fd, &args)?;
+    check_param_types(fd, &args, env)?;
     let call_ctx = fd.ctx.clone();
     let mut slot = 0;
     for arg in args.iter() {

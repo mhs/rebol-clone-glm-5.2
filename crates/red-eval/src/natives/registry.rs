@@ -392,6 +392,9 @@ pub fn register_natives(env: &mut Env) {
     // Typesets (M89)
     crate::typeset::register_typeset_natives(env);
 
+    // Semantic types (M170–M178)
+    crate::semantic::register_semantic_natives(env);
+
     // Bitsets (M46)
     crate::bitset::register_bitset_natives(env);
 

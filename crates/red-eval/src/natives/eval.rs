@@ -5,6 +5,8 @@
 //! block. (`load` is registered by `io::register_io_natives` with the
 //! file-aware `load_extended` impl, which also handles the string! case.)
 
+use std::rc::Rc;
+
 use red_core::parser::load_source;
 use red_core::value::Value;
 use red_core::{Env, EvalError, RefineArgs};
@@ -36,6 +38,9 @@ pub(crate) fn do_native(
             let block = Value::block(body);
             dispatch_block(&block, env)
         }
+        // M174: `do` on an error! value raises it (Red parity). Used by
+        // generated semantic-type constructors: `do make error! "..."`.
+        Value::Error(ev) => Err(EvalError::Raised(Rc::clone(ev))),
         other => Err(EvalError::TypeError {
             expected: "block! or string!",
             found: type_name(other),

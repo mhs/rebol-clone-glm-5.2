@@ -31,7 +31,7 @@ pub(crate) fn function_native(
     }
     let spec_block = expect_block(args, 0, "function")?;
     let body_block = expect_block(args, 1, "function")?;
-    let spec = extract_spec(&spec_block)?;
+    let spec = extract_spec(&spec_block, Some(env))?;
     let body_series = match &body_block {
         Value::Block { series, .. } => series.clone(),
         _ => unreachable!("expect_block guarantees Block"),
@@ -70,7 +70,7 @@ pub(crate) fn func_native(
     }
     let spec_block = expect_block(args, 0, "func")?;
     let body_block = expect_block(args, 1, "func")?;
-    let spec = extract_spec(&spec_block)?;
+    let spec = extract_spec(&spec_block, Some(env))?;
     let body_series = match &body_block {
         Value::Block { series, .. } => series.clone(),
         _ => unreachable!("expect_block guarantees Block"),
@@ -157,7 +157,10 @@ pub(crate) struct FuncSpec {
 ///
 /// Words become positional params (in order) unless inside a refinement or
 /// `<local>` section.
-pub(crate) fn extract_spec(spec_block: &Value) -> Result<FuncSpec, EvalError> {
+pub(crate) fn extract_spec(
+    spec_block: &Value,
+    env: Option<&Env>,
+) -> Result<FuncSpec, EvalError> {
     let series = match spec_block {
         Value::Block { series, .. } => series.clone(),
         _ => {
@@ -215,7 +218,7 @@ pub(crate) fn extract_spec(spec_block: &Value) -> Result<FuncSpec, EvalError> {
             // skipped (refinement-arg types deferred to v0.8).
             Value::Block { .. } if matches!(section, Section::Params) => {
                 if let Some(last) = param_types.last_mut() {
-                    *last = Some(crate::typeset::parse_typeset_block(v)?);
+                    *last = Some(crate::typeset::parse_typeset_block(v, env)?);
                 }
             }
             _ => {
@@ -340,7 +343,7 @@ pub(crate) fn closure_native(
     }
     let spec_block = expect_block(args, 0, "closure")?;
     let body_block = expect_block(args, 1, "closure")?;
-    let spec = extract_spec(&spec_block)?;
+    let spec = extract_spec(&spec_block, Some(env))?;
     // Deep-clone the body so each `closure_native` invocation starts from
     // pristine source bindings. Without this, the first call mutates the
     // shared source-tree body (via `bind_function_body` +

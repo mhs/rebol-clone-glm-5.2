@@ -8,13 +8,18 @@
 //! runtime check is wired into the `func`/`function`/`closure` call path
 //! (walker + VM) via `FuncDef.param_types: Vec<Option<Rc<TypesetDef>>>`.
 //!
+//! M176: a typeset may carry an optional `semantic: Option<Rc<SemanticTypeDef>>`
+//! field. When `Some`, `accepts_with_env(v, env)` also runs the semantic
+//! type's compiled parse rule after the base-type check passes. This lets
+//! `[rgb!]` in a func spec validate the semantic constraint at call time.
+//!
 //! The typeset *algebra* (`union`/`intersect`/`complement` of typesets) is
 //! deferred to v0.8 — v0.7 ships the value type, the predicate, the
 //! constructors, and the typed-function-arg headline feature only.
 
 use std::rc::Rc;
 
-use red_core::value::{Span, Symbol, TypesetDef, Value};
+use red_core::value::{SemanticTypeDef, Span, Symbol, TypesetDef, Value};
 use red_core::{Env, EvalError, RefineArgs};
 
 use crate::natives::{arity_err, type_name};
@@ -29,11 +34,13 @@ use crate::natives::{arity_err, type_name};
 /// - `block!` — a flat series of type words (`[integer! float!]`). Each entry
 ///   must be a `Word`/`LitWord` naming a known leaf type or group word
 ///   (`integer!`/`float!`/`any-word!`/`number!`/...). Unknown words raise a
-///   `Native` error.
+///   `Native` error. M176: semantic type words (registered in
+///   `env.semantic_types`) are also accepted and populate the `semantic`
+///   field.
 /// - a single `Word`/`LitWord` — a one-element typeset (e.g. `make typeset!
 ///   integer!`).
 /// - a `typeset!` — shallow copy (new `Rc<TypesetDef>` with the same set).
-pub fn make_typeset(spec: &Value, _env: &mut Env) -> Result<Value, EvalError> {
+pub fn make_typeset(spec: &Value, env: &mut Env) -> Result<Value, EvalError> {
     match spec {
         Value::Block { series, .. } => {
             let data = series.data.borrow();
@@ -121,14 +128,6 @@ fn typeset_predicate(
     Ok(Value::Logic(matches!(args[0], Value::Typeset(_))))
 }
 
-// Note: a `typeset-match?` predicate native was considered but omitted —
-// testing a typeset's `accepts(v)` from script goes through the `func`
-// typed-arg path (`func [x [any-function!]][...]`), which is the headline
-// use case. A standalone `typeset-match?` would also trip a pre-existing
-// `infix_native_at` bug (GetWord is matched as infix, so `typeset-match?
-// (...) :+` misparses `:+` as the `+` operator); deferred to a future
-// infix-disambiguation milestone.
-
 // ---------------------------------------------------------------------------
 // Spec-block parsing (used by `func`/`function`/`closure` to populate
 // `FuncDef.param_types` from a `[integer! float!]` annotation block)
@@ -138,7 +137,18 @@ fn typeset_predicate(
 /// `Rc<TypesetDef>`. Used by `extract_spec` in `natives/func.rs` when a param
 /// is followed by a `Block` of type words. Returns an error for an empty
 /// block or one containing unknown/non-word entries.
-pub(crate) fn parse_typeset_block(block: &Value) -> Result<Rc<TypesetDef>, EvalError> {
+///
+/// M176: if a word in the block is NOT a known builtin type word but IS a
+/// registered semantic type (in `env.semantic_types`), the typeset's
+/// `semantic` field is set to the semantic type def, and the base type word
+/// is added to the `types` set. A typeset may contain at most one semantic
+/// type word (mixing `[rgb! integer!]` is an error). `env` is `Option`:
+/// `None` for compile-time paths (which only need arity, not semantic
+/// checking); `Some` for runtime func creation.
+pub(crate) fn parse_typeset_block(
+    block: &Value,
+    env: Option<&Env>,
+) -> Result<Rc<TypesetDef>, EvalError> {
     let series = match block {
         Value::Block { series, .. } => series.clone(),
         other => {
@@ -150,8 +160,55 @@ pub(crate) fn parse_typeset_block(block: &Value) -> Result<Rc<TypesetDef>, EvalE
     };
     let data = series.data.borrow();
     let mut syms: Vec<Symbol> = Vec::new();
+    let mut semantic: Option<Rc<SemanticTypeDef>> = None;
     for v in data.iter().skip(series.index) {
-        push_type_word(v, &mut syms)?;
+        let sym = match v {
+            Value::Word { sym, .. } | Value::LitWord { sym, .. } => sym,
+            other => {
+                return Err(EvalError::Native {
+                    message: format!(
+                        "make typeset!: expected type word, got {}",
+                        type_name(other)
+                    ),
+                    span: other.span_or_default(),
+                });
+            }
+        };
+        // M176: check semantic types FIRST (a registered semantic type
+        // `port!` takes precedence over the builtin `port!` type word).
+        let mut found_semantic = false;
+        if let Some(env) = env {
+            if let Some(def) = env.lookup_semantic_type(sym) {
+                if semantic.is_some() || syms.len() > 1 {
+                    return Err(EvalError::Native {
+                        message: format!(
+                            "semantic type {} cannot be mixed with other type words in a typeset",
+                            sym.as_str()
+                        ),
+                        span: v.span_or_default(),
+                    });
+                }
+                syms.push(def.base.clone());
+                semantic = Some(def);
+                found_semantic = true;
+            }
+        }
+        if !found_semantic {
+            if TypesetDef::is_known_type_word(sym) {
+                if semantic.is_some() {
+                    return Err(EvalError::Native {
+                        message: "semantic type cannot be mixed with other type words in a typeset".into(),
+                        span: v.span_or_default(),
+                    });
+                }
+                syms.push(sym.clone());
+            } else {
+                return Err(EvalError::Native {
+                    message: format!("make typeset!: unknown type word {}", sym.as_str()),
+                    span: v.span_or_default(),
+                });
+            }
+        }
     }
     if syms.is_empty() {
         return Err(EvalError::Native {
@@ -159,7 +216,9 @@ pub(crate) fn parse_typeset_block(block: &Value) -> Result<Rc<TypesetDef>, EvalE
             span: block.span_or_default(),
         });
     }
-    Ok(Rc::new(TypesetDef::new(syms)))
+    let ts = TypesetDef::new(syms);
+    *ts.semantic.borrow_mut() = semantic;
+    Ok(Rc::new(ts))
 }
 
 /// Format the expected-typeset portion of a TypeError-style message. Used by
@@ -381,5 +440,87 @@ mod tests {
     fn typeset_to_typeset_identity() {
         let v = val("t: make typeset! [integer!] to-typeset t");
         assert_eq!(mold_to_string(&v), "make typeset! [integer!]");
+    }
+
+    // ---- M176: func-spec with semantic types ----
+
+    #[test]
+    fn func_spec_with_semantic_type_rgb() {
+        let src = "define-type 'rgb! 'tuple! [r: byte g: byte b: byte] ";
+        let v = val(&format!(
+            "{}{}",
+            src, "f: func [c [rgb!]] [c] f 255.0.0"
+        ));
+        assert_eq!(mold_to_string(&v), "255.0.0");
+    }
+
+    #[test]
+    fn func_spec_with_semantic_type_rejects_wrong_arity() {
+        let src = "define-type 'rgb! 'tuple! [r: byte g: byte b: byte] ";
+        let e = err_src(&format!(
+            "{}{}",
+            src, "f: func [c [rgb!]] [c] f 192.168.1.10"
+        ));
+        assert!(e.contains("type error"), "got: {e}");
+    }
+
+    #[test]
+    fn func_spec_with_semantic_type_rejects_wrong_base() {
+        let src = "define-type 'rgb! 'tuple! [r: byte g: byte b: byte] ";
+        let e = err_src(&format!(
+            "{}{}",
+            src, "f: func [c [rgb!]] [c] f \"red\""
+        ));
+        assert!(e.contains("type error"), "got: {e}");
+    }
+
+    #[test]
+    fn func_spec_with_semantic_type_port() {
+        let src = "define-type 'port! 'integer! [range 1 65535] ";
+        let v = val(&format!(
+            "{}{}",
+            src, "f: func [p [port!]] [p] f 443"
+        ));
+        assert_eq!(mold_to_string(&v), "443");
+        let e = err_src(&format!(
+            "{}{}",
+            src, "f: func [p [port!]] [p] f 99999"
+        ));
+        assert!(e.contains("type error"), "got: {e}");
+    }
+
+    #[test]
+    fn func_spec_with_semantic_type_slug() {
+        let src = "define-type 'slug! 'string! [some slug-char] ";
+        let v = val(&format!(
+            "{}{}",
+            src, "f: func [s [slug!]] [s] f \"user-42\""
+        ));
+        assert_eq!(mold_to_string(&v), "\"user-42\"");
+        let e = err_src(&format!(
+            "{}{}",
+            src, "f: func [s [slug!]] [s] f \"bad slug\""
+        ));
+        assert!(e.contains("type error"), "got: {e}");
+    }
+
+    #[test]
+    fn func_spec_multiple_semantic_params() {
+        let src = concat!(
+            "define-type 'ipv4! 'tuple! [a: byte b: byte c: byte d: byte] ",
+            "define-type 'port! 'integer! [range 1 65535] ",
+        );
+        let v = val(&format!(
+            "{}{}",
+            src, "f: func [addr [ipv4!] p [port!]] [addr] f 192.168.1.10 443"
+        ));
+        assert_eq!(mold_to_string(&v), "192.168.1.10");
+    }
+
+    #[test]
+    fn func_spec_backcompat_no_semantic() {
+        // Existing funcs with builtin type specs still work (no semantic ref).
+        let v = val("f: func [x [integer!]] [x + 1] f 5");
+        assert_eq!(mold_to_string(&v), "6");
     }
 }

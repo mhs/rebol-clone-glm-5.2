@@ -319,7 +319,7 @@ pub fn disasm_source(src: &str, func: Option<&str>, file: Option<&str>) -> Resul
             // parsed via `extract_spec` to get params/refinements/locals.
             let spec_val = body_block.spec.clone();
             let body_series = body_block.body.clone();
-            let spec = crate::natives::extract_spec(&spec_val).map_err(|e| {
+            let spec = crate::natives::extract_spec(&spec_val, None).map_err(|e| {
                 Error::Eval(EvalError::Native {
                     message: e.to_string(),
                     span: spec_val.span_or_default(),

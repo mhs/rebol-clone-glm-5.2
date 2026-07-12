@@ -5,8 +5,10 @@
 //! both `integer!` → bitwise op; otherwise fall back to the truthiness-based
 //! logic op (preserves the pre-M17 behavior for mixed/other truthy values
 //! like `none and true`).
-
 use super::{truthy, type_name};
+
+use std::rc::Rc;
+
 use red_core::value::Value;
 use red_core::{Env, EvalError, RefineArgs};
 
@@ -167,6 +169,18 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
             let at = a.types.borrow();
             let bt = b.types.borrow();
             *at == *bt
+        }
+        // M170: semantic-type! equality — same name + base + shape (the
+        // schema block is a `Series`; comparing its contents would need deep
+        // value equality on every element, which is non-trivial for blocks
+        // carrying bindings. Compare by the identity-carrying fields, which
+        // is sufficient for the registry-keyed model — two semantic types
+        // with the same name are the same registered definition. Falls back
+        // to `Rc::ptr_eq` first as a fast path for the common "same value
+        // compared against itself" case.
+        (Value::SemanticType(a), Value::SemanticType(b)) => {
+            Rc::ptr_eq(a, b)
+                || (a.name == b.name && a.base == b.base && a.shape == b.shape)
         }
         // Word-family equality by name. Deviation from Red: real Red `=`
         // on `word!` compares bound values, not names; only `lit-word!`

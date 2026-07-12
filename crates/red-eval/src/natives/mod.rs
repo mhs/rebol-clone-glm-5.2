@@ -196,6 +196,7 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Bitset(_) => "bitset!",
         Value::Port(_) => "port!",
         Value::Typeset(_) => "typeset!",
+        Value::SemanticType(_) => "semantic-type!",
     }
 }
 

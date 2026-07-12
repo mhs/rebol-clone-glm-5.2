@@ -5,7 +5,7 @@ use chrono::{Datelike, Timelike};
 
 use crate::value::{
     BitsetDef, DateValue, HashDef, ImageDef, MapDef, MapKey, ModuleDef, MoneyValue, ObjectDef,
-    PortDef, TypesetDef, Value, VectorDef,
+    PortDef, SemanticTypeDef, Span, TypesetDef, Value, VectorDef,
 };
 
 /// Append the Red source form of `value` to `out`.
@@ -178,6 +178,7 @@ pub fn mold(value: &Value, out: &mut String) {
         Value::Bitset(b) => mold_bitset(&b.borrow(), out),
         Value::Port(p) => mold_port(&p.borrow(), out),
         Value::Typeset(t) => mold_typeset(t, out),
+        Value::SemanticType(t) => mold_semantic_type(t, out),
     }
 }
 
@@ -280,6 +281,7 @@ pub fn form(value: &Value, out: &mut String) {
         Value::Bitset(b) => mold_bitset(&b.borrow(), out),
         Value::Port(p) => mold_port(&p.borrow(), out),
         Value::Typeset(t) => mold_typeset(t, out),
+        Value::SemanticType(t) => mold_semantic_type(t, out),
     }
 }
 
@@ -526,6 +528,25 @@ fn mold_typeset(t: &TypesetDef, out: &mut String) {
         }
         out.push_str(w.as_str());
     }
+    out.push(']');
+}
+
+/// M170: mold a `semantic-type!` as
+/// `make semantic-type! [name: <nm> base: <base> schema: <molded-schema>]`.
+/// The form is reparseable via `make semantic-type!` (the schema block is
+/// molded verbatim, preserving its source shape).
+fn mold_semantic_type(t: &SemanticTypeDef, out: &mut String) {
+    out.push_str("make semantic-type! [name: ");
+    out.push_str(t.name.as_str());
+    out.push_str(" base: ");
+    out.push_str(t.base.as_str());
+    out.push_str(" schema: ");
+    // Mold the schema series from its head so the block is rendered in full.
+    let schema_block = Value::Block {
+        series: t.schema.clone(),
+        span: Span::default(),
+    };
+    mold(&schema_block, out);
     out.push(']');
 }
 

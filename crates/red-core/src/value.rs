@@ -494,6 +494,14 @@ pub enum Value {
     /// covers `v`. Reference-identity for `same?` (mirrors `Bitset`/`Hash`);
     /// deep set-equality for `=`.
     Typeset(Rc<TypesetDef>),
+    /// A semantic-type! value (M170): a parse-backed schema over a base
+    /// datatype. Synthetic — produced by `make semantic-type!`/`define-type`;
+    /// carries no source span of its own. The underlying `SemanticTypeDef`
+    /// holds the name, base type, shape, schema block, and a lazily-compiled
+    /// `parse` rule. `valid? 'name value` runs the parse rule over
+    /// `to_components(value)`; generated predicates (`rgb?`) and func-spec
+    /// annotations (`[rgb!]`) route through the same path.
+    SemanticType(Rc<SemanticTypeDef>),
 }
 
 /// Payload of a `Value::Error`. M42 extends the prior message-only stub to
@@ -1509,6 +1517,7 @@ pub fn type_name_for(v: &Value) -> &'static str {
         Value::Bitset(_) => "bitset!",
         Value::Port(_) => "port!",
         Value::Typeset(_) => "typeset!",
+        Value::SemanticType(_) => "semantic-type!",
     }
 }
 
@@ -1559,6 +1568,7 @@ pub const TYPE_WORDS: &[&str] = &[
     "bitset!",
     "port!",
     "typeset!",
+    "semantic-type!",
 ];
 
 /// Group-word → predicate-fn table for `TypesetDef::accepts`. A group word in
@@ -1599,6 +1609,215 @@ pub fn group_members(group: &str) -> Option<&'static [&'static str]> {
     }
 }
 
+/// M171: extract the *component view* of a value — the form `parse` consumes
+/// when validating a semantic type. The shape of the result depends on the
+/// base type (see `shape_of`):
+///
+/// - **Positional** (`tuple!`/`pair!`/`date!`/`duration!`): a `block!` of
+///   the components (`255.0.0` → `[255 0 0]`; `100x50` → `[100 50]`;
+///   `29-Jun-2024` → `[2024 6 29]`).
+/// - **Scalar** (`integer!`/`float!`/`decimal!`/`percent!`/`money!`): a
+///   single-element `block!` (`8080` → `[8080]`). The `parse` rule's `set
+///   n integer!` consumes the one element.
+/// - **Streamed** (`string!`/`binary!`/`block!`/`paren!`/`url!`/`file!`/
+///   `issue!`/`email!`/`tag!`): the value itself (for `string!`/`binary!`/
+///   `block!`/`paren!`) or a `string!` rendering (for `url!`/`file!`/
+///   `issue!`/`email!`/`tag!` — `parse` runs over the char stream).
+/// - **Named** (`object!`/`module!`/`map!`/`hash!`): a `block!` of
+///   alternating `word value` pairs (`[name "Ada" age 36]`), in declaration
+///   order. `parse` matches `'name set name <rule>` etc. against this.
+///
+/// Fallback (any other type, including `none!`/`logic!`/`char!`/word-family/
+/// `func!`/...): a single-element `block!` `[value]` — the scalar shape.
+/// These types don't have registered semantic types in v1, so this is just
+/// the safety-net default.
+pub fn to_components(v: &Value) -> Value {
+    match v {
+        // ---- Positional ----
+        Value::Tuple { bytes, span } => {
+            let comps: Vec<Value> = bytes
+                .iter()
+                .map(|&b| Value::Integer {
+                    n: b as i64,
+                    span: Span::default(),
+                })
+                .collect();
+            Value::Block {
+                series: Series::new(comps),
+                span: *span,
+            }
+        }
+        Value::Pair { x, y, span } => Value::Block {
+            series: Series::new(vec![(**x).clone(), (**y).clone()]),
+            span: *span,
+        },
+        Value::Date { dt, span } => {
+            use chrono::{Datelike, Timelike};
+            let d = &dt.dt;
+            Value::Block {
+                series: Series::new(vec![
+                    Value::Integer {
+                        n: d.year() as i64,
+                        span: *span,
+                    },
+                    Value::Integer {
+                        n: d.month() as i64,
+                        span: *span,
+                    },
+                    Value::Integer {
+                        n: d.day() as i64,
+                        span: *span,
+                    },
+                ]),
+                span: *span,
+            }
+        }
+        Value::Duration { d, span } => {
+            let secs = d.num_seconds();
+            let hours = secs / 3600;
+            let minutes = (secs % 3600) / 60;
+            let seconds = secs % 60;
+            Value::Block {
+                series: Series::new(vec![
+                    Value::Integer {
+                        n: hours,
+                        span: *span,
+                    },
+                    Value::Integer {
+                        n: minutes,
+                        span: *span,
+                    },
+                    Value::Integer {
+                        n: seconds,
+                        span: *span,
+                    },
+                ]),
+                span: *span,
+            }
+        }
+        // ---- Scalar ----
+        Value::Integer { .. }
+        | Value::Float { .. }
+        | Value::Decimal { .. }
+        | Value::Percent { .. }
+        | Value::Money { .. } => Value::Block {
+            series: Series::new(vec![v.clone()]),
+            span: Span::default(),
+        },
+        // ---- Streamed (value itself) ----
+        Value::String { .. } | Value::String8 { .. } | Value::Block { .. } | Value::Paren { .. } => {
+            v.clone()
+        }
+        // ---- Streamed (rendered to string!) ----
+        Value::Url { url, .. } => Value::String {
+            s: Rc::clone(url),
+            span: Span::default(),
+        },
+        Value::File { path, .. } => Value::String {
+            s: Rc::clone(path),
+            span: Span::default(),
+        },
+        Value::Issue { s, .. } => Value::String {
+            s: Rc::clone(s),
+            span: Span::default(),
+        },
+        Value::Email { addr, .. } => Value::String {
+            s: Rc::clone(addr),
+            span: Span::default(),
+        },
+        Value::Tag { text, .. } => Value::String {
+            s: Rc::clone(text),
+            span: Span::default(),
+        },
+        // ---- Named (object/module) ----
+        Value::Object(o) => {
+            let borrow = o.borrow();
+            let words = borrow.ctx.words();
+            let mut out: Vec<Value> = Vec::with_capacity(words.len() * 2);
+            for w in words.iter() {
+                if w.as_str() == "self" {
+                    continue;
+                }
+                let idx = match borrow.ctx.index_of(w) {
+                    Some(i) => i,
+                    None => continue,
+                };
+                out.push(Value::Word {
+                    sym: w.clone(),
+                    binding: Binding::Unbound,
+                    span: Span::default(),
+                });
+                out.push(borrow.ctx.slot_value(idx));
+            }
+            Value::Block {
+                series: Series::new(out),
+                span: Span::default(),
+            }
+        }
+        Value::Module(m) => {
+            let borrow = m.borrow();
+            let exports = borrow.exports.borrow();
+            let words = borrow.ctx.words();
+            let mut out: Vec<Value> = Vec::with_capacity(words.len() * 2);
+            for w in words.iter() {
+                if !exports.contains(w) {
+                    continue;
+                }
+                let idx = match borrow.ctx.index_of(w) {
+                    Some(i) => i,
+                    None => continue,
+                };
+                out.push(Value::Word {
+                    sym: w.clone(),
+                    binding: Binding::Unbound,
+                    span: Span::default(),
+                });
+                out.push(borrow.ctx.slot_value(idx));
+            }
+            Value::Block {
+                series: Series::new(out),
+                span: Span::default(),
+            }
+        }
+        // Map/hash: alternating key/value pairs (already the series form).
+        Value::Map(m) => {
+            let borrow = m.borrow();
+            let keys = borrow.keys();
+            let mut out: Vec<Value> = Vec::with_capacity(keys.len() * 2);
+            for k in keys {
+                let mk = MapKey::from_value(&k).unwrap_or(MapKey::None);
+                let val = borrow.get(&mk).unwrap_or(Value::None);
+                out.push(k);
+                out.push(val);
+            }
+            Value::Block {
+                series: Series::new(out),
+                span: Span::default(),
+            }
+        }
+        Value::Hash(h) => {
+            let borrow = h.borrow();
+            let keys = borrow.keys();
+            let mut out: Vec<Value> = Vec::with_capacity(keys.len() * 2);
+            for k in keys {
+                let mk = MapKey::from_value(&k).unwrap_or(MapKey::None);
+                let val = borrow.get(&mk).unwrap_or(Value::None);
+                out.push(k);
+                out.push(val);
+            }
+            Value::Block {
+                series: Series::new(out),
+                span: Span::default(),
+            }
+        }
+        // ---- Fallback (scalar shape) ----
+        _ => Value::Block {
+            series: Series::new(vec![v.clone()]),
+            span: Span::default(),
+        },
+    }
+}
+
 /// A typeset! value's payload (M89): a set of type-word symbols (e.g.
 /// `'integer!`, `'float!`, `'any-word!`). `accepts(v)` is the runtime type-
 /// check: true iff `type_name_for(v)` is in the set literally, or one of the
@@ -1609,6 +1828,13 @@ pub fn group_members(group: &str) -> Option<&'static [&'static str]> {
 #[derive(Clone, Debug, Default)]
 pub struct TypesetDef {
     pub types: RefCell<HashSet<Symbol>>,
+    /// M176: optional semantic type reference. When `Some`, `accepts(v)`
+    /// also runs the semantic type's compiled parse rule over
+    /// `to_components(v)` after the base-type check passes. A typeset with a
+    /// semantic ref should contain only the semantic type's base type word
+    /// (no mixing — enforced by `parse_typeset_block`). `None` = ordinary
+    /// typeset (back-compat with all pre-M176 typesets).
+    pub semantic: RefCell<Option<Rc<SemanticTypeDef>>>,
 }
 
 impl TypesetDef {
@@ -1618,6 +1844,7 @@ impl TypesetDef {
     pub fn new<I: IntoIterator<Item = Symbol>>(syms: I) -> Self {
         TypesetDef {
             types: RefCell::new(syms.into_iter().collect()),
+            semantic: RefCell::new(None),
         }
     }
 
@@ -1629,6 +1856,16 @@ impl TypesetDef {
         TypesetDef::new(syms)
     }
 
+    /// M176: construct a typeset with a semantic type reference. The `types`
+    /// set is populated with the semantic type's base word (so the base-type
+    /// check in `accepts` passes first). The `semantic` field is set to the
+    /// given def.
+    pub fn with_semantic(def: Rc<SemanticTypeDef>) -> Self {
+        let ts = TypesetDef::from_words(&[def.base.as_str()]);
+        *ts.semantic.borrow_mut() = Some(def);
+        ts
+    }
+
     /// True iff `sym` is either a known leaf type word (`TYPE_WORDS` entry)
     /// or a known group word (`group_members` returns `Some`).
     pub fn is_known_type_word(sym: &Symbol) -> bool {
@@ -1637,6 +1874,7 @@ impl TypesetDef {
 
     /// The runtime type-check. `true` iff `v`'s type-name is in the set
     /// literally or is covered by one of the group words in the set.
+    /// Does NOT check the semantic ref (use `accepts_with_env` for that).
     pub fn accepts(&self, v: &Value) -> bool {
         let t = type_name_for(v);
         let set = self.types.borrow();
@@ -1651,6 +1889,69 @@ impl TypesetDef {
             }
         }
         false
+    }
+
+    /// M176: full runtime type-check including the semantic ref. If
+    /// `self.semantic` is `Some`, also runs the semantic type's compiled
+    /// parse rule over `to_components(v)` after the base check passes.
+    /// The `env` is needed to run `parse` (which evaluates paren blocks
+    /// in the compiled rule). If `semantic` is `None`, this is identical to
+    /// `accepts`.
+    pub fn accepts_with_env(&self, v: &Value, env: &mut crate::env::Env) -> bool {
+        // Fast path: no semantic ref → ordinary accepts.
+        if self.semantic.borrow().is_none() {
+            return self.accepts(v);
+        }
+        // Base type check first.
+        if !self.accepts(v) {
+            return false;
+        }
+        // Semantic check: run the compiled parse rule.
+        let def = self.semantic.borrow().clone();
+        let def = match def {
+            Some(d) => d,
+            None => return true,
+        };
+        // Ensure compiled (lazy).
+        if def.compiled.borrow().is_none() {
+            // Compile via the schema compiler. We need the shape and base.
+            // The compile functions are in red-eval, not red-core. We call
+            // a trait-object callback stored on Env, or we inline a simple
+            // compile here. For now, delegate to `env` which has access to
+            // the semantic module via the `red_eval` crate.
+            //
+            // Actually, `to_components` + `parse` are both in red-core or
+            // accessible from here. The compile function is in red-eval.
+            // We can't call it from here without a circular dep.
+            //
+            // Alternative: the `define-type` native (in red-eval) compiles
+            // eagerly, so the compiled rule should always be `Some` by the
+            // time `accepts_with_env` is called. If it's `None`, return
+            // false (defensive — the semantic type wasn't properly defined).
+            return false;
+        }
+        let compiled = def.compiled.borrow().clone().unwrap();
+        let components = to_components(v);
+        let rule_block = Value::Block {
+            series: (*compiled).clone(),
+            span: Span::default(),
+        };
+        // Pre-allocate capture words in user_ctx (idempotent).
+        let data = compiled.data.borrow();
+        scan_set_words_for_ctx(&data[compiled.index..], &env.user_ctx);
+        drop(data);
+        // Run parse. We need to call the parse native, but it's in
+        // red-eval. Instead, we use the `Env`'s `natives` to find `parse`
+        // and call it. But `NativeFn` is a `fn` pointer — we can call it.
+        if let Some(fd) = env.natives.get(&Symbol::new("parse")) {
+            if let Some(f) = fd.native {
+                let parse_args = [components, rule_block];
+                let result = f(&parse_args, &crate::env::RefineArgs::empty(), env);
+                return matches!(result, Ok(Value::Logic(true)));
+            }
+        }
+        // If parse isn't available (shouldn't happen), fall back to true.
+        true
     }
 
     /// Sorted iteration of the type words in the set, for stable mold output.
@@ -1669,6 +1970,110 @@ impl TypesetDef {
     /// True iff the set is empty.
     pub fn is_empty(&self) -> bool {
         self.types.borrow().is_empty()
+    }
+}
+
+/// M176: scan a rule slice for `set <word>` patterns and allocate slots in
+/// `ctx` for the capture words. Recurses into sub-blocks. Used by
+/// `TypesetDef::accepts_with_env` to pre-allocate capture words before
+/// running the compiled parse rule.
+fn scan_set_words_for_ctx(items: &[Value], ctx: &Context) {
+    let mut i = 0;
+    while i + 1 < items.len() {
+        if let Value::Word { sym, .. } = &items[i] {
+            if sym.as_str() == "set" {
+                if let Value::Word { sym: target, .. } = &items[i + 1] {
+                    ctx.slot_index(target.clone());
+                }
+            }
+        }
+        if let Value::Block { series, .. } = &items[i] {
+            let data = series.data.borrow();
+            scan_set_words_for_ctx(&data[series.index..], ctx);
+        }
+        i += 1;
+    }
+}
+
+/// Which extraction strategy a base datatype uses to expose its component
+/// view for `parse`-based semantic validation (M170). Determines how the
+/// schema compiler (`compile_schema` in `red-eval::semantic`) lowers the
+/// user-facing schema block into a `parse` rule.
+///
+/// - `Positional`: a fixed-arity sequence of named components (`tuple!`/
+///   `pair!`/`date!`/`time!`).
+/// - `Scalar`: a single value with a constraint (`integer!`/`float!`/
+///   `percent!`).
+/// - `Streamed`: a sequence of tokens or characters, possibly open-ended
+///   (`string!`/`binary!`/`block!`/`url!`).
+/// - `Named`: a set of required/optional fields with per-field constraints
+///   (`object!`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticShape {
+    Positional,
+    Scalar,
+    Streamed,
+    Named,
+}
+
+/// A `semantic-type!` value's payload (M170): a parse-backed schema over a
+/// base datatype. The raw value remains its base type at runtime
+/// (`type? red` ⇒ `tuple!`); `rgb? red` runs the compiled `parse` rule over
+/// the value's component view.
+///
+/// A semantic type definition is constructed by `make semantic-type!` (or
+/// `define-type` — M172) and stored in `Env.semantic_types` keyed by `name`.
+/// The `compiled` parse rule is built lazily on first `valid?`/predicate call
+/// (or eagerly by `define-type`) and cached in the `RefCell` so subsequent
+/// checks avoid recompilation.
+///
+/// Synthetic — produced at runtime; carries no source span of its own.
+/// Reference-identity for `same?` (mirrors `Typeset`/`Bitset`); deep equality
+/// compares `name`/`base`/`shape`/`schema`.
+#[derive(Clone, Debug)]
+pub struct SemanticTypeDef {
+    /// The semantic type name, e.g. `'rgb!`. Used to key the registry and as
+    /// the predicate/constructor word stem (`rgb?`/`rgb`).
+    pub name: Symbol,
+    /// The underlying base datatype name, e.g. `'tuple!`. `valid?` checks
+    /// `type_name_for(value) == base` before running the parse rule.
+    pub base: Symbol,
+    /// Which extraction strategy the base type uses (positional/scalar/
+    /// streamed/named). Derived from `base` via `shape_of`.
+    pub shape: SemanticShape,
+    /// The user-facing schema block (`[r: byte g: byte b: byte]`). Stored as
+    /// a `Series` so it can be molded back and inspected for tooling. The
+    /// compiled parse rule is derived from this.
+    pub schema: Series,
+    /// Lazily-compiled `parse` rule (cached). `None` until the first
+    /// `valid?`/predicate call compiles it (or `define-type` compiles it
+    /// eagerly). Stored as `Rc<Series>` so the `parse` native can clone it
+    /// cheaply.
+    pub compiled: RefCell<Option<Rc<Series>>>,
+}
+
+impl SemanticTypeDef {
+    /// Construct a new, uncompiled semantic type definition.
+    pub fn new(name: Symbol, base: Symbol, shape: SemanticShape, schema: Series) -> Self {
+        SemanticTypeDef {
+            name,
+            base,
+            shape,
+            schema,
+            compiled: RefCell::new(None),
+        }
+    }
+}
+
+impl Default for SemanticTypeDef {
+    fn default() -> Self {
+        SemanticTypeDef {
+            name: Symbol::new(""),
+            base: Symbol::new(""),
+            shape: SemanticShape::Scalar,
+            schema: Series::empty(),
+            compiled: RefCell::new(None),
+        }
     }
 }
 
@@ -2312,7 +2717,8 @@ impl Value {
             | Value::Image(_)
             | Value::Bitset(_)
             | Value::Port(_)
-            | Value::Typeset(_) => None,
+            | Value::Typeset(_)
+            | Value::SemanticType(_) => None,
         }
     }
 
@@ -2643,6 +3049,11 @@ impl Value {
     /// Constructor shorthand for a typeset! value wrapping `def`. (M89.)
     pub fn typeset(def: TypesetDef) -> Self {
         Value::Typeset(Rc::new(def))
+    }
+
+    /// Constructor shorthand for a semantic-type! value wrapping `def`. (M170.)
+    pub fn semantic_type(def: SemanticTypeDef) -> Self {
+        Value::SemanticType(Rc::new(def))
     }
 }
 

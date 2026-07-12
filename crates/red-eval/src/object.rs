@@ -198,6 +198,7 @@ fn same_predicate(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<
         (Value::Bitset(a), Value::Bitset(b)) => Rc::ptr_eq(a, b),
         (Value::Port(a), Value::Port(b)) => Rc::ptr_eq(a, b),
         (Value::Typeset(a), Value::Typeset(b)) => Rc::ptr_eq(a, b),
+        (Value::SemanticType(a), Value::SemanticType(b)) => Rc::ptr_eq(a, b),
         _ => false,
     };
     Ok(Value::Logic(same))

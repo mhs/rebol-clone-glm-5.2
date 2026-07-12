@@ -34,6 +34,7 @@ pub mod parse;
 pub mod path;
 pub mod query;
 pub mod reflection;
+pub mod semantic;
 pub mod series;
 pub mod stdlib;
 pub mod strings;

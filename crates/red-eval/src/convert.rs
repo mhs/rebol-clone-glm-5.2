@@ -498,6 +498,9 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
         "image!" | "image" => return crate::image::make_image(spec, env),
         "bitset!" | "bitset" => return crate::bitset::make_bitset(spec, env),
         "typeset!" | "typeset" => return crate::typeset::make_typeset(spec, env),
+        "semantic-type!" | "semantic-type" => {
+            return crate::semantic::make_semantic_type(spec, env)
+        }
         "function!" | "function" => {
             // Original behavior: spec is a packed `[[spec][body]]` block.
             let packed = expect_block(&[args[0].clone(), spec.clone()], 1, "make")?;
@@ -536,6 +539,14 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
             return func_native(&[spec_block, body_block], &RefineArgs::empty(), env);
         }
         other => {
+            // M178: `make <semantic-type>! <value>` — when the type name isn't
+            // a builtin, check if it's a registered semantic type. If so,
+            // validate the value and return it (untagged). This is the
+            // standard Rebol `make <type>! <spec>` construction pattern.
+            if let Some(def) = env.lookup_semantic_type(&Symbol::new(other)) {
+                return crate::semantic::validate_value(&def, spec)
+                    .map(|_| spec.clone());
+            }
             return Err(EvalError::Native {
                 message: format!("make: {other:?} type not supported in POC"),
                 span: args[0].span_or_default(),
@@ -1429,6 +1440,9 @@ fn to_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value,
         "image!" | "image" => crate::image::to_image(one, &RefineArgs::empty(), env),
         "bitset!" | "bitset" => crate::bitset::to_bitset(one, &RefineArgs::empty(), env),
         "typeset!" | "typeset" => crate::typeset::to_typeset(one, &RefineArgs::empty(), env),
+        "semantic-type!" | "semantic-type" => {
+            crate::semantic::to_semantic_type(one, &RefineArgs::empty(), env)
+        }
         other => Err(EvalError::Native {
             message: format!("to: {other:?} type not supported in POC"),
             span: args[0].span_or_default(),

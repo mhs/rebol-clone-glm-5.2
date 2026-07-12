@@ -326,6 +326,13 @@ pub struct Env {
     /// M70: count of failed tests — read by the CLI for the exit code
     /// (0 = all pass, >0 = failures).
     pub test_failed: usize,
+    /// M170: semantic-type registry. Maps a semantic type name (`'rgb!`) to
+    /// its `SemanticTypeDef`. Populated by `make semantic-type!`/`define-type`;
+    /// consulted by `valid?`/generated predicates (`rgb?`)/`TypesetDef::accepts`
+    /// (the func-spec path — M176). `define-type` overwrites any existing entry
+    /// (re-definition shadows the old one; existing predicates/constructors
+    /// registered on `natives` keep their old behavior until re-defined).
+    pub semantic_types: HashMap<Symbol, Rc<crate::value::SemanticTypeDef>>,
     /// High-water mark of `call_stack.len()` since the last
     /// [`Self::reset_stats`] call. Used by the v0.3 VM milestones to prove
     /// tail-call stack bounds. Only present under the `stats` cargo feature;
@@ -396,6 +403,7 @@ impl Env {
             test_results: Vec::new(),
             tests_run: false,
             test_failed: 0,
+            semantic_types: HashMap::new(),
             #[cfg(feature = "stats")]
             max_frame_depth: 0,
             #[cfg(feature = "stats")]
@@ -456,6 +464,21 @@ impl Env {
     pub fn invalidate_native_index(&mut self) {
         self.natives_by_idx = None;
         self.native_names_by_idx = None;
+    }
+
+    /// M170: register a semantic type definition in `semantic_types`, keyed
+    /// by `def.name`. Overwrites any prior entry with the same name (re-
+    /// definition shadows the old one). Used by `make semantic-type!` and
+    /// `define-type`.
+    pub fn register_semantic_type(&mut self, def: Rc<crate::value::SemanticTypeDef>) {
+        self.semantic_types.insert(def.name.clone(), def);
+    }
+
+    /// M170: look up a registered semantic type by its name word (e.g.
+    /// `'rgb!`). Returns `None` if no semantic type with that name is
+    /// registered.
+    pub fn lookup_semantic_type(&self, sym: &Symbol) -> Option<Rc<crate::value::SemanticTypeDef>> {
+        self.semantic_types.get(sym).cloned()
     }
 
     /// M31: enable per-instr VM tracing to `writer`. The VM appends one line

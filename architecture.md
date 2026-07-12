@@ -1517,3 +1517,195 @@ Golden fixtures are file-driven: drop a `*.red` + `*.expected` pair, get a
 test for free. Error fixtures assert the rendered `*** Error:` line
 contains a substring. Network-dependent url tests in `io.rs` are marked
 `#[ignore]` so `cargo test` stays hermetic.
+
+## v0.11 additions (M170–M178): parse-backed semantic types
+
+Implements `docs/plans/future-plan-parse_backed_semantic_types.md`. A
+*semantic type* is a schema over a base datatype, compiled to a `parse` rule
+run against the value's *component view*. The raw value remains its base
+type at runtime; `rgb? red` runs the compiled parse rule over
+`to-components red`.
+
+```rebol
+type rgb!: tuple!   [r: byte  g: byte  b: byte]
+type port!: integer! [range 1 65535]
+type slug!: string! [some slug-char]
+```
+
+### M170 — `semantic-type!` value & registry
+
+```rust
+pub enum SemanticShape { Positional, Scalar, Streamed, Named }
+
+pub struct SemanticTypeDef {
+    pub name: Symbol,       // 'rgb!
+    pub base: Symbol,       // 'tuple!
+    pub shape: SemanticShape, // derived from base via shape_of
+    pub schema: Series,     // the user-facing schema block
+    pub compiled: RefCell<Option<Rc<Series>>>, // lazy-compiled parse rule (cached)
+}
+
+// red-core/src/value.rs
+pub enum Value {
+    ...
+    SemanticType(Rc<SemanticTypeDef>),  // synthetic, no span
+}
+```
+
+`Env.semantic_types: HashMap<Symbol, Rc<SemanticTypeDef>>` is the registry,
+keyed by the type name word. `make semantic-type! [name: 'rgb! base: 'tuple!
+schema: [...]]` builds a `SemanticTypeDef`, derives `shape` from `base` via
+`shape_of`, and registers it. `semantic-type?` is the predicate; `to-semantic-type`
+is the converter (same as `make`). The compiled parse rule is left `None`
+(lazy) — M172's `define-type`/`valid?` compiles it on first use.
+
+`shape_of(base) -> SemanticShape` is the static dispatch table:
+`tuple!`/`pair!`/`date!`/`duration!` → Positional; `integer!`/`float!`/
+`decimal!`/`percent!`/`money!` → Scalar; `string!`/`binary!`/`block!`/
+`paren!`/`url!`/`file!`/`issue!`/`email!`/`tag!` → Streamed;
+`object!`/`module!`/`map!`/`hash!` → Named.
+
+Lives in `crates/red-eval/src/semantic.rs` (new module); registered from
+`natives/registry.rs::register_natives` alongside the typeset natives. The
+`make`/`to` dispatchers in `convert.rs` route `"semantic-type!"` to
+`semantic::make_semantic_type`/`to_semantic_type`. Molds as
+`make semantic-type! [name: <nm> base: <base> schema: <molded-schema>]`.
+`same?` uses `Rc::ptr_eq`; `=` compares name+base+shape (two distinct
+allocations with the same name are `equal?` — registry-keyed identity).
+
+### M171 — Component-extraction protocol
+
+`to_components(value: &Value) -> Value` in `red-core/src/value.rs` extracts
+the component view — the form `parse` consumes. The `to-components value`
+native wraps it. Per-base dispatch:
+
+| Base | Returns | Shape |
+|---|---|---|
+| `tuple!` | `block!` of byte components | positional |
+| `pair!` | `block!` `[x y]` | positional |
+| `date!` | `block!` `[year month day]` | positional |
+| `duration!` | `block!` `[hours minutes seconds]` | positional |
+| `integer!`/`float!`/`decimal!`/`percent!`/`money!` | `block!` `[n]` | scalar |
+| `string!`/`binary!`/`block!`/`paren!` | value itself | streamed |
+| `url!`/`file!`/`issue!`/`email!`/`tag!` | `string!` (rendered) | streamed |
+| `object!` | `block!` of `word value` pairs | named |
+| `module!` | `block!` of exported `word value` pairs | named |
+| `map!`/`hash!` | `block!` of `key value` pairs | named |
+| fallback | `block!` `[value]` | scalar |
+
+### M172 — Schema compiler (positional + scalar)
+
+`compile_schema(schema, shape, base) -> Result<Series, EvalError>` in
+`semantic.rs` dispatches on `shape`. Positional and scalar shapes compile
+to a `parse` rule block (a `Series`) using `set <word> skip if (check)`:
+`set` captures one element from the block input; `skip` matches any
+element; `if (paren)` evaluates the paren and succeeds iff truthy.
+
+- **Positional** (`compile_positional`): schema `[r: byte g: byte b: byte]`
+  compiles to `[set r skip if (all [integer? r r >= 0 r <= 255]) set g
+  skip ... end]`. The `set-word` names become capture words; the constraint
+  (`byte`/`integer`/`positive-integer`/...) compiles to a paren check.
+- **Scalar** (`compile_scalar`): schema `[range 1 65535]` compiles to
+  `[set n skip if (all [integer? n n >= 1 n <= 65535]) end]`. `range`
+  accepts integer bounds; `where [predicate]` inlines the predicate block
+  after an `integer? n` type guard. For `number!` base, the type guard
+  accepts `integer!` or `float!`.
+
+`define-type 'name 'base [schema]` is the public surface: compiles eagerly
+(fail-fast on bad schemas), pre-allocates capture words in `user_ctx`,
+registers in `env.semantic_types`. `valid? 'name value` checks the base
+type (via `TypesetDef::accepts` — handles `number!` group words), runs
+`parse to-components(value) compiled-rule`, returns `logic!`.
+
+Primitive constraints: `byte`, `integer`, `positive-integer`,
+`non-negative-integer`, `nonzero-integer`, `number`. Each compiles to a
+paren check expression using natives (`integer?`, `float?`, `>=`, `<=`,
+`>`, `<>`, `all`).
+
+### M173 — Schema compiler (streamed + named shapes)
+
+**Streamed** (`compile_streamed`): the schema body is a sequence of
+parse-dialect expressions, already valid parse rules. The compiler inlines
+charset primitive words (`alpha`/`digit`/`hex-char`/`slug-char`/`url-char`)
+as `Value::Bitset` literals and `segment` as a block sub-rule
+(`[set __seg skip if (any [word? __seg string? __seg])]`). Appends `end`.
+Schema form: `[some slug-char]` compiles to
+`[some <bitset> end]`.
+
+**Named** (`compile_named`): the schema is `set-word constraint` pairs with
+optional `optional` markers. Compiles to a parse rule over the object's
+field/value pair block. Required: `'name set name skip if (check)`. Optional:
+`opt ['name set name skip if (check)]`. A constraint that names another
+semantic type (e.g. `email!`) compiles to a recursive `(valid? 'email! name)`
+paren. Schema form: `[name: string age: optional [range 0 150]]`.
+
+### M174 — Generated predicates & constructors
+
+`define-type` auto-generates a predicate (`rgb?`) and a constructor (`rgb`)
+as user-defined functions (not raw `NativeFn` — avoids the fn-pointer-
+can't-capture-state problem). The predicate body is
+`[valid? 'rgb! __arg0]`; the constructor body varies by shape:
+- Positional: `[result: make <base>! reduce [args...] if not valid? '<type>
+  result [do make error! "..."] result]` — builds the base value from
+  components, validates, returns.
+- Scalar/Streamed/Named: `[if not valid? '<type> __arg0 [do make error!
+  "..."] __arg0]` — validates and returns.
+
+Both are bound via `bind_function_body`. If the name collides with an
+existing native (e.g. `port?` is a builtin type predicate), registration is
+skipped — the user uses `valid?` directly. `do` on an `error!` value now
+raises it (Red parity — needed by the constructor's `do make error! "..."`).
+`env.invalidate_native_index()` is called after registration so the next
+`dispatch_block` rebuilds the VM's native index with the new entries.
+
+### M176 — Func-spec `TypesetDef` integration
+
+`TypesetDef` gains a `semantic: RefCell<Option<Rc<SemanticTypeDef>>>`
+field. `parse_typeset_block` (used by `extract_spec` in `func.rs`) checks
+semantic types FIRST — a registered semantic type `port!` takes precedence
+over the builtin `port!` type word. The typeset's `types` set is populated
+with the semantic type's base word, and `semantic` is set to the def.
+
+`accepts_with_env(v, env) -> bool` extends `accepts(v)`: after the base-type
+check passes, if `semantic` is `Some`, it runs the compiled parse rule
+(`parse to-components(v) def.compiled`) and returns the match result. The
+fast path (`semantic.is_none()`) is identical to the original `accepts`.
+
+The walker (`check_param_types`) and VM (`prepare_call`) call paths use
+`accepts_with_env(arg, env)` instead of `accepts(arg)`. The VM's `MakeFunc`
+handler passes `Some(env)` to `extract_spec` so semantic typesets are
+populated at func-creation time (not just at compile time). The compile-time
+paths (scope analyzer) pass `None` — they only need the arity, not semantic
+checking.
+
+```rebol
+define-type 'rgb! 'tuple! [r: byte g: byte b: byte]
+paint: func [color [rgb!]] [color]
+paint 255.0.0          ; ok
+paint 192.168.1.10     ; error: type error: arg 1 expected [integer!], got tuple!
+paint "red"             ; error: type error: arg 1 expected [integer!], got string!
+```
+
+### M177 — Rich error reporting
+
+`validate 'type value` native raises domain-specific errors on failure (the
+Rust-side validator walks the schema directly rather than relying on
+`parse`'s true/false result). Positional: `"Invalid rgb!: expected 3
+components, got 4"` or `"Invalid rgb!: component r must be byte (0-255), got
+256"`. Scalar: `"Invalid port!: must be in range 1..65535, got 99999"`.
+Named: `"Invalid person!: missing required field name"` or `"Invalid
+person!: field age must be in range 0..150, got 200"`. Generated
+constructors use `validate` (raises on failure); func-spec errors include
+the semantic type name: `"type error: arg 1 expected rgb! (base tuple!),
+got tuple!"`.
+
+### M178 — Optional positional, polish & release
+
+**Optional positional components:** `[major: integer minor: integer patch:
+optional integer]` — the compiler emits `opt [set patch ...]`; the validator
+accepts fewer components than the total field count (required fields must be
+present). **`make <semantic-type>! <value>`:** the `make` native dispatches
+on registered semantic type names — `make rgb! 255.0.0` validates and
+returns the value (untagged). This is the standard Rebol `make <type>!
+<spec>` construction pattern, now working for semantic types.
+
