@@ -666,31 +666,34 @@ the already-captured components in scope. Compiler emits
 
 ### Polish
 
-- [x] `docs/` — write `docs/semantic-types.md` user guide (mirrors the plan's
+- [ ] `docs/` — write `docs/semantic-types.md` user guide (mirrors the plan's
       examples).
 - [x] `examples/semantic-types.red` — demo script.
-- [x] Golden fixtures: `crates/red-eval/tests/fixtures/semantic-*.red` +
+- [ ] Golden fixtures: `crates/red-eval/tests/fixtures/semantic-*.red` +
       `.expected` (10+ covering each shape, errors, tagged values).
 - [x] Update `architecture.md` with the full M170–M178 section.
 - [x] Update `README.md` "What's implemented" + add a "Semantic types"
       subsection.
-- [x] `project-brief.md` — add semantic types to the value model section.
+- [ ] `project-brief.md` — add semantic types to the value model section.
 - [x] `cargo test --workspace` green; `cargo test --workspace --features force-walk`
       green (walker parity).
 - [x] `cargo bench` sanity (no regression on `fib 30` / `sum_loop` — the
       `accepts` path adds one `Option::is_some` check per call; measure).
+      Result: `fib 30` +2.5% (530ms, within noise of code-layout change);
+      `sum_loop` unchanged; most fixtures improved.
 
 ### Tasks
 
 - [x] Extend `compile_positional` for `optional` marker.
-- [x] Extend `compile_streamed`/`compile_positional` for count forms
+- [ ] Extend `compile_streamed`/`compile_positional` for count forms
       (`N constraint`, `lo hi constraint`).
-- [x] Extend `range`/`where` to accept `Paren` operands evaluated with
+- [ ] Extend `range`/`where` to accept `Paren` operands evaluated with
       captured components in scope (needs the parse scratch context to be the
       function-local context of a synthetic func — wire via `env`).
-- [x] Implement `days-in-month year month` helper native (for the `iso-date!`
+- [ ] Implement `days-in-month year month` helper native (for the `iso-date!`
       example).
-- [x] All polish items above.
+- [x] `make <semantic-type>! <value>` construction (standard Rebol pattern).
+- [x] `validate 'type value` native with rich error messages.
 
 ---
 
