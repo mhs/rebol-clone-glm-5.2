@@ -66,12 +66,33 @@ pub enum SendValue {
     Refinement(Symbol),
     File(Arc<str>),
     Url(Arc<str>),
+    Object(Arc<SendObject>),        // immutable snapshot of an ObjectDef
+    Error(Arc<SendError>),         // conditional — see note below
     Channel(Arc<ChannelInner>),     // channels are Send-safe (Arc<Mutex<...>>)
 }
 
 pub struct SendBlock {
     pub data: Vec<SendValue>,       // flat, no cursor — positioned views are a
                                     // thread-local construct on the receiver
+}
+
+/// Owned, `Send`-safe mirror of an `ObjectDef`.
+/// The prototype chain is preserved (immutably) via `Option<Arc<SendObject>>`.
+/// No `RefCell`, no `Rc` — a frozen snapshot, same model as `SendBlock`.
+pub struct SendObject {
+    pub words: Vec<Symbol>,         // field names (ordered)
+    pub slots: Vec<SendValue>,      // field values, parallel to `words`
+    pub parent: Option<Arc<SendObject>>,  // preserved prototype chain
+    pub kind: ObjectKind,           // plain object | error | actor | ...
+}
+
+/// Owned, `Send`-safe mirror of an `ErrorValue`.
+/// Marshalable iff the underlying `Object` payload is marshalable. Errors
+/// wrapping `Func` values (rare — `cause` is usually a string or object)
+/// are rejected at marshal time with the standard `EvalError::Native`.
+pub struct SendError {
+    pub message: Arc<str>,
+    pub payload: Arc<SendObject>,    // the error's object body
 }
 ```
 
@@ -84,15 +105,37 @@ survives a thread crossing anyway.
 
 **Marshalable types:** `None`, `Logic`, `Integer`, `Float`, `Char`,
 `String`, `Block`/`Paren` (deep-cloned to flat `Vec<SendValue>`), word
-variants (re-wrapped on receive), `File`/`Url`, `Channel` (shared — both
-ends live in one `Arc`).
+variants (re-wrapped on receive), `File`/`Url`, `Object` (deep-cloned to
+`SendObject` — frozen snapshot of `words`/`slots`/`parent`/`kind`, prototype
+chain preserved immutably), `Error` (deep-cloned to `SendError` iff its
+underlying `Object` payload is marshalable), `Channel` (shared — both ends
+live in one `Arc`).
 
-**Rejected types:** `Func` (closures over `Rc<Context>` — `!Send`),
-`Object` (interior mutability via `Rc<RefCell<ObjectDef>>` — `!Send`),
-`Error` (carries `Rc<ErrorValue>`, sometimes wrapping an `Object`), `String8`
-(POC stub, defer with `binary!`). Sending these raises
-`EvalError::Native { message: "cannot send <type> across thread boundary",
-span }` — Erlang-style (you can't ship a closure in Erlang either).
+**Rejected types:** `Func` (closures over `Rc<Context>` — `!Send`; lifting
+this requires `closure!` (v0.4) plus per-capture `Send` analysis — a v0.7
+candidate; workers reference funcs by *name* resolved via their `ThreadEnv`'s
+`user_ctx` snapshot, not by value), `String8` (POC stub, defer with
+`binary!`). Sending these raises `EvalError::Native { message: "cannot send
+<type> across thread boundary", span }` — Erlang-style (you can't ship a
+closure in Erlang either).
+
+**Why `Object` is marshalable:** The original plan rejected `Object` as
+"`!Send` via interior mutability," but that described the in-process
+representation (`Rc<RefCell<ObjectDef>>`), not a semantic constraint — the
+same was true of `Block` (`Rc<RefCell<Vec<Value>>>`), which the plan solves
+by deep-cloning into an immutable `Arc<SendBlock>`. `Object` gets identical
+treatment via `SendObject`: a frozen snapshot with the prototype chain
+preserved. Red treats `object!` as first-class data (records with a
+prototype), with no semantic coupling akin to BEAM closures capturing mailbox
+state — the Erlang analogy doesn't apply. Crucially, `Context::deep_clone`
+(M41) already performs exactly this recursive walk for `user_ctx` forking;
+exposing it through `send` reuses existing machinery rather than drawing an
+arbitrary line. This also unblocks: (a) v0.5 reactivity integration — actors
+subscribing to object fields (line 14) can receive the actual `object!`
+values, not lossy `block!` serializations; (b) the actor library (M45),
+where actors are defined *as* objects and can now be sent as message values
+directly, resolving the "referenced by name" hand-wave (name resolution
+requires a shared context, which workers don't have).
 
 ### Architecture
 
@@ -165,35 +208,65 @@ The Send-boundary foundation. No threads yet — just the type and the
 marshal/unmarshal passes, plus the rejection rules. Pure data-model work.
 
 - [ ] Add `crates/red-core/src/concurrency.rs` with the `SendValue` enum,
-      `SendBlock` struct, and `ChannelInner` (forward-declared; full impl
-      arrives in M42). `SendValue` derives `Debug`. `ChannelInner` is
-      `pub(crate)` until M42 wires it into `Value::Channel`.
+      `SendBlock` struct, `SendObject` struct, `SendError` struct, and
+      `ChannelInner` (forward-declared; full impl arrives in M42).
+      `SendValue` derives `Debug`. `ChannelInner` is `pub(crate)` until
+      M42 wires it into `Value::Channel`. `SendObject` mirrors `ObjectDef`
+      (frozen snapshot: `words`, `slots`, `parent: Option<Arc<SendObject>>`,
+      `kind: ObjectKind`). `SendError` mirrors `ErrorValue` (`message:
+      Arc<str>`, `payload: Arc<SendObject>`).
 - [ ] Implement `Value::marshal_send(&self) -> Result<SendValue, EvalError>`
-      — deep-clone the marshalable subset; reject `Func`/`Object`/`Error`/
-      `String8` with `EvalError::Native { message, span }` carrying the
-      offending value's span (or `Span::default()` for synthetic values).
-      For `Block`/`Paren`, walk the `Series.data` from `index..` (positions
-      are preserved as a `Vec<SendValue>` starting at the cursor — the
-      receiver gets a positioned view by constructing a fresh `Series`
-      whose `index = 0` and whose `data` is the marshalled slice).
+      — deep-clone the marshalable subset; reject `Func`/`String8` with
+      `EvalError::Native { message, span }` carrying the offending value's
+      span (or `Span::default()` for synthetic values). For `Block`/`Paren`,
+      walk the `Series.data` from `index..` (positions are preserved as a
+      `Vec<SendValue>` starting at the cursor — the receiver gets a
+      positioned view by constructing a fresh `Series` whose `index = 0`
+      and whose `data` is the marshalled slice). For `Object`, walk
+      `words`/`slots`/`parent`/`kind` into a `SendObject` (recursively
+      marshalling slot values; prototype chain is deep-cloned as
+      `Option<Arc<SendObject>>`). For `Error`, marshal the underlying
+      `Object` payload into a `SendError`; if the payload contains a
+      `Func` (rare — `cause` is usually a string/object), reject with the
+      standard message naming `function!`.
 - [ ] Implement `SendValue::unmarshal(&self) -> Value` — rewrap into the
       `Rc`-backed forms on the receiver side. `Symbol` is re-wrapped via
       `Symbol::from(Rc::clone(&sym.0))` (the `Rc` was bumped during
       marshalling; on the receiver, the `SendValue` owns its own `Rc` clone).
       `Channel` unmarshals to `Value::Channel(Arc::clone(&inner))` (cheap
-      Arc bump — both ends travel).
+      Arc bump — both ends travel). `Object` unmarshals to
+      `Value::Object(Rc::new(RefCell::new(ObjectDef { ... })))` — independent
+      storage on the receiver (a fresh `Rc<RefCell<...>>`), with the
+      prototype chain rebuilt as nested `Rc`s (mirroring how `SendBlock`
+      unmarshals to a fresh `Series`). `Error` unmarshals to
+      `Value::Error(Rc::new(ErrorValue { ... }))` via the same reconstruction.
 - [ ] Inline `#[test]`: marshal+unmarshal round-trips for each marshalable
       type (`Integer(5)` → `SendValue::Integer(5)` → `Integer(5)`; same for
       `String`, `Block`, etc.). Assert pointer-identity for `Channel` (the
-      `Arc<ChannelInner>` is shared, not cloned).
-- [ ] Inline `#[test]`: marshal rejects `Func`, `Object`, `Error`, `String8`
-      with the expected `EvalError::Native` message naming the type.
+      `Arc<ChannelInner>` is shared, not cloned). Assert `Object` round-trips
+      with `mold` equality (field names, slot values, and prototype chain all
+      preserved); verify the receiver's `Rc<RefCell<ObjectDef>>` is
+      `!Rc::ptr_eq` to the original (independent storage). Assert `Error`
+      round-trips with `mold` equality and preserves its `Object` payload.
+- [ ] Inline `#[test]`: marshal rejects `Func`, `String8` with the
+      expected `EvalError::Native` message naming the type. Also assert
+      marshal rejects an `Error` whose `Object` payload contains a `Func`
+      value (rare but possible) with the message naming `function!`.
 - [ ] Inline `#[test]`: marshal of a nested block (`[[1 2] [3 4]]`)
       deep-clones the inner blocks (the `SendValue::Block`'s `Vec` contains
-      `SendValue::Block`s, not `Rc` aliases).
+      `SendValue::Block`s, not `Rc` aliases). Also assert marshal of a
+      nested `Object` (an object whose slot is another object) deep-clones
+      the inner object (the `SendObject`'s `slots` contains a
+      `SendValue::Object`, not an `Rc` alias — verify via `Rc::ptr_eq`
+      returning false on the unmarshaled inner object).
 - [ ] Inline `#[test]`: marshal of a positioned series (`next [1 2 3]`)
       produces a `SendBlock` whose `data` starts at the cursor position
       (i.e. `[2 3]`), not the head.
+- [ ] Inline `#[test]`: marshal of an `Object` with a prototype chain
+      (`make object! [ ... ]` whose parent is a base object) preserves the
+      prototype chain in `SendObject.parent` (non-`None`), and unmarshal
+      reconstructs the chain so the receiver's object responds to inherited
+      field lookups (verify via `mold` or a field-access assertion).
 - [ ] `cargo test --workspace` passes (no behavior change; new code unused
       at runtime).
 
@@ -360,6 +433,10 @@ main thread and workers. Actors (M45) build on top.
 - [ ] Inline `#[test]`: `send` of a `Func` value raises
       `EvalError::Native { message: "cannot send function! across thread
       boundary" }`.
+- [ ] Inline `#[test]`: `send` of an `Object` value succeeds — `c: channel
+      send c make object! [x: 5] recv c` returns an `Object` whose `x`
+      field is `Integer(5)`, with `mold` equality to the sent value and
+      independent `Rc` storage (verify `!Rc::ptr_eq` on the `ObjectDef`).
 - [ ] Inline `#[test]`: `close c send c 5` raises `EvalError::Native`
       ("send on closed channel"); `recv c` returns `none` (channel drained).
 - [ ] Inline `#[test]`: `mold channel` returns `"#[channel]"`.
@@ -434,16 +511,19 @@ round-trip must be total over the marshalable subset (never panic, always
 return a `SendValue` or a structured `EvalError`).
 
 - [ ] Property test in `crates/red-eval/tests/property.rs`: for any
-      generated `Value` tree containing only marshalable types,
+      generated `Value` tree containing only marshalable types (including
+      `Object` with nested objects and `Error` with marshalable payloads),
       `unmarshal(marshal(v))` is structurally equal to `v` (compare via
       `mold_to_string`, since `Value` doesn't derive `PartialEq`).
-      Generated `Block`s may nest; `Func`/`Object`/`Error`/`String8` are
-      excluded from the strategy.
+      Generated `Block`s and `Object`s may nest; `Func`/`String8` are
+      excluded from the strategy. Errors wrapping `Func` payloads are also
+      excluded (rare; the strategy generates errors only over marshalable
+      object payloads).
 - [ ] Property test: for any generated `Value` tree containing at least
       one rejected type, `marshal` returns `Err(EvalError::Native { .. })`
       naming the offending type. Generate a marshalable tree, then inject
-      a `Func`/`Object`/`Error` at a random position; assert the error
-      message contains the type name.
+      a `Func` (or an `Error` wrapping a `Func`) at a random position;
+      assert the error message contains the type name (`function!`).
 - [ ] Property test: a `spawn [body] recv r` round-trip produces the same
       `Value` (via `mold`) as evaluating `body` directly on the main
       thread — for any `body` drawn from the existing
@@ -505,6 +585,11 @@ parallelism.
       - After sending, pushes the actor onto the ready-queue (if not
         already enqueued — track via a `HashSet<Rc::as_ptr>` to avoid
         duplicate dispatch).
+      - **`msg` may itself be an `Object` or actor value** — because `Object`
+        is marshalable across the Send boundary (M40), an actor can be sent
+        as a message value (e.g., for link/supervisor patterns in M47),
+        resolving the original "referenced by name" hand-wave. Name-based
+        reference is unnecessary when the actor value itself crosses cleanly.
 - [ ] Implement `receive` native (arity 1: `receive block`):
       - Used inside an actor's handler to block waiting for the next
         message. `block` is a `Block` of `case`-style clauses:
@@ -667,11 +752,14 @@ real parallelism between them. Requires:
    don't use channels and pay no cost. A feature gate would fragment the
    test matrix without benefit.
 6. **Func across threads** — reject (Erlang-style; actor handlers must be
-   referenced by name, not shipped as values) vs allow (Go-style; closures
-   are `Send` if their captures are). **Recommendation:** reject for v0.6.
-   Lifting the restriction requires `closure!` (v0.4) and `Send` captures
-   — a v0.7 candidate. Workers reference funcs by *name* (resolved via
-   their `ThreadEnv`'s `user_ctx` snapshot), not by value.
+    referenced by name, not shipped as values) vs allow (Go-style; closures
+    are `Send` if their captures are). **Recommendation:** reject for v0.6.
+    Lifting the restriction requires `closure!` (v0.4) and `Send` captures
+    — a v0.7 candidate. Workers reference funcs by *name* (resolved via
+    their `ThreadEnv`'s `user_ctx` snapshot), not by value. (Note: `Object`
+    was originally lumped into this rejection and has been lifted — see the
+    Send-boundary section. `Object` carries no closure-capture semantics,
+    so the Erlang analogy doesn't apply; only `Func` remains restricted.)
 7. **Actor scheduler thread** — dedicated scheduler thread (separate from
    the main thread) vs run on the main thread (calling `run-actors` blocks
    until quiescence). **Recommendation:** main thread for v0.6.1 (simpler;
