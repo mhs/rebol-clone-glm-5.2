@@ -479,6 +479,56 @@ fn today_native(_args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<V
     Ok(Value::date(red_core::DateValue::today_local()))
 }
 
+/// `days-in-month year month` → `integer!` (plan18 M178). The number of days
+/// in the given month — leap years accounted (divisible by 4, except
+/// centuries unless divisible by 400). Motivating use: the semantic-type
+/// constraint `range 1 days-in-month year month`.
+fn days_in_month(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(arity_err(args, "days-in-month", 2, args.len()));
+    }
+    let year = match &args[0] {
+        Value::Integer { n, .. } => *n,
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "integer!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            })
+        }
+    };
+    let month = match &args[1] {
+        Value::Integer { n, .. } => *n,
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "integer!",
+                found: type_name(other),
+                span: other.span_or_default(),
+            })
+        }
+    };
+    if !(1..=12).contains(&month) {
+        return Err(EvalError::Native {
+            message: format!("days-in-month: month must be 1..12, got {month}"),
+            span: args[1].span_or_default(),
+        });
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => {
+            // February.
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+    };
+    Ok(Value::integer(days))
+}
+
 /// `to-utc date` → `date!` (M45). Shifts the wall-clock `dt` by `-zone`
 /// minutes (so the wall clock shows the UTC time), then sets `zone = Some(0)`.
 /// On a zone-naive date, this is a no-op (zone is already treated as UTC for
@@ -844,6 +894,8 @@ pub fn register_io_natives(env: &mut Env) {
     reg(env, "now", now_native as NF, 0);
     reg(env, "today", today_native as NF, 0);
     reg(env, "to-utc", to_utc_native as NF, 1);
+    // plan18 M178: date helper (semantic-type constraint use case).
+    reg(env, "days-in-month", days_in_month as NF, 2);
 
     // Directory ops.
     reg(env, "dir?", dir_q as NF, 1);
@@ -1282,5 +1334,47 @@ mod tests {
     fn read_binary_and_binary_lines_mutually_exclusive() {
         let r = run_capture_val("read/binary/lines %tests/fixtures/hello.txt");
         assert!(r.is_err(), "expected error from /binary + /lines");
+    }
+
+    #[test]
+    fn days_in_month_table() {
+        // 31-day months.
+        for m in [1, 3, 5, 7, 8, 10, 12] {
+            let src = format!("days-in-month 2024 {m}");
+            match run_capture_val(&src) {
+                Ok((Value::Integer { n, .. }, _)) => assert_eq!(n, 31, "month {m}"),
+                other => panic!("days-in-month 2024 {m}: {other:?}"),
+            }
+        }
+        // 30-day months.
+        for m in [4, 6, 9, 11] {
+            let src = format!("days-in-month 2024 {m}");
+            match run_capture_val(&src) {
+                Ok((Value::Integer { n, .. }, _)) => assert_eq!(n, 30, "month {m}"),
+                other => panic!("days-in-month 2024 {m}: {other:?}"),
+            }
+        }
+        // February: leap year rules.
+        for (year, want) in [(2024, 29), (2023, 28), (2000, 29), (1900, 28), (1600, 29)] {
+            let src = format!("days-in-month {year} 2");
+            match run_capture_val(&src) {
+                Ok((Value::Integer { n, .. }, _)) => assert_eq!(
+                    n, want,
+                    "February {year} (leap: divisible by 4, except centuries unless by 400)"
+                ),
+                other => panic!("days-in-month {year} 2: {other:?}"),
+            }
+        }
+        // Range/type errors.
+        let e = match run_capture_val("days-in-month 2024 13") {
+            Err(msg) => msg,
+            Ok(_) => panic!("month 13 should error"),
+        };
+        assert!(e.contains("month must be 1..12"), "got {e:?}");
+        let e = match run_capture_val(r#"days-in-month 2024 "x""#) {
+            Err(msg) => msg,
+            Ok(_) => panic!("string month should error"),
+        };
+        assert!(e.contains("expected integer!"), "got {e:?}");
     }
 }
