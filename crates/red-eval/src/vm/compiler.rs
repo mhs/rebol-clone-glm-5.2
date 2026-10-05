@@ -696,6 +696,8 @@ fn compile_prefix(
         | Value::Port(_)
         | Value::Typeset(_)
         | Value::SemanticType(_)
+        // M175: a tagged value is a literal — intern into the pool as-is.
+        | Value::SemanticTagged { .. }
         | Value::Channel(_) => {
             let idx = c.push_const(cur.clone());
             c.emit(Instr::Const(idx));

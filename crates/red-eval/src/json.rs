@@ -59,6 +59,11 @@ fn encode(
     span: Span,
 ) -> Result<(), EvalError> {
     match value {
+        // M175: a tagged semantic value encodes as its inner value (the tag
+        // is metadata with no JSON representation).
+        Value::SemanticTagged { value, .. } => {
+            encode(value, out, indent, pretty, indent_width, value.span_or_default())
+        }
         Value::None => {
             out.push_str("null");
             Ok(())

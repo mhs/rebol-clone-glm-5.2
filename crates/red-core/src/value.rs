@@ -510,6 +510,20 @@ pub enum Value {
     /// `to_components(value)`; generated predicates (`rgb?`) and func-spec
     /// annotations (`[rgb!]`) route through the same path.
     SemanticType(Rc<SemanticTypeDef>),
+    /// A tagged semantic value (plan18 M175): a base-type value carrying the
+    /// semantic type it was validated against (`make rgb! 1.2.3` → the tuple
+    /// tagged `'rgb!`). The tag is metadata — the value behaves exactly like
+    /// its inner value everywhere (`type_name`/mold/arith/equality unwrap;
+    /// `semantic-type?` is the discriminator, returning the tag as a
+    /// lit-word!). Constructors (`rgb 255 0 0`) stay untagged per the plan;
+    /// only `make <semantic>!` produces a tagged value. `copy` preserves the
+    /// tag. `same?` is `Rc::ptr_eq` on the box (mirrors the other Rc-backed
+    /// variants).
+    SemanticTagged {
+        tag: Symbol,
+        value: Box<Value>,
+        span: Span,
+    },
     /// M40: a Go-style bidirectional channel. Both ends (tx + rx) travel in
     /// one value; cloning a Channel value = `Arc` bump (cheap). Synthetic —
     /// produced by the `channel` native (M42); carries no source span. The
@@ -1582,7 +1596,22 @@ pub fn type_name_for(v: &Value) -> &'static str {
         Value::Port(_) => "port!",
         Value::Typeset(_) => "typeset!",
         Value::SemanticType(_) => "semantic-type!",
+        // M175: a tagged value shares its inner value's type name (the tag
+        // is metadata; `semantic-type?` is the discriminator).
+        Value::SemanticTagged { value, .. } => type_name_for(value),
         Value::Channel(_) => "channel!",
+    }
+}
+
+/// Unwrap a tagged semantic value (plan18 M175): returns the inner value for
+/// `Value::SemanticTagged`, else `v` itself. Hot-path helper for the match
+/// sites that treat tagged values exactly like their base type (printer,
+/// arithmetic, series ops, paths). `type_name_for` unwraps internally; the
+/// `same?`/equality layer handles tags BEFORE delegating here.
+pub fn unwrap_semantic(v: &Value) -> &Value {
+    match v {
+        Value::SemanticTagged { value, .. } => value,
+        _ => v,
     }
 }
 
@@ -1697,6 +1726,9 @@ pub fn group_members(group: &str) -> Option<&'static [&'static str]> {
 /// These types don't have registered semantic types in v1, so this is just
 /// the safety-net default.
 pub fn to_components(v: &Value) -> Value {
+    // M175: a tagged semantic value's component view is its inner value's
+    // (so generated predicates and `valid?` accept already-tagged values).
+    let v = unwrap_semantic(v);
     match v {
         // ---- Positional ----
         Value::Tuple { bytes, span } => {
@@ -2766,7 +2798,8 @@ impl Value {
             | Value::File { span, .. }
             | Value::Url { span, .. }
             | Value::String8 { span, .. }
-            | Value::Date { span, .. } => Some(*span),
+            | Value::Date { span, .. }
+            | Value::SemanticTagged { span, .. } => Some(*span),
             Value::Duration { span, .. } => Some(*span),
             Value::None
             | Value::Unset
@@ -3120,6 +3153,16 @@ impl Value {
     /// Constructor shorthand for a semantic-type! value wrapping `def`. (M170.)
     pub fn semantic_type(def: SemanticTypeDef) -> Self {
         Value::SemanticType(Rc::new(def))
+    }
+
+    /// Constructor shorthand for a tagged semantic value (plan18 M175):
+    /// the value with the semantic type's name attached as the tag.
+    pub fn semantic_tagged(tag: Symbol, value: Value, span: Span) -> Self {
+        Value::SemanticTagged {
+            tag,
+            value: Box::new(value),
+            span,
+        }
     }
 }
 

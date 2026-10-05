@@ -120,6 +120,8 @@ pub(crate) fn enrich_error(
 /// Truthiness rule: only `false` and `none` are falsy; everything else is
 /// truthy.
 pub(crate) fn truthy(v: &Value) -> bool {
+    // M175: a tagged value's truthiness is its inner value's.
+    let v = red_core::value::unwrap_semantic(v);
     !matches!(v, Value::None | Value::Logic(false))
 }
 
@@ -200,6 +202,8 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Port(_) => "port!",
         Value::Typeset(_) => "typeset!",
         Value::SemanticType(_) => "semantic-type!",
+        // M175: a tagged value shares its inner value's type name.
+        Value::SemanticTagged { value, .. } => type_name(value),
         Value::Channel(_) => "channel!",
     }
 }

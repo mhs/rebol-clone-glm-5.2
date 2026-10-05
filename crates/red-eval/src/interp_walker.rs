@@ -393,6 +393,9 @@ fn eval_prefix(
         | Value::Port(_)
         | Value::Typeset(_)
         | Value::SemanticType(_)
+        // M175: a tagged value self-evaluates (clone); it behaves exactly
+        // like its inner value everywhere.
+        | Value::SemanticTagged { .. }
         | Value::Channel(_) => Ok(cur),
 
         // Path: a function-headed path is a refined call (`copy/part`,
@@ -768,6 +771,9 @@ fn step_path(
 /// tuples look up `/r`/`/red`/`/g`/`/green`/`/b`/`/blue`/`/a`/`/alpha`; other
 /// types error.
 fn select_field(current: &Value, sym: &Symbol, path_span: Span) -> Result<Value, EvalError> {
+    // M175: a tagged value's fields are its inner value's (`t/x` on a
+    // tagged pair selects the inner pair's field).
+    let current = red_core::value::unwrap_semantic(current);
     match current {
         Value::Object(obj) => obj.borrow().ctx.get(sym).ok_or_else(|| EvalError::Native {
             message: format!("object has no field {}", sym.as_str()),
@@ -929,6 +935,8 @@ fn select_field(current: &Value, sym: &Symbol, path_span: Span) -> Result<Value,
 /// path parts. Out-of-range returns `none`. Strings return a `char!` (the
 /// codepoint at the 1-based index).
 fn pick_path_index(current: &Value, n: i64, path_span: Span) -> Result<Value, EvalError> {
+    // M175: a tagged value is indexed as its inner value.
+    let current = red_core::value::unwrap_semantic(current);
     match current {
         Value::Block { series, .. } | Value::Paren { series, .. } => {
             let data = series.data.borrow();

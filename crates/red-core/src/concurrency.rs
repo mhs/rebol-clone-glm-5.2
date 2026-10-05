@@ -328,6 +328,15 @@ pub enum SendValue {
     Port(Arc<SendPort>),
     Typeset(Arc<SendTypeset>),
     SemanticType(Arc<SendSemanticType>),
+    /// M175: a tagged semantic value — the semantic-type *name* plus the
+    /// marshalled inner value. The `SemanticTypeDef` itself is NOT needed
+    /// on the receiver side (a tagged value carries only the tag), so the
+    /// round-trip is lossless even though the def's compiled parse rule
+    /// isn't Send-safe.
+    SemanticTagged {
+        tag: Arc<str>,
+        value: Box<SendValue>,
+    },
     Closure(Arc<SendClosure>),
     Date(Arc<SendDateValue>),
     Duration(chrono::Duration),
@@ -533,6 +542,11 @@ fn marshal_value(v: &Value) -> Result<SendValue, EvalError> {
         Value::SemanticType(t) => Ok(SendValue::SemanticType(Arc::new(
             marshal_semantic_type(t)?,
         ))),
+        // M175: marshal the inner value; keep the tag name only.
+        Value::SemanticTagged { tag, value, .. } => Ok(SendValue::SemanticTagged {
+            tag: Arc::from(tag.as_str()),
+            value: Box::new(marshal_value(value)?),
+        }),
         Value::Closure(cl) => Ok(SendValue::Closure(Arc::new(marshal_closure(cl)?))),
         Value::Date { dt, .. } => Ok(SendValue::Date(Arc::new(SendDateValue {
             dt: dt.dt,
@@ -921,6 +935,9 @@ fn unmarshal_value(sv: &SendValue) -> Value {
         }
         SendValue::SemanticType(t) => {
             Value::SemanticType(Rc::new(unmarshal_semantic_type(t)))
+        }
+        SendValue::SemanticTagged { tag, value } => {
+            Value::semantic_tagged(Symbol::new(tag.as_ref()), unmarshal_value(value), Span::default())
         }
         SendValue::Closure(cl) => {
             let func = unmarshal_func_def(&cl.func);

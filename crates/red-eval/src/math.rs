@@ -1130,7 +1130,20 @@ fn scalar_binop(a: &Value, b: &Value, op: &str, span: red_core::Span) -> Result<
 /// are strings (M15), and char arithmetic (M38: `char + int → char`,
 /// `char + char → int`). M44: pair/tuple arithmetic. Falls through to numeric
 /// addition otherwise.
+/// M175 (plan18): unwrap tagged semantic operands — a tagged value
+/// participates in arithmetic as its inner value. Used at the top of the
+/// four core infix arithmetic natives.
+fn untag2(args: &[Value]) -> [Value; 2] {
+    [
+        red_core::value::unwrap_semantic(&args[0]).clone(),
+        red_core::value::unwrap_semantic(&args[1]).clone(),
+    ]
+}
+
 pub(crate) fn add(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+    let args = untag2(args);
+    let args: &[Value] = &args;
+
     if let (Value::String { s: a, .. }, Value::String { s: b, .. }) = (&args[0], &args[1]) {
         let mut cat = String::with_capacity(a.len() + b.len());
         cat.push_str(a);
@@ -1178,6 +1191,8 @@ pub(crate) fn subtract(
     _refs: &RefineArgs,
     _env: &mut Env,
 ) -> Result<Value, EvalError> {
+    let args = untag2(args);
+    let args: &[Value] = &args;
     // `int - char`/`int - pair`/`int - tuple` is not allowed (asymmetric).
     if as_codepoint(&args[0]).is_none()
         && !matches!(&args[0], Value::Pair { .. } | Value::Tuple { .. })
@@ -1228,6 +1243,8 @@ pub(crate) fn multiply(
     _refs: &RefineArgs,
     _env: &mut Env,
 ) -> Result<Value, EvalError> {
+    let args = untag2(args);
+    let args: &[Value] = &args;
     if let Some(r) = pair_binop(args, "multiply", |a, b| Some(a * b), |a, b| a * b)? {
         return Ok(r);
     }
@@ -1257,6 +1274,8 @@ pub(crate) fn divide(
     _refs: &RefineArgs,
     _env: &mut Env,
 ) -> Result<Value, EvalError> {
+    let args = untag2(args);
+    let args: &[Value] = &args;
     // `int / pair`/`scalar / tuple` — asymmetric, type error.
     if !matches!(&args[0], Value::Pair { .. } | Value::Tuple { .. })
         && matches!(&args[1], Value::Pair { .. } | Value::Tuple { .. })

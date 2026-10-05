@@ -39,6 +39,8 @@ use crate::natives::{truthy, type_name, values_equal};
 /// Extract the shared storage + original span + whether the value is a paren.
 /// Returned `Series` is an Rc-clone (shares storage with the argument).
 fn extract_series(v: &Value) -> Result<(Series, Span, bool), EvalError> {
+    // M175: a tagged semantic value is transparent to series ops — unwrap.
+    let v = red_core::value::unwrap_semantic(v);
     match v {
         Value::Block { series, span } => Ok((series.clone(), *span, false)),
         Value::Paren { series, span } => Ok((series.clone(), *span, true)),
@@ -1588,6 +1590,12 @@ fn copy(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eval
     if let Value::Hash(h) = &args[0] {
         return Ok(Value::hash(h.borrow().clone()));
     }
+    // M175 (plan18 L511): `copy` of a tagged semantic value preserves the
+    // tag — copy the inner value (honoring /part etc.) and re-tag.
+    if let Value::SemanticTagged { tag, value, span } = &args[0] {
+        let inner = copy(&[(**value).clone()], refs, _env)?;
+        return Ok(Value::semantic_tagged(tag.clone(), inner, *span));
+    }
     // M84: vector! shallow copy (new VectorDef with cloned kind + elems
     // from cursor to tail; cursor reset to 0).
     if let Value::Vector(v) = &args[0] {
@@ -2195,6 +2203,8 @@ enum SeriesKind {
 /// cursor to the tail. `string!` is flattened to its `char!`s. Returns the
 /// span + kind so the result can be rebuilt.
 fn series_to_values(v: &Value) -> Result<(Vec<Value>, Span, SeriesKind), EvalError> {
+    // M175: a tagged semantic value is transparent — unwrap.
+    let v = red_core::value::unwrap_semantic(v);
     match v {
         Value::Block { series, span } => {
             let data = series.data.borrow();

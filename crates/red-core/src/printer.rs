@@ -179,6 +179,10 @@ pub fn mold(value: &Value, out: &mut String) {
         Value::Port(p) => mold_port(&p.borrow(), out),
         Value::Typeset(t) => mold_typeset(t, out),
         Value::SemanticType(t) => mold_semantic_type(t, out),
+        // M175: a tagged value molds/forms as its inner value by default
+        // (`mold/tagged` renders `make <tag>! <inner>` — that lives in the
+        // `mold` native, not the printer).
+        Value::SemanticTagged { value, .. } => mold(value, out),
         Value::Channel(_) => out.push_str("#[channel]"),
     }
 }
@@ -283,6 +287,8 @@ pub fn form(value: &Value, out: &mut String) {
         Value::Port(p) => mold_port(&p.borrow(), out),
         Value::Typeset(t) => mold_typeset(t, out),
         Value::SemanticType(t) => mold_semantic_type(t, out),
+        // M175: a tagged value molds/forms as its inner value by default.
+        Value::SemanticTagged { value, .. } => form(value, out),
         Value::Channel(_) => out.push_str("#[channel]"),
     }
 }

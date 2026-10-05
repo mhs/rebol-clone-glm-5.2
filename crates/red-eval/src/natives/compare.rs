@@ -18,6 +18,23 @@ use red_core::{Env, EvalError, RefineArgs};
 
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
+        // M175: tagged semantic values. Tagged==tagged requires the tags to
+        // match AND the inners to be equal; a tagged value compares as its
+        // inner against anything else (plan18's value-equality rules).
+        (
+            Value::SemanticTagged {
+                tag: ta,
+                value: va,
+                ..
+            },
+            Value::SemanticTagged {
+                tag: tb,
+                value: vb,
+                ..
+            },
+        ) => ta == tb && values_equal(va, vb),
+        (Value::SemanticTagged { value, .. }, _) => values_equal(value, b),
+        (_, Value::SemanticTagged { value, .. }) => values_equal(a, value),
         (Value::Integer { n: x, .. }, Value::Integer { n: y, .. }) => x == y,
         (Value::Float { f: x, .. }, Value::Float { f: y, .. }) => x == y,
         // M150: decimal! equality — exact (rust_decimal implements Eq). Cross-
@@ -369,6 +386,8 @@ enum Num {
 }
 
 fn as_number(v: &Value) -> Option<Num> {
+    // M175: a tagged value promotes as its inner value.
+    let v = red_core::value::unwrap_semantic(v);
     match v {
         Value::Integer { n, .. } => Some(Num::Int(*n)),
         Value::Float { f, .. } => Some(Num::Float(*f)),
