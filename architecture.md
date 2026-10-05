@@ -203,8 +203,14 @@ pub struct TypesetDef {                          // M89 — set of type-word sym
 //      failure they raise `EvalError::Native` with a
 //      `"type error: arg N expected [ts], got <found>"` message (the
 //      `TypeError.expected: &'static str` field is too narrow for a dynamic
-//      typeset label). Typeset *algebra* (`union`/`intersect`/`complement`)
-//      deferred to v0.8.
+//      typeset label). Refinement-arg types ship on
+//      `FuncDef.refinement_types` (parallel to `refinements`), checked for
+//      active refinements by the walker's `check_refinement_types` (the VM
+//      routes refined user-func calls through the walker). Typeset
+//      *algebra* (`union`/`intersect`/`difference`/`exclude`/`complement`)
+//      is shipped (was deferred to v0.8): group words expand to leaves
+//      before combining, results are fresh typesets, semantic-ref typesets
+//      (M176) are rejected under algebra.
 
 pub struct DateValue {                          // M45 — single variant covers date-only / date+time / date+time+zone
     pub dt: chrono::NaiveDateTime,
@@ -929,8 +935,9 @@ support `/case` (string case-sensitivity) and `/skip size` (record-wise).
 
 **`hash!` series model (M83):** `hash!` IS a `series!` (unlike `map!`).
 `extract_series(&Value::Hash)` returns a positioned `Block` view over the
-flat alternating key/value pair sequence (`[k1 v1 k2 v2 ...]`). Series ops
-behave accordingly:
+flat alternating key/value pair sequence (`[k1 v1 k2 v2 ...]`), seeded from
+`HashDef::cursor` (the v0.8 deferral, shipped). Series ops behave
+accordingly:
 - `length? h` → `2 * entry_count` (alternating).
 - `pick h N` → key at index `2n`, value at index `2n+1` (1-based).
 - `poke h N value` → writes at the corresponding slot (key slot if even
@@ -939,6 +946,16 @@ behave accordingly:
 - `select`/`find` (by key) — same as `map!`.
 - `append`/`insert` (as a series — append a key/value pair).
 - `clear`/`empty?`.
+- Cursored navigation (`next`/`back`/`head`/`tail`/`at`/`skip`/`index?`,
+  `forall`/`forskip`): via the positioned-Block snapshot — the same
+  documented deviation as `vector!` (returns a positioned `block!`, not a
+  positioned `hash!`; views are snapshots, so mutation through them doesn't
+  reach the hash; the hash's cursor is never advanced by navigation).
+- Mutating natives have dedicated Hash arms operating on the hash
+  directly: `remove` (pair at cursor), `take` (pair at cursor, returns the
+  slot's element), `change` (key slot renames via
+  `HashDef::replace_key_at`, value slot overwrites). `remove-each`/`sort`
+  are rejected (mutation through the snapshot would silently no-op).
 Iteration order in `keys-of`/`values-of`/`mold` uses the side `key_order`
 vec for test determinism (documented deviation from Red's unspecified order).
 `same?` is `Rc::ptr_eq`; `=` is deep on entries, **order-independent**

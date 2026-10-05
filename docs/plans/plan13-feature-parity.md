@@ -54,8 +54,9 @@ after the M130 template is proven):
 - Everything already covered by `plan11`/`plan12` (see header above).
 - Reactivity, concurrency, full port/async model — `future-plan-reactivity.md`,
   `future-plan-concurrency.md`.
-- `typeset!` algebra (`union`/`intersect`/`complement` of typesets) —
-  `plan8` M89 deferral, still open.
+- `typeset!` algebra (`union`/`intersect`/`difference`/`exclude`/
+  `complement` of typesets) — `plan8` M89 deferral, **shipped**
+  (Feature B1, commit `ba80131`).
 - Named timezones (`chrono-tz`) — `plan5` open-q #5, still open.
 - A central package registry server — `plan7` open deferral, still open.
 - New value types of any kind — this plan is pure native/behavior surface

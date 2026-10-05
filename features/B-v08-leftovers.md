@@ -1,14 +1,34 @@
 # Feature B: v0.8 Leftovers Batch (hash! cursors, refinement-arg types, typeset! algebra)
 
-**Status:** Planned — not started
-**Source:** Deferral comments overdue by two versions (crates at 0.10.0);
-re-acknowledged open in `docs/plans/plan13-feature-parity.md:57-58` (typeset
-algebra). hash! cursors and refinement-arg types were never re-triaged in any
-plan doc.
-**Effort:** S (typeset algebra) + M (refinement-arg types, low-risk) + M
-(hash! cursored navigation)
-**Depends on:** Nothing. Items 1 and 2 share `TypesetDef`/`parse_typeset_block`
-but are independent of each other; item 3 is fully standalone.
+**Status:** DONE — 2026-10-05
+- **B1 typeset! algebra** (commit `ba80131`): all five ops shipped; group
+  words expand to leaves first; `difference` symmetric / `exclude`
+  asymmetric (series/Red semantics); value semantics (fresh typesets —
+  inputs never mutated, they may be shared via func specs); semantic-ref
+  typesets rejected under algebra. Policy decision recorded: `exclude`
+  HAS a typeset arm (unlike bitsets, whose `difference` is already
+  asymmetric).
+- **B2 refinement-arg types** (commit `c423a91`): parse + store
+  (`FuncDef.refinement_types`, parallel to `refinements`) + walker-only
+  `check_refinement_types` for active refinements (VM insulated by the
+  refined-call walker fallback). Bonus fix: `length?` on string! (was
+  `expected series!`); string!/series gap documented in KNOWN_ISSUES.md.
+- **B3 hash! cursored navigation** (commit `0d5d810`): HashDef cursor +
+  positioned-Block snapshot in `extract_series` (exact vector! precedent;
+  navigation never advances the cursor); `remove`/`take`/`change` dedicated
+  Hash arms mutating the hash directly; **decision recorded**:
+  `remove-each`/`sort` REJECTED with a clear error (mutation through the
+  detached snapshot would silently leave the hash unchanged) — routing
+  them through the view was the alternative but it would silently no-op;
+  `forall`/`forskip` iterate the view (read-only, safe).
+- **B4 bookkeeping** (this commit): plan8/plan13 deferral notes updated,
+  architecture.md typeset/hash sections current, all stale "deferred to
+  v0.8" code comments for the three shipped items removed.
+
+All gates green per item: `cargo test --workspace` (default +
+`--features force-walk`) and `cargo clippy --workspace --all-targets`.
+Remaining plan8 v0.8 deferrals (NOT in scope here, still open):
+`regex!`, `struct!`/`handle!`, `routine!` FFI.
 
 ## Goal
 

@@ -829,7 +829,11 @@ wires the type-check into the call path.
 - The value variant + `make typeset!` + `typeset?` + mold: **in scope**.
 - Wiring `typeset!` into `func` spec-eval (so `func [x [integer! float!]]`
   type-checks args at call time): **in scope** (the headline feature).
-- The `typeset!` *algebra* (`union`/`intersect`/`complement` of typesets): **deferred to v0.8**.
+- The `typeset!` *algebra* (`union`/`intersect`/`difference`/`exclude`/
+  `complement` of typesets): **was deferred to v0.8 — shipped**
+  (Feature B1, commit `ba80131`): group words expand via `group_members`
+  before combining, results are fresh typesets (inputs never mutated),
+  and semantic-ref typesets (M176) are rejected under algebra.
 
 - [x] Add `struct TypesetDef { types: RefCell<HashSet<Symbol>> }` in `value.rs`
       (a set of type-word symbols like `'integer!`/`'float!`/`'string!`).
