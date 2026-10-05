@@ -26,3 +26,15 @@ name = "run_source_vm"
 path = "fuzz_targets/run_source_vm.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "marshal"
+path = "fuzz_targets/marshal.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "spawn_recv"
+path = "fuzz_targets/spawn_recv.rs"
+test = false
+doc = false

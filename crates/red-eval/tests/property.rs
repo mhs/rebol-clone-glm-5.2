@@ -18,7 +18,9 @@
 //! to keep the test fast and to avoid i64/float edge cases the lexer rejects.
 
 use proptest::prelude::*;
-use red_core::{load_source, mold_to_string, Series, Span, Symbol, Value};
+use red_core::{
+    load_source, mold_to_string, Series, Span, Symbol, Value,
+};
 use red_eval::{render_error, run_source_with_exit_opts, RunOptions};
 use std::cell::RefCell;
 use std::io::Write;
@@ -531,5 +533,180 @@ fn shrink_produces_readable() {
         }
         Err(other) => panic!("expected Fail, got {other:?}"),
         Ok(()) => panic!("proptest should have failed on integers > 9"),
+    }
+}
+
+// ===========================================================================
+// M44: Send-boundary property tests
+// ===========================================================================
+
+mod send_boundary {
+    use super::*;
+    use red_core::value::ObjectDef;
+
+    /// Generate a marshalable `Value` tree (no `Func`, no `String8`).
+    /// Extends `gen_value` with `Object` and `Error` for broader coverage.
+    fn gen_marshalable(_depth: u32) -> BoxedStrategy<Value> {
+        prop_oneof![
+            any::<i64>().prop_map(|n| Value::Integer { n, span: Span::new(0, 0) }),
+            (-1_000_000.0f64..1_000_000.0).prop_map(|f| Value::Float {
+                f,
+                span: Span::new(0, 0),
+            }),
+            "[a-z0-9 \\\"\\n\\t]{0,20}".prop_map(|s: String| Value::String {
+                s: s.into(),
+                span: Span::new(0, 0),
+            }),
+            "[a-z][a-z0-9]{0,8}".prop_map(|s: String| Value::Word {
+                sym: Symbol::new(&s),
+                binding: red_core::Binding::Unbound,
+                span: Span::new(0, 0),
+            }),
+            "[a-z][a-z0-9]{0,8}".prop_map(|s: String| Value::SetWord {
+                sym: Symbol::new(&s),
+                binding: red_core::Binding::Unbound,
+                span: Span::new(0, 0),
+            }),
+            "[a-z][a-z0-9]{0,8}".prop_map(|s: String| Value::GetWord {
+                sym: Symbol::new(&s),
+                binding: red_core::Binding::Unbound,
+                span: Span::new(0, 0),
+            }),
+            "[a-z][a-z0-9]{0,8}".prop_map(|s: String| Value::LitWord {
+                sym: Symbol::new(&s),
+                span: Span::new(0, 0),
+            }),
+            Just(Value::None),
+            any::<bool>().prop_map(Value::Logic),
+            // Simple error value (message-only, marshalable).
+            "[a-z0-9 ]{0,30}".prop_map(|s: String| Value::error(s)),
+            // Simple object with one field.
+            ("[a-z][a-z0-9]{0,5}", any::<i64>())
+                .prop_map(|(name, val)| {
+                    let obj = ObjectDef::new();
+                    obj.ctx.set(Symbol::new(&name), Value::integer(val));
+                    Value::object(obj)
+                }),
+        ]
+        .prop_recursive(
+            3,  // max depth
+            16, // max total items
+            4,  // max items per collection
+            |inner| {
+                prop_oneof![
+                    prop::collection::vec(inner.clone(), 0..4).prop_map(|vs| {
+                        Value::Block {
+                            series: Series::new(vs),
+                            span: Span::new(0, 0),
+                        }
+                    }),
+                    prop::collection::vec(inner.clone(), 0..4).prop_map(|vs| {
+                        Value::Paren {
+                            series: Series::new(vs),
+                            span: Span::new(0, 0),
+                        }
+                    }),
+                ]
+            },
+        )
+        .boxed()
+    }
+
+    proptest! {
+        /// M44: For any generated marshalable `Value` tree,
+        /// `unmarshal(marshal(v))` is structurally equal to `v` (via `mold`).
+        #[test]
+        fn marshal_unmarshal_round_trip(v in gen_marshalable(3)) {
+            let sv = v.marshal_send().expect("marshal should succeed for marshalable tree");
+            let back = sv.unmarshal();
+            prop_assert_eq!(
+                mold_to_string(&back),
+                mold_to_string(&v),
+                "round-trip mismatch\noriginal: {}\nback:     {}",
+                mold_to_string(&v),
+                mold_to_string(&back),
+            );
+        }
+
+        /// M44: For any generated marshalable tree with a `Func` injected at
+        /// a random position, `marshal` returns `Err(EvalError::Native)`
+        /// naming `function!`.
+        #[test]
+        fn marshal_rejects_func_injected(v in gen_marshalable(3)) {
+            // Inject a Func value into a block wrapping the tree.
+            let func_val = Value::Func(Rc::new(red_core::value::FuncDef::default()));
+            let wrapped = Value::Block {
+                series: Series::new(vec![v, func_val]),
+                span: Span::new(0, 0),
+            };
+            let err = wrapped.marshal_send().expect_err("marshal should reject Func");
+            let msg = match err {
+                red_core::EvalError::Native { message, .. } => message,
+                other => panic!("expected EvalError::Native, got {other:?}"),
+            };
+            prop_assert!(
+                msg.contains("function!"),
+                "error message should name function!: {msg}"
+            );
+        }
+
+        /// M44: For any generated marshalable tree, `marshal_send` never
+        /// panics (total over the marshalable subset).
+        #[test]
+        fn marshal_never_panics(v in gen_marshalable(3)) {
+            // This is implicitly tested by `marshal_unmarshal_round_trip`,
+            // but having it as a separate test makes failures clearer.
+            let result = v.marshal_send();
+            prop_assert!(result.is_ok(), "marshal should succeed for marshalable tree: {:?}", result);
+        }
+    }
+}
+
+// ===========================================================================
+// M44: spawn/recv round-trip property test (ignored — slow, spawns threads)
+// ===========================================================================
+
+mod spawn_recv {
+    use super::*;
+
+    /// A simple marshalable body: a literal or a block of literals.
+    fn gen_spawnable_body() -> BoxedStrategy<String> {
+        prop_oneof![
+            (-1000i64..1000).prop_map(|n| n.to_string()),
+            Just("true".to_string()),
+            Just("false".to_string()),
+            Just("none".to_string()),
+            "[a-z0-9 ]{0,10}".prop_map(|s: String| format!("\"{s}\"")),
+            "[a-z][a-z0-9]{0,5}".prop_map(|s: String| format!("[{s}]")),
+            (-1000i64..1000).prop_map(|n| format!("{n} + {n}")),
+        ]
+        .boxed()
+    }
+
+    proptest! {
+        /// M44: `spawn [body] recv r` produces the same `Value` (via `mold`)
+        /// as evaluating `body` directly on the main thread.
+        /// Marked `#[ignore]` (slow — spawns a thread per case).
+        #[test]
+        #[ignore = "slow — spawns a thread per case; run with --ignored"]
+        fn spawn_recv_round_trip(body in gen_spawnable_body()) {
+            // Evaluate `body` directly to get the expected result.
+            let direct = run_captured(&body, false);
+            // Spawn [body], recv the result.
+            let src = format!("r: spawn [{body}] recv r");
+            let spawned = run_captured(&src, false);
+
+            // Both should agree (both Ok with same stdout, or both Err).
+            let direct_n = normalize(direct);
+            let spawned_n = normalize(spawned);
+            prop_assert_eq!(
+                &direct_n,
+                &spawned_n,
+                "spawn/recv mismatch for body {:?}\ndirect:  {}\nspawned: {}",
+                body,
+                direct_n,
+                spawned_n,
+            );
+        }
     }
 }
