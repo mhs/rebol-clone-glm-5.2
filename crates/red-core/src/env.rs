@@ -14,6 +14,7 @@ use std::fmt;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use crate::context::Context;
 use crate::value::{ErrorValue, FuncDef, ModuleDef, Series, Span, Symbol, Value};
@@ -333,6 +334,28 @@ pub struct Env {
     /// (re-definition shadows the old one; existing predicates/constructors
     /// registered on `natives` keep their old behavior until re-defined).
     pub semantic_types: HashMap<Symbol, Rc<crate::value::SemanticTypeDef>>,
+    /// M41: shared output sink for worker threads. When `Some`, `fork_thread_env`
+    /// clones this `Arc` for the worker's `ThreadEnv`. When `None` (the default),
+    /// `fork_thread_env` creates a fresh `Arc<Mutex<...>>` from `io::stdout()`.
+    /// Set by test helpers that want to capture worker output into a shared
+    /// buffer; unset for the CLI (workers share stdout directly).
+    pub out_arc: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
+    /// M41: worker thread join handles. `spawn_thread` pushes here for
+    /// join-all-at-exit semantics. `Env::Drop` joins all handles, surfacing
+    /// panics as warnings to stderr. A `--detach-threads` CLI flag (deferred)
+    /// would skip the join.
+    pub thread_handles: Vec<std::thread::JoinHandle<Result<crate::concurrency::SendValue, String>>>,
+    /// M45: actor ready-queue. `send-actor` pushes actors here; `run-actors`
+    /// drains it. Each entry is an actor `Object` (with `mailbox:`/`handler:`/
+    /// `alive?:` fields) that has at least one pending message.
+    pub actor_ready_queue: Vec<Rc<RefCell<crate::value::ObjectDef>>>,
+    /// M45: parked actors (keyed by `Rc::as_ptr` as `usize`) whose mailboxes
+    /// were empty when the scheduler tried to dispatch. Cleared on
+    /// `send-actor` (which un-parks by pushing to the ready-queue).
+    pub actor_park_set: HashSet<usize>,
+    /// M45: the currently-dispatching actor (set by `run-actors` before
+    /// calling each handler; read by `receive` to find the mailbox).
+    pub current_actor: Option<Rc<RefCell<crate::value::ObjectDef>>>,
     /// High-water mark of `call_stack.len()` since the last
     /// [`Self::reset_stats`] call. Used by the v0.3 VM milestones to prove
     /// tail-call stack bounds. Only present under the `stats` cargo feature;
@@ -404,6 +427,11 @@ impl Env {
             tests_run: false,
             test_failed: 0,
             semantic_types: HashMap::new(),
+            out_arc: None,
+            thread_handles: Vec::new(),
+            actor_ready_queue: Vec::new(),
+            actor_park_set: HashSet::new(),
+            current_actor: None,
             #[cfg(feature = "stats")]
             max_frame_depth: 0,
             #[cfg(feature = "stats")]
@@ -500,6 +528,56 @@ impl Env {
     /// body).
     pub fn current_module(&self) -> Option<&Rc<RefCell<ModuleDef>>> {
         self.module_stack.last()
+    }
+
+    /// M41: snapshot this `Env` into a `ThreadEnv` for a worker thread.
+    ///
+    /// The `user_ctx` is marshalled into a `SendContext` (via M40's
+    /// `marshal_context`) — a `Send`-safe mirror with `Arc<str>` words and
+    /// `SendValue` slots. The output sink is shared via `Arc<Mutex<...>>`
+    /// (from `self.out_arc` if set, else a fresh stdout wrapper). The worker
+    /// reconstructs a full `Env` on its own thread (calling
+    /// `register_natives` to build a fresh `HashMap<Symbol, Rc<FuncDef>>` —
+    /// all `Rc`s created on the worker thread, no `Rc` crosses a boundary).
+    pub fn fork_thread_env(
+        &self,
+        body: crate::concurrency::SendBlock,
+    ) -> Result<crate::concurrency::ThreadEnv, EvalError> {
+        let user_ctx = crate::concurrency::marshal_context(&self.user_ctx)?;
+        let out = self.out_arc.clone().unwrap_or_else(|| {
+            Arc::new(Mutex::new(Box::new(io::stdout())))
+        });
+        Ok(crate::concurrency::ThreadEnv {
+            user_ctx,
+            body,
+            out,
+            cwd: self.cwd.clone(),
+            allow_shell: self.allow_shell,
+            allow_network: self.allow_network,
+        })
+    }
+}
+
+impl Drop for Env {
+    /// M41: join all worker thread handles at exit. Each handle's `join()`
+    /// blocks until the worker finishes (eval success, eval error, or panic).
+    /// Panics and errors are surfaced as warnings to stderr (the main thread
+    /// doesn't propagate them as panics — that would be surprising). Workers
+    /// that are still running (e.g. infinite loops) will block `Drop` until
+    /// they finish (v0.6 has no `kill`/`cancel` primitive — deferred to v0.7
+    /// alongside `select`).
+    fn drop(&mut self) {
+        for handle in std::mem::take(&mut self.thread_handles) {
+            match handle.join() {
+                Ok(Ok(_)) => {} // success
+                Ok(Err(msg)) => {
+                    eprintln!("warning: worker thread eval error: {msg}");
+                }
+                Err(panic) => {
+                    eprintln!("warning: worker thread panicked: {panic:?}");
+                }
+            }
+        }
     }
 }
 

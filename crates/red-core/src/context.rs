@@ -10,8 +10,9 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
-use crate::value::{Symbol, Value};
+use crate::value::{Series, Symbol, Value};
 
 /// A word context: ordered name → slot map plus a slot vector. Self-referential
 /// in general (a slot can hold a `Value` that references the same context),
@@ -135,6 +136,93 @@ impl Context {
             names.iter().map(|(s, &i)| (s.clone(), i)).collect();
         ordered.sort_by_key(|(_, i)| *i);
         ordered.into_iter().map(|(s, _)| s).collect()
+    }
+
+    /// M41: Produce a true deep copy of this context — a fresh `Context` with
+    /// independent `names`/`slots` storage, where every `Block`/`Paren` slot
+    /// value is deep-cloned (new `Rc<RefCell<Vec<Value>>>`), and every
+    /// `Object` slot value is recursively deep-cloned (new
+    /// `Rc<RefCell<ObjectDef>>` with a deep-cloned `ctx` and parent chain).
+    /// Scalar values (`Integer`/`Float`/`String`/etc.) are `Clone`-cheap (Rc
+    /// bump). `Func` values are deep-cloned via `Rc::new` of a cloned
+    /// `FuncDef` (body series deep-cloned, ctx deep-cloned). This is the
+    /// "frozen snapshot" operation used by `Env::fork_thread_env` to give a
+    /// worker thread an independent copy of the user context.
+    pub fn deep_clone(&self) -> Context {
+        let names = self.names.borrow().clone();
+        let slots_src = self.slots.borrow();
+        let slots: Vec<RefCell<Value>> = slots_src
+            .iter()
+            .map(|cell| RefCell::new(deep_clone_value(&cell.borrow())))
+            .collect();
+        Context {
+            names: RefCell::new(names),
+            slots: RefCell::new(slots),
+        }
+    }
+}
+
+/// M41: Deep-clone a `Value` — recursively clones `Block`/`Paren` (new
+/// `Series` with deep-cloned `Vec<Value>`), `Object` (new `Rc<RefCell<
+/// ObjectDef>>` with deep-cloned `ctx` and parent chain), and `Func` (new
+/// `Rc<FuncDef>` with deep-cloned body). All other variants fall through to
+/// `Value::clone` (Rc bump for `Rc`-backed variants, copy for scalars).
+fn deep_clone_value(v: &Value) -> Value {
+    match v {
+        Value::Block { series, span } => Value::Block {
+            series: deep_clone_series(series),
+            span: *span,
+        },
+        Value::Paren { series, span } => Value::Paren {
+            series: deep_clone_series(series),
+            span: *span,
+        },
+        Value::Object(obj) => {
+            let src = obj.borrow();
+            let ctx = Rc::new(src.ctx.deep_clone());
+            let parent = src.parent.as_ref().map(|p| {
+                Rc::new(RefCell::new(deep_clone_object(&p.borrow())))
+            });
+            let self_word = src.self_word.clone();
+            let protected = RefCell::new(*src.protected.borrow());
+            drop(src);
+            Value::Object(Rc::new(RefCell::new(crate::value::ObjectDef {
+                ctx,
+                parent,
+                self_word,
+                protected,
+            })))
+        }
+        Value::Func(fd) => {
+            let fd = (**fd).clone();
+            Value::Func(Rc::new(fd))
+        }
+        Value::Closure(cl) => {
+            let func = Rc::new((*cl.func).clone());
+            let captures = cl.captures.clone();
+            Value::Closure(Rc::new(crate::value::ClosureDef { func, captures }))
+        }
+        other => other.clone(),
+    }
+}
+
+/// Deep-clone a `Series`: fresh `Rc<RefCell<Vec<Value>>>` with each value
+/// recursively deep-cloned.
+fn deep_clone_series(series: &Series) -> Series {
+    let data = series.data.borrow();
+    let cloned: Vec<Value> = data.iter().map(deep_clone_value).collect();
+    Series::new(cloned)
+}
+
+/// Deep-clone an `ObjectDef` (helper for `deep_clone_value`'s `Object` arm).
+fn deep_clone_object(obj: &crate::value::ObjectDef) -> crate::value::ObjectDef {
+    crate::value::ObjectDef {
+        ctx: Rc::new(obj.ctx.deep_clone()),
+        parent: obj.parent.as_ref().map(|p| {
+            Rc::new(RefCell::new(deep_clone_object(&p.borrow())))
+        }),
+        self_word: obj.self_word.clone(),
+        protected: RefCell::new(*obj.protected.borrow()),
     }
 }
 
