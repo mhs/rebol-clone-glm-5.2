@@ -573,8 +573,53 @@ pub(crate) fn compile_positional(schema: &Series) -> Result<Series, EvalError> {
             });
         }
         let constraint = &items[i];
-        i += 1;
-        let check = compile_constraint(name.as_str(), constraint)?;
+        // M178 (plan18 L688-692): bare word forms — `range lo hi` and
+        // `where [pred]` may appear unwrapped after the field name
+        // (`month: range 1 12`). A Paren operand is spliced into the emitted
+        // check and evaluated at parse-run time with the already-captured
+        // field words in scope (dependent constraints:
+        // `day: range 1 (days-in-month year month)` — the captures are
+        // parse words in `user_ctx`, so the paren resolves them).
+        let (check, consumed) = if is_primitive_word(constraint, "range") {
+            if i + 2 >= items.len() {
+                return Err(EvalError::Native {
+                    message: "compile-schema: range expects 2 args (lo hi)".into(),
+                    span: constraint.span_or_default(),
+                });
+            }
+            (
+                range_check(name.as_str(), &items[i + 1], &items[i + 2]),
+                3usize,
+            )
+        } else if is_primitive_word(constraint, "where") {
+            if i + 1 >= items.len() {
+                return Err(EvalError::Native {
+                    message: "compile-schema: where expects 1 arg (predicate block)".into(),
+                    span: constraint.span_or_default(),
+                });
+            }
+            let pred: Vec<Value> = match &items[i + 1] {
+                Value::Block { series, .. } => {
+                    let d = series.data.borrow();
+                    d[series.index..].to_vec()
+                }
+                other => {
+                    return Err(EvalError::Native {
+                        message: format!(
+                            "compile-schema: where expects a block, got {}",
+                            type_name(other)
+                        ),
+                        span: other.span_or_default(),
+                    });
+                }
+            };
+            let mut blk_items = vec![w("integer?"), w(name.as_str())];
+            blk_items.extend(pred);
+            (paren(vec![w("all"), blk(blk_items)]), 2usize)
+        } else {
+            (compile_constraint(name.as_str(), constraint)?, 1usize)
+        };
+        i += consumed;
         // Emit: set <name> skip if (check)
         // or for optional: opt [set <name> skip if (check)]
         let field_rule: Vec<Value> = vec![
@@ -702,7 +747,25 @@ pub(crate) fn compile_streamed(schema: &Series) -> Result<Series, EvalError> {
     let data = schema.data.borrow();
     let items = &data[schema.index..];
     let mut rule: Vec<Value> = Vec::with_capacity(items.len() + 1);
-    for v in items.iter() {
+    let mut idx = 0;
+    while idx < items.len() {
+        let v = &items[idx];
+        // M178 (plan18 L688): count forms. `[3 segment]` passes through as
+        // parse's `3 <rule>` (the parse dialect's count prefix — works with
+        // both charset and block sub-rules); the `[2 to 5 alpha]` form needs
+        // the `to` dropped — parse's bounded-count prefix is two bare
+        // integers (`2 5 <rule>`), matching M138's count forms.
+        if let Value::Integer { .. } = v {
+            if idx + 2 < items.len()
+                && is_primitive_word(&items[idx + 1], "to")
+                && matches!(&items[idx + 2], Value::Integer { .. })
+            {
+                rule.push(items[idx].clone());
+                rule.push(items[idx + 2].clone());
+                idx += 3;
+                continue;
+            }
+        }
         if let Some(charset) = charset_for_word(v) {
             rule.push(charset);
         } else if is_primitive_word(v, "segment") {
@@ -723,6 +786,7 @@ pub(crate) fn compile_streamed(schema: &Series) -> Result<Series, EvalError> {
         } else {
             rule.push(v.clone());
         }
+        idx += 1;
     }
     rule.push(w("end"));
     Ok(Series::new(rule))
@@ -2463,5 +2527,87 @@ mod tests {
     fn make_rgb_predicate_works_on_result() {
         let src = "define-type 'rgb! 'tuple! [r: byte g: byte b: byte] ";
         assert_eq!(mold_to_string(&val(&format!("{}{}", src, "rgb? make rgb! 255.0.0"))), "true");
+    }
+
+    // --- M178 schema-compiler extensions (Feature A §8) ---
+
+    #[test]
+    fn schema_count_form_exact() {
+        // `[3 segment]` — exactly 3 word!/string! elements (parse's
+        // `3 <rule>` count prefix, passed through by the streamed compiler).
+        let v = val("define-type 'ids! 'block! [3 segment] valid? 'ids! [a b c]");
+        assert_eq!(mold_to_string(&v), "true");
+        let v = val("define-type 'ids! 'block! [3 segment] valid? 'ids! [a b]");
+        assert_eq!(mold_to_string(&v), "false");
+        let v = val("define-type 'ids! 'block! [3 segment] valid? 'ids! [a b c d]");
+        assert_eq!(mold_to_string(&v), "false");
+    }
+
+    #[test]
+    fn schema_count_form_bounded() {
+        // `[2 to 5 alpha]` — the `to` form compiles to parse's two-int
+        // bounded count (`2 5 <rule>`).
+        let v = val("define-type 'code! 'string! [2 to 5 alpha] valid? 'code! \"abc\"");
+        assert_eq!(mold_to_string(&v), "true");
+        let v = val("define-type 'code! 'string! [2 to 5 alpha] valid? 'code! \"a\"");
+        assert_eq!(mold_to_string(&v), "false");
+        let v = val("define-type 'code! 'string! [2 to 5 alpha] valid? 'code! \"abcdef\"");
+        assert_eq!(mold_to_string(&v), "false");
+    }
+
+    #[test]
+    fn schema_bare_range_word_form() {
+        // `month: range 1 12` — the range word form unwrapped (previously
+        // only the `[range lo hi]` block form parsed).
+        let v = val(
+            "define-type 'chan! 'tuple! [a: byte b: range 1 10 c: byte] valid? 'chan! 1.2.3",
+        );
+        assert_eq!(mold_to_string(&v), "true");
+        let v = val(
+            "define-type 'chan! 'tuple! [a: byte b: range 1 10 c: byte] valid? 'chan! 1.20.3",
+        );
+        assert_eq!(mold_to_string(&v), "false");
+        // Operand count check.
+        let e = match run_capture_val(
+            "define-type 'bad! 'tuple! [a: byte b: range 1]",
+        ) {
+            Err(msg) => msg,
+            Ok((v, _)) => panic!("expected error, got {}", mold_to_string(&v)),
+        };
+        assert!(e.contains("range expects 2 args"), "got {e:?}");
+    }
+
+    #[test]
+    fn schema_bare_where_word_form() {
+        // `b: where [pred]` — the where word form unwrapped.
+        let v = val(
+            "define-type 'even-t! 'tuple! [a: byte b: where [even? b] c: byte] valid? 'even-t! 1.2.3",
+        );
+        assert_eq!(mold_to_string(&v), "true");
+        let v = val(
+            "define-type 'even-t! 'tuple! [a: byte b: where [even? b] c: byte] valid? 'even-t! 1.3.3",
+        );
+        assert_eq!(mold_to_string(&v), "false");
+    }
+
+    #[test]
+    fn schema_dependent_constraint_paren_operand() {
+        // The plan's iso-date! example (2-digit years — tuple bytes are
+        // 0..255): `day: range 1 (days-in-month year month)` — the paren
+        // hi operand is evaluated at check time with the already-captured
+        // field words in scope. 24.2.29 = 2024 leap (29 days); 23.2.29 =
+        // 2023 non-leap.
+        let def = "define-type 'iso-date! 'tuple! [year: integer month: range 1 12 day: range 1 (days-in-month year month)] ";
+        for (tuple, want) in [("24.2.29", "true"), ("23.2.29", "false"), ("23.2.28", "true")] {
+            let v = val(&format!("{def}valid? 'iso-date! {tuple}"));
+            assert_eq!(
+                mold_to_string(&v),
+                want,
+                "iso-date! {tuple}: leap-year dependent constraint"
+            );
+        }
+        // Month range still enforced independently.
+        let v = val(&format!("{def}valid? 'iso-date! 24.13.29"));
+        assert_eq!(mold_to_string(&v), "false");
     }
 }
