@@ -2464,6 +2464,12 @@ fn intersect(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value,
     if let (Value::Bitset(a), Value::Bitset(b)) = (&args[0], &args[1]) {
         return Ok(crate::bitset::bitset_intersect(a, b));
     }
+    // Typeset dispatch: both operands typeset! → typeset intersect (value
+    // semantics; group words expand first — see typeset::typeset_intersect).
+    if let (Value::Typeset(a), Value::Typeset(b)) = (&args[0], &args[1]) {
+        let span = args[0].span_or_default();
+        return crate::typeset::typeset_intersect(a, b, span);
+    }
     let case_sensitive = refs.has(&Symbol::new("case"));
     let (a_vals, span, kind) = series_to_values(&args[0])?;
     let (b_vals, _, _) = series_to_values(&args[1])?;
@@ -2485,6 +2491,11 @@ fn union(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eva
     }
     if let (Value::Bitset(a), Value::Bitset(b)) = (&args[0], &args[1]) {
         return Ok(crate::bitset::bitset_union(a, b));
+    }
+    // Typeset dispatch: both operands typeset! → typeset union.
+    if let (Value::Typeset(a), Value::Typeset(b)) = (&args[0], &args[1]) {
+        let span = args[0].span_or_default();
+        return crate::typeset::typeset_union(a, b, span);
     }
     let case_sensitive = refs.has(&Symbol::new("case"));
     let (a_vals, span, kind) = series_to_values(&args[0])?;
@@ -2508,6 +2519,13 @@ fn difference(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value
     }
     if let (Value::Bitset(a), Value::Bitset(b)) = (&args[0], &args[1]) {
         return Ok(crate::bitset::bitset_difference(a, b));
+    }
+    // Typeset dispatch: both operands typeset! → typeset difference
+    // (symmetric, matching the series semantics above — the bitset
+    // difference is asymmetric).
+    if let (Value::Typeset(a), Value::Typeset(b)) = (&args[0], &args[1]) {
+        let span = args[0].span_or_default();
+        return crate::typeset::typeset_difference(a, b, span);
     }
     let case_sensitive = refs.has(&Symbol::new("case"));
     let (a_vals, span, kind) = series_to_values(&args[0])?;
@@ -2534,6 +2552,13 @@ fn difference(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value
 fn exclude(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 2 {
         return Err(arity(args, "exclude", 2, args.len()));
+    }
+    // Typeset dispatch: both operands typeset! → asymmetric difference.
+    // (No bitset arm — bitset `difference` is already asymmetric; for
+    // typesets both Red semantics exist.)
+    if let (Value::Typeset(a), Value::Typeset(b)) = (&args[0], &args[1]) {
+        let span = args[0].span_or_default();
+        return crate::typeset::typeset_exclude(a, b, span);
     }
     let case_sensitive = refs.has(&Symbol::new("case"));
     let (a_vals, span, kind) = series_to_values(&args[0])?;

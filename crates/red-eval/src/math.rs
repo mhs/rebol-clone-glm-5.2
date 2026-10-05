@@ -2111,8 +2111,15 @@ fn complement_native(
             new_bs.complement();
             Ok(Value::bitset(new_bs))
         }
+        // v0.8 deferral, shipped: typeset complement — every known leaf type
+        // less the operand's expanded types (group words expand first, so
+        // `complement make typeset! [any-word!]` removes the whole word
+        // family).
+        Value::Typeset(ts) => {
+            crate::typeset::typeset_complement(ts, args[0].span_or_default())
+        }
         other => Err(EvalError::TypeError {
-            expected: "integer! or bitset!",
+            expected: "integer!, bitset!, or typeset!",
             found: type_name(other),
             span: other.span_or_default(),
         }),

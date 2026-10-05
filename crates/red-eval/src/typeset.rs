@@ -13,13 +13,18 @@
 //! type's compiled parse rule after the base-type check passes. This lets
 //! `[rgb!]` in a func spec validate the semantic constraint at call time.
 //!
-//! The typeset *algebra* (`union`/`intersect`/`complement` of typesets) is
-//! deferred to v0.8 — v0.7 ships the value type, the predicate, the
-//! constructors, and the typed-function-arg headline feature only.
+//! The typeset *algebra* (`union`/`intersect`/`difference`/`exclude`/
+//! `complement` of two typesets) operates on **expanded leaf-word sets**:
+//! group words (`number!`/`any-word!`/…) expand via `group_members` before
+//! combining, results are fresh `TypesetDef`s (inputs never mutated — they
+//! may be shared via `FuncDef.param_types`), and typesets carrying a
+//! semantic ref (M176) are rejected (algebra is ill-defined for them).
+//! Dispatch arms live in `series.rs` (`union`/`intersect`/`difference`/
+//! `exclude`) and `math.rs` (`complement`), next to the bitset precedent.
 
 use std::rc::Rc;
 
-use red_core::value::{SemanticTypeDef, Span, Symbol, TypesetDef, Value};
+use red_core::value::{group_members, SemanticTypeDef, Span, Symbol, TypesetDef, Value, TYPE_WORDS};
 use red_core::{Env, EvalError, RefineArgs};
 
 use crate::natives::{arity_err, type_name};
@@ -234,6 +239,120 @@ pub(crate) fn typeset_label(ts: &TypesetDef) -> String {
     }
     s.push(']');
     s
+}
+
+// ---------------------------------------------------------------------------
+// Typeset algebra (the v0.8 deferral, shipped)
+// ---------------------------------------------------------------------------
+
+/// Expand a typeset's word set to leaf words: group words (`number!`,
+/// `any-word!`, `series!`, `any-type!`, …) expand via `group_members` to
+/// their members; leaf words pass through. Needed because raw word-set
+/// intersection is wrong under groups — `intersect make typeset! [integer!]
+/// make typeset! [number!]` must yield `[integer!]`, but the raw sets
+/// `{integer!}` ∩ `{number!}` would be empty.
+fn expanded_leaf_set(ts: &TypesetDef) -> std::collections::HashSet<Symbol> {
+    let mut out = std::collections::HashSet::new();
+    for sym in ts.types.borrow().iter() {
+        match group_members(sym.as_str()) {
+            Some(members) => out.extend(members.iter().map(|w| Symbol::new(w))),
+            None => {
+                out.insert(sym.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Reject a typeset carrying a semantic ref (M176): algebra on a
+/// semantic-constrained set is ill-defined (the semantic rule isn't a set
+/// of words), mirroring the no-mixing rule in `parse_typeset_block`.
+fn require_no_semantic(ts: &TypesetDef, op: &str, span: Span) -> Result<(), EvalError> {
+    if ts.semantic.borrow().is_some() {
+        return Err(EvalError::Native {
+            message: format!(
+                "{op}: typeset algebra is not defined for semantic-type sets"
+            ),
+            span,
+        });
+    }
+    Ok(())
+}
+
+/// `union ts1 ts2` (both typeset!) — set union of the expanded leaf sets.
+/// Value semantics: builds a fresh `TypesetDef`; inputs are never mutated
+/// (unlike the bitset ops, which mutate in place — typesets are shared via
+/// `FuncDef.param_types`, so mutation would corrupt function signatures).
+pub(crate) fn typeset_union(a: &Rc<TypesetDef>, b: &Rc<TypesetDef>, span: Span) -> Result<Value, EvalError> {
+    require_no_semantic(a, "union", span)?;
+    require_no_semantic(b, "union", span)?;
+    let mut set = expanded_leaf_set(a);
+    set.extend(expanded_leaf_set(b));
+    Ok(Value::typeset(TypesetDef::new(set)))
+}
+
+/// `intersect ts1 ts2` — set intersection of the expanded leaf sets.
+pub(crate) fn typeset_intersect(
+    a: &Rc<TypesetDef>,
+    b: &Rc<TypesetDef>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    require_no_semantic(a, "intersect", span)?;
+    require_no_semantic(b, "intersect", span)?;
+    let sa = expanded_leaf_set(a);
+    let sb = expanded_leaf_set(b);
+    let set: std::collections::HashSet<Symbol> = sa.intersection(&sb).cloned().collect();
+    Ok(Value::typeset(TypesetDef::new(set)))
+}
+
+/// `difference ts1 ts2` — symmetric difference (matching the series-op and
+/// Red semantics: elements of one but not both). Distinct from `exclude`.
+pub(crate) fn typeset_difference(
+    a: &Rc<TypesetDef>,
+    b: &Rc<TypesetDef>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    require_no_semantic(a, "difference", span)?;
+    require_no_semantic(b, "difference", span)?;
+    let sa = expanded_leaf_set(a);
+    let sb = expanded_leaf_set(b);
+    let set: std::collections::HashSet<Symbol> = sa
+        .symmetric_difference(&sb)
+        .cloned()
+        .collect();
+    Ok(Value::typeset(TypesetDef::new(set)))
+}
+
+/// `exclude ts1 ts2` — asymmetric difference: ts1's types less ts2's.
+/// (The bitset ops deliberately have no `exclude` arm — bitset `difference`
+/// is already asymmetric — but for typesets both Red semantics exist.)
+pub(crate) fn typeset_exclude(
+    a: &Rc<TypesetDef>,
+    b: &Rc<TypesetDef>,
+    span: Span,
+) -> Result<Value, EvalError> {
+    require_no_semantic(a, "exclude", span)?;
+    require_no_semantic(b, "exclude", span)?;
+    let sa = expanded_leaf_set(a);
+    let sb = expanded_leaf_set(b);
+    let set: std::collections::HashSet<Symbol> = sa.difference(&sb).cloned().collect();
+    Ok(Value::typeset(TypesetDef::new(set)))
+}
+
+/// `complement ts` — every known leaf type less the ts's expanded types.
+/// Group words must expand first: `complement make typeset! [any-word!]`
+/// subtracts every word-family type, not the literal (non-leaf) word
+/// `any-word!` (which isn't in `TYPE_WORDS` at all — without expansion the
+/// result would incorrectly be all types).
+pub(crate) fn typeset_complement(ts: &Rc<TypesetDef>, span: Span) -> Result<Value, EvalError> {
+    require_no_semantic(ts, "complement", span)?;
+    let expanded = expanded_leaf_set(ts);
+    let set: std::collections::HashSet<Symbol> = TYPE_WORDS
+        .iter()
+        .map(|w| Symbol::new(w))
+        .filter(|sym| !expanded.contains(sym))
+        .collect();
+    Ok(Value::typeset(TypesetDef::new(set)))
 }
 
 // ---------------------------------------------------------------------------
@@ -522,5 +641,165 @@ mod tests {
         // Existing funcs with builtin type specs still work (no semantic ref).
         let v = val("f: func [x [integer!]] [x + 1] f 5");
         assert_eq!(mold_to_string(&v), "6");
+    }
+
+    // --- Typeset algebra (the v0.8 deferral, shipped) ---
+
+    #[test]
+    fn typeset_union_algebra() {
+        let v = val("union make typeset! [integer!] make typeset! [string!]");
+        assert_eq!(mold_to_string(&v), "make typeset! [integer! string!]");
+        // Union with a group word keeps only leaves (group expands).
+        let v = val("union make typeset! [integer!] make typeset! [number!]");
+        assert_eq!(
+            mold_to_string(&v),
+            "make typeset! [decimal! float! integer! percent!]"
+        );
+    }
+
+    #[test]
+    fn typeset_intersect_algebra() {
+        // Group expansion matters: {integer!,string!} ∩ {number!} = {integer!}.
+        let v = val("intersect make typeset! [integer! string!] make typeset! [number!]");
+        assert_eq!(mold_to_string(&v), "make typeset! [integer!]");
+        // Disjoint → empty typeset (accepts nothing).
+        let v = val("intersect make typeset! [integer!] make typeset! [string!]");
+        assert_eq!(mold_to_string(&v), "make typeset! []");
+    }
+
+    #[test]
+    fn typeset_difference_algebra() {
+        // Symmetric (series/Red semantics): {integer!,string!} △ {number!}
+        // = {string!, float!, decimal!, percent!} — integer! is in both.
+        let v = val("difference make typeset! [integer! string!] make typeset! [number!]");
+        assert_eq!(
+            mold_to_string(&v),
+            "make typeset! [decimal! float! percent! string!]"
+        );
+    }
+
+    #[test]
+    fn typeset_exclude_algebra() {
+        // Asymmetric: {integer!,string!} \ {number!} = {string!}.
+        let v = val("exclude make typeset! [integer! string!] make typeset! [number!]");
+        assert_eq!(mold_to_string(&v), "make typeset! [string!]");
+    }
+
+    #[test]
+    fn typeset_complement_algebra() {
+        // Group words expand: complement of any-word! removes the entire
+        // word family (word!/set-word!/get-word!/lit-word!/refinement!).
+        let v = val("complement make typeset! [any-word!]");
+        let m = mold_to_string(&v);
+        for absent in ["word!", "set-word!", "get-word!", "lit-word!", "refinement!"] {
+            let needle = format!("{absent} ");
+            assert!(
+                !m.contains(&needle),
+                "complement of any-word! should drop {absent}: {m}"
+            );
+        }
+        // Non-group leaves are kept.
+        assert!(m.contains("integer!"), "integer! should remain: {m}");
+        // Complement of a single leaf removes exactly it.
+        let v = val("complement make typeset! [integer!]");
+        let m = mold_to_string(&v);
+        assert!(!m.contains("integer! ") && m.contains("string!"), "got {m}");
+    }
+
+    #[test]
+    fn typeset_algebra_result_accepts() {
+        // The union result accepts what either operand accepted (direct
+        // `TypesetDef::accepts` check — the func-spec parser takes blocks,
+        // not typeset values).
+        let v = val("union make typeset! [number!] make typeset! [string!]");
+        match &v {
+            Value::Typeset(ts) => {
+                assert!(ts.accepts(&Value::integer(1)), "should accept integer!");
+                assert!(ts.accepts(&Value::string("x")), "should accept string!");
+                assert!(!ts.accepts(&Value::Logic(true)), "should reject logic!");
+            }
+            other => panic!("expected typeset!, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typeset_algebra_semantic_ref_rejected() {
+        // A typeset carrying a semantic ref (M176) can't participate in
+        // algebra — the semantic rule isn't a set of words. Semantic-ref
+        // typesets are only constructible via func specs
+        // (`parse_typeset_block`), so exercise the rejection at the Rust
+        // level with a hand-built one.
+        let def = Rc::new(SemanticTypeDef {
+            name: Symbol::new("rgb!"),
+            base: Symbol::new("tuple!"),
+            shape: red_core::value::SemanticShape::Positional,
+            schema: red_core::value::Series::empty(),
+            compiled: std::cell::RefCell::new(None),
+        });
+        let sem_ts = Rc::new(TypesetDef::with_semantic(def));
+        let plain = Rc::new(TypesetDef::from_words(&["integer!"]));
+        let cases: [(&str, Result<Value, EvalError>); 5] = [
+            ("union", typeset_union(&sem_ts, &plain, Span::default())),
+            (
+                "intersect",
+                typeset_intersect(&sem_ts, &plain, Span::default()),
+            ),
+            (
+                "difference",
+                typeset_difference(&sem_ts, &plain, Span::default()),
+            ),
+            (
+                "exclude",
+                typeset_exclude(&sem_ts, &plain, Span::default()),
+            ),
+            ("complement", typeset_complement(&sem_ts, Span::default())),
+        ];
+        for (op, result) in cases {
+            match result {
+                Err(EvalError::Native { message, .. }) => assert!(
+                    message
+                        .contains("typeset algebra is not defined for semantic-type sets"),
+                    "case {op}: got {message:?}"
+                ),
+                other => panic!("case {op}: expected rejection, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn typeset_algebra_mixed_type_errors() {
+        // One typeset + one non-series value falls through to the series
+        // type check (which rejects the typeset operand first).
+        let got = err_src("union make typeset! [integer!] 5");
+        assert!(
+            got.contains("expected block!, paren!, or string!, found typeset!"),
+            "got {got:?}"
+        );
+        let got = err_src("complement \"x\"");
+        assert!(
+            got.contains("expected integer!, bitset!, or typeset!"),
+            "got {got:?}"
+        );
+    }
+
+    #[test]
+    fn typeset_algebra_value_semantics() {
+        // Inputs are never mutated (they may be shared via func specs).
+        let v = val(
+            "a: make typeset! [integer!] \
+             dummy: union a make typeset! [string!] \
+             a",
+        );
+        assert_eq!(mold_to_string(&v), "make typeset! [integer!]");
+        // `same?` false on results (fresh Rc) but `=` deep-equal.
+        let v = val(
+            "a: make typeset! [integer!] \
+             b: union a make typeset! [] \
+             same? a b",
+        );
+        match &v {
+            Value::Logic(same) => assert!(!same, "result should be a fresh Rc"),
+            other => panic!("expected logic, got {other:?}"),
+        }
     }
 }
