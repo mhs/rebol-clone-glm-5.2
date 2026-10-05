@@ -502,6 +502,14 @@ pub enum Value {
     /// `to_components(value)`; generated predicates (`rgb?`) and func-spec
     /// annotations (`[rgb!]`) route through the same path.
     SemanticType(Rc<SemanticTypeDef>),
+    /// M40: a Go-style bidirectional channel. Both ends (tx + rx) travel in
+    /// one value; cloning a Channel value = `Arc` bump (cheap). Synthetic —
+    /// produced by the `channel` native (M42); carries no source span. The
+    /// inner `ChannelInner` is `pub(crate)` and defined in `concurrency.rs`.
+    /// `recv` on an empty open channel blocks; `recv` on a drained closed
+    /// channel returns `none`. The variant is `!Sync` (the `Value` enum as a
+    /// whole stays `!Send`/`!Sync` because other variants aren't).
+    Channel(std::sync::Arc<crate::concurrency::ChannelInner>),
 }
 
 /// Payload of a `Value::Error`. M42 extends the prior message-only stub to
@@ -1518,6 +1526,7 @@ pub fn type_name_for(v: &Value) -> &'static str {
         Value::Port(_) => "port!",
         Value::Typeset(_) => "typeset!",
         Value::SemanticType(_) => "semantic-type!",
+        Value::Channel(_) => "channel!",
     }
 }
 
@@ -2718,7 +2727,8 @@ impl Value {
             | Value::Bitset(_)
             | Value::Port(_)
             | Value::Typeset(_)
-            | Value::SemanticType(_) => None,
+            | Value::SemanticType(_)
+            | Value::Channel(_) => None,
         }
     }
 

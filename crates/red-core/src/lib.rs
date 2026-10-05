@@ -1,5 +1,6 @@
 //! red-core: value model, context, env, printer, lexer, parser.
 
+pub mod concurrency;
 pub mod context;
 pub mod env;
 pub mod error;

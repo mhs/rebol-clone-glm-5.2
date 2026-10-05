@@ -179,6 +179,7 @@ pub fn mold(value: &Value, out: &mut String) {
         Value::Port(p) => mold_port(&p.borrow(), out),
         Value::Typeset(t) => mold_typeset(t, out),
         Value::SemanticType(t) => mold_semantic_type(t, out),
+        Value::Channel(_) => out.push_str("#[channel]"),
     }
 }
 
@@ -282,6 +283,7 @@ pub fn form(value: &Value, out: &mut String) {
         Value::Port(p) => mold_port(&p.borrow(), out),
         Value::Typeset(t) => mold_typeset(t, out),
         Value::SemanticType(t) => mold_semantic_type(t, out),
+        Value::Channel(_) => out.push_str("#[channel]"),
     }
 }
 
