@@ -2580,29 +2580,30 @@ mod tests {
 
     #[test]
     fn walk_set_image_pixel_poke() {
-        // Pixel poke via `poke img 0 255` (the `poke` native, not set-path)
-        // exercises the image poke path. Use poke since `img/0 0:` syntax
-        // may not be supported for multi-index paths.
+        // Pixel poke (the `poke` native) writes a tuple pixel; the path read
+        // returns the updated tuple. Covers the image poke path AND asserts
+        // the round-trip.
         let v = run_walk(
-            "img: make image! [1 1 [10 20 30 40]] poke img 0 255 probe img/0",
-        );
-        // Just assert it doesn't panic; the exact pixel representation varies.
-        let _ = v;
+            "img: make image! [1 1 [10 20 30 40]] poke img 1 255.0.0.0 img/1",
+        )
+        .unwrap();
+        assert_eq!(mold_to_string(&v), "255.0.0.0");
     }
 
-    // --- module get-path ---
+    // --- module path access ---
 
     #[test]
-    fn walk_module_get_path() {
-        // `:m/word` (module get-path with export-visibility) through the walker.
-        // The `import` native creates a module; `:m/exported` reads its value.
+    fn walk_module_path_access() {
+        // Named module (2-arg peek) read via get-path; anonymous module
+        // (1-arg peek) read via plain path — both through the walker's
+        // `collect_call_args` module arity override and `select_module_path`.
         let v = run_walk(
-            "m: import %nonexistent-does-not-matter-for-walker-test\n:missing-word",
-        );
-        // This will likely error (file not found), confirming the module path
-        // code is reached. The exact error depends on I/O; just assert it
-        // doesn't panic.
-        let _ = v;
+            "m: module 'm [x: 1 export 'x] :m/x",
+        )
+        .unwrap();
+        assert_eq!(mold_to_string(&v), "1");
+        let v = run_walk("mm: module [y: 2 export 'y] mm/y").unwrap();
+        assert_eq!(mold_to_string(&v), "2");
     }
 
     // --- closure with refinements through the walker ---
@@ -2610,12 +2611,14 @@ mod tests {
     #[test]
     fn walk_closure_with_refinements() {
         // A closure called with a refinement exercises the refinement-slot
-        // population loop in call_closure_func (uncovered in the walker).
-        let v = run_walk(
-            "f: closure [/ref x][either x [x][\"no-ref\"]] print f/ref 99 f",
-        );
-        // The closure with /ref should return 99; without, "no-ref".
-        let _ = v;
+        // population loop in call_closure_func.
+        // Note: the path form `f/ref 99` fails (paths select fields —
+        // "cannot select field ref from closure!"); use the spaced
+        // refinement form.
+        let v = run_walk("f: closure [/ref x][either x [x][\"no-ref\"]] f /ref 99").unwrap();
+        assert_eq!(mold_to_string(&v), "99");
+        let v = run_walk("f: closure [/ref x][either x [x][\"no-ref\"]] f").unwrap();
+        assert_eq!(mold_to_string(&v), "\"no-ref\"");
     }
 
     // --- poke error arms ---
@@ -2625,6 +2628,93 @@ mod tests {
         // poke with a non-char/integer/string rhs exercises poke_string_char
         // error arms.
         let err = run_walk("s: \"abc\" poke s 1 [1 2]").unwrap_err();
-        let _ = err; // may or may not error depending on poke semantics
+        assert!(
+            err.contains("expected series!") && err.contains("found string!"),
+            "got: {err}"
+        );
+    }
+
+    // --- Coverage push (Feature C §5): walk-mode error arms, arity
+    // overrides, path error tables ---
+
+    fn err_walk(src: &str) -> String {
+        match run_walk(src) {
+            Err(msg) => msg,
+            Ok(v) => panic!("expected error for {src:?}, got {}", mold_to_string(&v)),
+        }
+    }
+
+    /// Typed-param and refinement-arg collection errors in Walk mode.
+    #[test]
+    fn walk_typed_param_and_refinement_errors() {
+        let got = err_walk("f: func [x [integer!]][x] f \"a\"");
+        assert!(
+            got.contains("type error: arg 1 expected [integer!], got string!"),
+            "got {got:?}"
+        );
+        let got = err_walk("g: func [/r x][x] g/r");
+        assert!(
+            got.contains("g: refinement /r expects 1 argument(s), got 0"),
+            "got {got:?}"
+        );
+    }
+
+    /// `loop` arity override (count form = 2 args, block form = 1 arg) in
+    /// Walk mode. (Blocks mutate in place; strings are immutable in this
+    /// implementation — `append` on a string returns a new value — so use
+    /// a block accumulator.)
+    #[test]
+    fn walk_loop_arity_override() {
+        let v = run_walk("acc: [] loop 2 [append acc 1] acc").unwrap();
+        assert_eq!(mold_to_string(&v), "[1 1]");
+        // Block-only form: infinite loop gated by `break` → returns none.
+        let v = run_walk("loop [break]").unwrap();
+        assert!(matches!(v, red_core::value::Value::None), "got {v:?}");
+    }
+
+    /// One table sweeps the exotic-type path error arms in Walk mode
+    /// (`select_field`/`pick_path_index` rejects), plus the mixed
+    /// object/block path and `now/year` call-then-select.
+    #[test]
+    fn walk_path_error_arm_table() {
+        let cases: &[(&str, &str)] = &[
+            ("100x200/z", "pair! has no field z (only /x and /y)"),
+            (
+                "t: make tuple! [1 2 3] t/alpha",
+                "3-byte tuple! has no /alpha field",
+            ),
+            (
+                "d: 2024-07-14 d/bogus",
+                "date! has no field bogus (only /year /month /day /time /weekday /yearday /week /zone)",
+            ),
+            (
+                "e: a@b.com e/bogus",
+                "email! has no field bogus (only /user and /host)",
+            ),
+            (
+                "v: make vector! [integer! 1 2 3] v/bogus",
+                "vector! has no field bogus (kind is integer!)",
+            ),
+            (
+                "du: 30s du/bogus",
+                "duration! has no field bogus (only /days /hours /minutes /seconds /nanos /total-seconds)",
+            ),
+            (
+                "o: make object! [a: 1] o/nosuch",
+                "object has no field nosuch",
+            ),
+        ];
+        for (src, want) in cases {
+            let got = err_walk(src);
+            assert!(
+                got.contains(want),
+                "case {src:?}: expected {want:?}, got {got:?}"
+            );
+        }
+        // Mixed object/block path and call-then-select succeed.
+        let v = run_walk("o: make object! [items: [1 2 3]] o/items/2").unwrap();
+        assert_eq!(mold_to_string(&v), "2");
+        let v = run_walk("integer? now/year").unwrap();
+        assert!(matches!(v, red_core::value::Value::Logic(true)));
     }
 }

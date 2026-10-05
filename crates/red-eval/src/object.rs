@@ -1016,4 +1016,137 @@ mod tests {
         let src = "o: make object! [msg: \"hello\"] print o/msg";
         assert_eq!(out(src), "hello\n");
     }
+
+    // --- Coverage push (Feature C §4): error arms, same?/not-same?,
+    // protection, word/closure reflection ---
+
+    fn err_msg(src: &str) -> String {
+        match run_capture(src) {
+            Err(msg) => msg,
+            Ok((v, _)) => panic!("expected error for {src:?}, got {}", mold_to_string(&v)),
+        }
+    }
+
+    /// Reflection natives' type/arity error arms.
+    #[test]
+    fn object_error_arm_table() {
+        let o = "o: make object! [a: 1] ";
+        let cases: &[(&str, &str)] = &[
+            ("words-of 5", "expected object!, map!, or module!, found integer!"),
+            ("values-of 5", "expected object!, map!, or module!, found integer!"),
+            ("in 5 'x", "expected object!, found integer!"),
+            ("in o 'nosuchxyz", "has no value"),
+            ("spec-of 5", "expected function!, found integer!"),
+            ("body-of 5", "expected function!, found integer!"),
+            ("has 5 'x", "expected object!, found integer!"),
+            ("has o 5", "expected word!, found integer!"),
+            ("extend o 5", "expected block!, found integer!"),
+            ("extend 5 []", "expected object!, found integer!"),
+            ("reflect o 5", "expected word!, found integer!"),
+            ("reflect o 'bogus", "not supported for objects/modules"),
+            ("bound? 5", "expected word!, found integer!"),
+        ];
+        for (clause, want) in cases {
+            let src = format!("{o}{clause}");
+            let got = err_msg(&src);
+            assert!(
+                got.contains(want),
+                "case {clause:?}: expected message containing {want:?}, got {got:?}"
+            );
+        }
+    }
+
+    /// `same?` identity by `Rc::ptr_eq` per type arm; `not-same?` is its
+    /// negation (never previously tested).
+    #[test]
+    fn object_same_not_same_matrix() {
+        assert_eq!(
+            mold_to_string(&run("o: make object! [a: 1] not-same? o o")),
+            "false"
+        );
+        assert_eq!(
+            mold_to_string(&run(
+                "not-same? (make object! []) (make object! [])"
+            )),
+            "true"
+        );
+        // Map arm: same value twice vs two fresh maps.
+        assert_eq!(
+            mold_to_string(&run("m: make map! [a 1] same? m m")),
+            "true"
+        );
+        assert_eq!(
+            mold_to_string(&run(
+                "same? (make map! []) (make map! [])"
+            )),
+            "false"
+        );
+        // Func arm: `get 'print` twice resolves the same Rc<FuncDef>.
+        assert_eq!(
+            mold_to_string(&run("same? :print :print")),
+            "true"
+        );
+        assert_eq!(
+            mold_to_string(&run("same? :print :probe")),
+            "false"
+        );
+    }
+
+    /// Protecting an object makes mutation (set-path) fail via
+    /// `check_protected`; `unprotect` lifts it. Covers both the native's
+    /// object arm and the walker's set-path hook.
+    #[test]
+    fn object_protected_mutation() {
+        let got = err_msg(
+            "o: make object! [a: 1] protect o o/a: 2",
+        );
+        assert!(
+            got.contains("object is protected"),
+            "protected set-path should error, got {got:?}"
+        );
+        // unprotect restores mutation.
+        assert_eq!(
+            mold_to_string(&run(
+                "o: make object! [a: 1] protect o unprotect o o/a: 2 o/a"
+            )),
+            "2"
+        );
+    }
+
+    /// `bound?`/`bind?` on user words vs unbound names (natives don't live
+    /// in user_ctx, so only user words are `bound?`); `context-of` on a
+    /// user-ctx word yields `none` (documents the known limitation).
+    #[test]
+    fn object_bound_and_context_of() {
+        assert_eq!(
+            mold_to_string(&run("q: 1 bound? 'q")),
+            "true"
+        );
+        assert_eq!(
+            mold_to_string(&run("bound? 'nosuchxyzq")),
+            "false"
+        );
+        // Both aliases behave the same.
+        assert_eq!(
+            mold_to_string(&run("q: 1 bind? 'q")),
+            "true"
+        );
+        assert_eq!(
+            mold_to_string(&run("q: 1 context-of 'q")),
+            "none"
+        );
+    }
+
+    /// `spec-of`/`body-of` on closures (Closure arms of both natives).
+    #[test]
+    fn object_closure_reflection() {
+        assert_eq!(
+            mold_to_string(&run("c: closure [x][x + 1] spec-of :c")),
+            "[x]"
+        );
+        assert_eq!(
+            mold_to_string(&run("c: closure [x][x + 1] body-of :c")),
+            "[x + 1]"
+        );
+    }
 }
