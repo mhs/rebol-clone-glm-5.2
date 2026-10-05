@@ -154,3 +154,46 @@ fn strip_location(err: &str) -> String {
     }
     err.to_string()
 }
+
+/// Regression guards for the `vm_walk_stdout_parity_for_programs` fix
+/// (see KNOWN_ISSUES.md — the entry was resolved and removed). `if`/`either`
+/// arguments must be fetched identically by both modes: non-Block branch
+/// args are compiled/evaluated as full expressions (set-word RHS, infix
+/// chains), never passed as raw tokens, and a literal block arg followed
+/// by an infix native is "stolen" by that native as its left operand.
+#[test]
+fn if_either_arg_fetch_parity() {
+    let cases: &[&str] = &[
+        // The original proptest shrunk minimal case: the inner `if`'s
+        // block-arg is the evaluated `a: 0` (integer!), not the raw `a:`
+        // set-word token. Both modes report `expected block!, found
+        // integer!` at the `0`.
+        "if 0 - if [0] a: 0",
+        // Non-Block then-arg via set-word: both modes report integer!.
+        "if 1 a: 2",
+        // Non-Block t-arg: both modes report integer!.
+        "either 1 a: 2 [3]",
+        // Non-Block f-arg: both modes report integer!.
+        "either 1 [2] a: 3",
+        // Infix steal of a literal then-block: `+` takes [3] as its left
+        // operand → type error on block!, in both modes.
+        "if true [3] + 2",
+        // Infix steal of the either f-block.
+        "either true [1] [2] * 3",
+    ];
+    for &src in cases {
+        let vm = run_captured(src, false);
+        let walk = run_captured(src, true);
+        // Every case must error identically (byte-for-byte, spans included).
+        let (vm_err, walk_err) = match (vm, walk) {
+            (Err(v), Err(w)) => (v, w),
+            (vm, walk) => {
+                panic!("case {src:?}: expected both modes to error\nVM:   {vm:?}\nWalk: {walk:?}")
+            }
+        };
+        assert_eq!(
+            vm_err, walk_err,
+            "case {src:?}: error divergence between VM and Walk modes\nVM:   {vm_err}\nWalk: {walk_err}"
+        );
+    }
+}

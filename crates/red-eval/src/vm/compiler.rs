@@ -527,15 +527,7 @@ impl<'a> Compiler<'a> {
     /// Detect an infix native at `data[i]` (unbound `Word`/`GetWord` whose
     /// `FuncDef.infix == true`). Returns the registered `(idx, fd)` pair.
     fn infix_native_at(&self, v: &Value) -> Option<(u32, Rc<FuncDef>)> {
-        let sym = match v {
-            Value::Word { sym, binding, .. } | Value::GetWord { sym, binding, .. } => {
-                if !matches!(binding, Binding::Unbound) {
-                    return None;
-                }
-                sym
-            }
-            _ => return None,
-        };
+        let sym = crate::natives::tables::unbound_word_sym(v)?;
         self.natives
             .get(sym)
             .filter(|(_, fd)| fd.infix)
@@ -1059,15 +1051,30 @@ fn compile_if(
             kind: CompileErrorKind::ArityMismatch,
         });
     }
-    let then_block = match &data[*i] {
-        Value::Block { series, .. } => Some(series.clone()),
+    // Inline only when the then-arg is a literal Block AND the token after
+    // it isn't an infix native. The walker's `collect_call_args` fetches the
+    // then-arg via `eval_expression`, which lets a following infix op steal
+    // the block as its left operand (`if true [3] + 2` → `add([3], 2)`).
+    // Inlining here would instead apply `+` to `if`'s *result* — a parity
+    // divergence. When inlining isn't safe, compile the then-arg as a full
+    // expression and dispatch generically, exactly like the walker.
+    let then_series = match &data[*i] {
+        Value::Block { series, .. }
+            if data
+                .get(*i + 1)
+                .is_none_or(|v| c.infix_native_at(v).is_none()) =>
+        {
+            Some(series.clone())
+        }
         _ => None,
     };
-    let Some(then_series) = then_block else {
-        // Fallback: emit the block arg as Const and dispatch generically.
-        let block_const = c.push_const(data[*i].clone());
-        *i += 1;
-        c.emit(Instr::Const(block_const));
+    let Some(then_series) = then_series else {
+        // Fallback: compile the block arg as a full expression (set-word
+        // RHS, paren, word, infix chain — anything) and dispatch generically.
+        // Pushing the raw token as `Const` would diverge from the walker,
+        // which evaluates the argument (`if 1 a: 2` must report `integer!`,
+        // not `set-word!`, and must perform the `a: 2` side effect).
+        compile_expr(c, data, i, scope, /*tail*/ false)?;
         c.emit(Instr::Call(if_native_index(c), 2));
         return Ok(());
     };
@@ -1131,30 +1138,38 @@ fn compile_either(
             kind: CompileErrorKind::ArityMismatch,
         });
     }
-    let t_series = match &data[*i] {
-        Value::Block { series, .. } => series.clone(),
-        _ => {
-            // Fallback generic call.
-            let t_const = c.push_const(data[*i].clone());
-            let f_const = c.push_const(data[*i + 1].clone());
-            *i += 2;
-            c.emit(Instr::Const(t_const));
-            c.emit(Instr::Const(f_const));
-            c.emit(Instr::Call(either_native_index(c), 3));
-            return Ok(());
+    // Inline only when both branch args are literal Blocks AND the token
+    // after the f-block isn't an infix native (which would steal the f-block
+    // as its left operand in the walker's `eval_expression` fetch — same
+    // parity concern as `compile_if`). Otherwise compile both args as full
+    // expressions and dispatch generically. Note: if the token after the
+    // t-block is an infix native, the t-block gets stolen there, so the f
+    // position can't be a literal Block and we fall into the same generic
+    // path — no separate guard needed.
+    let branch_series = match (&data[*i], data.get(*i + 1)) {
+        (Value::Block { series: t, .. }, Some(Value::Block { series: f, .. }))
+            if data
+                .get(*i + 2)
+                .is_none_or(|v| c.infix_native_at(v).is_none()) =>
+        {
+            Some((t.clone(), f.clone()))
         }
+        _ => None,
     };
-    let f_series = match &data[*i + 1] {
-        Value::Block { series, .. } => series.clone(),
-        _ => {
-            let t_const = c.push_const(data[*i].clone());
-            let f_const = c.push_const(data[*i + 1].clone());
-            *i += 2;
-            c.emit(Instr::Const(t_const));
-            c.emit(Instr::Const(f_const));
-            c.emit(Instr::Call(either_native_index(c), 3));
-            return Ok(());
+    let Some((t_series, f_series)) = branch_series else {
+        // Fallback: compile t/f args as full expressions (matching the
+        // walker's `collect_call_args`, which evaluates each argument —
+        // set-word RHS, infix chains, etc. — rather than passing raw tokens).
+        compile_expr(c, data, i, scope, /*tail*/ false)?;
+        if *i >= data.len() {
+            return Err(CompileError {
+                span,
+                kind: CompileErrorKind::ArityMismatch,
+            });
         }
+        compile_expr(c, data, i, scope, /*tail*/ false)?;
+        c.emit(Instr::Call(either_native_index(c), 3));
+        return Ok(());
     };
     *i += 2;
 
@@ -1381,51 +1396,22 @@ fn collect_args(
     }
 
     let arity = fd.params.len();
-    let uneval_first = matches!(
-        sym.as_str(),
-        "repeat"
-            | "foreach"
-            | "forall"
-            | "for"
-            | "forskip"
-            | "map-each"
-            | "remove-each"
-            | "make"
-            | "to"
-            | "default"
-            | "module"
-            | "bound?"
-            | "bind?"
-            | "context-of"
-            | "bind-of"
-            | "dump"
-    );
+    // Shared tables (natives/tables.rs) — one source of truth for the VM
+    // compiler and the walker, so the two can't drift apart.
+    let uneval_first = crate::natives::tables::is_uneval_first_native(sym.as_str());
 
     // M61: `module` variable-arity peek — 2 args if the next value is a
     // Word-family (the name), 1 arg if it's a Block (the body). Mirrors
     // the walker's `collect_call_args` override.
     let module_arity_override = if sym.as_str() == "module" {
-        match data.get(*i) {
-            Some(
-                Value::Word { .. }
-                | Value::GetWord { .. }
-                | Value::LitWord { .. }
-                | Value::SetWord { .. },
-            ) => Some(2),
-            Some(Value::Block { .. }) => Some(1),
-            _ => None,
-        }
+        crate::natives::tables::module_arity_override(data.get(*i))
     } else {
         None
     };
     // `loop count block` (arity 2) vs `loop block` (arity 1, infinite).
     // Peek the first arg: Integer → 2, Block → 1.
     let loop_arity_override = if sym.as_str() == "loop" {
-        match data.get(*i) {
-            Some(Value::Integer { .. }) | Some(Value::Float { .. }) => Some(2),
-            Some(Value::Block { .. }) | Some(Value::Paren { .. }) => Some(1),
-            _ => None,
-        }
+        crate::natives::tables::loop_arity_override(data.get(*i))
     } else {
         None
     };
@@ -1496,16 +1482,8 @@ fn collect_args(
 impl<'a> Compiler<'a> {
     /// Dynamic form of `is_native_word_at` (takes `&self` for the registry).
     fn is_native_word_at_dyn(&self, data: &[Value], i: usize) -> bool {
-        let sym = match &data[i] {
-            Value::Word { sym, binding, .. } | Value::GetWord { sym, binding, .. } => {
-                if !matches!(binding, Binding::Unbound) {
-                    return false;
-                }
-                sym
-            }
-            _ => return false,
-        };
-        self.natives.contains(sym)
+        crate::natives::tables::unbound_word_sym(&data[i])
+            .is_some_and(|sym| self.natives.contains(sym))
     }
 }
 
@@ -2250,6 +2228,114 @@ mod tests {
             "compile `if 1 [42]`",
         );
         assert_eq!(block.pool.len(), 0);
+    }
+
+    /// `if 1 a: 2` — non-Block then-arg. The fallback must compile the arg as
+    /// a full expression (`a: 2` → RHS + SetGlobal, matching the walker's
+    /// `eval_expression` fetch) and dispatch generically — NOT push the raw
+    /// `a:` set-word token as a `Const`. Regression guard for the
+    /// `vm_walk_stdout_parity_for_programs` divergence (see KNOWN_ISSUES.md).
+    #[test]
+    fn compile_if_fallback_compiles_arg_expression() {
+        let (body, ctx_rc, registry) = parse_bind_and_registry("if 1 a: 2");
+        let a_slot = ctx_rc
+            .names
+            .borrow()
+            .get(&Symbol::new("a"))
+            .copied()
+            .expect("`a` should be bound");
+        let if_idx = registry
+            .get(&Symbol::new("if"))
+            .map(|(idx, _)| idx)
+            .expect("`if` native registered");
+        let mut scope = Scope::root(&ctx_rc);
+        let block = compile_block(&body, &mut scope, &registry).expect("compile");
+        assert_instrs(
+            block.instrs.as_ref(),
+            &[
+                Instr::ConstInt(1),              // cond
+                Instr::ConstInt(2),              // `a: 2` RHS
+                Instr::SetGlobal(a_slot as u32), // store (side effect — walker parity)
+                Instr::Call(if_idx, 2),          // generic dispatch
+                Instr::Return,
+            ],
+            "compile `if 1 a: 2`",
+        );
+        assert_eq!(block.pool.len(), 0);
+    }
+
+    /// `if true [3] + 2` — literal then-Block followed by an infix native.
+    /// The walker's argument fetch lets `+` steal the block as its left
+    /// operand (`add([3], 2)`), so the VM must NOT inline the then-block
+    /// (which would instead apply `+` to `if`'s result). The block-arg is
+    /// compiled as an expression: `Const([3])`, `ConstInt(2)`, `Call(+, 2)`,
+    /// then a generic `Call(if, 2)`.
+    #[test]
+    fn compile_if_infix_steal_not_inlined() {
+        let (body, ctx_rc, registry) = parse_bind_and_registry("if true [3] + 2");
+        let true_slot = ctx_rc
+            .names
+            .borrow()
+            .get(&Symbol::new("true"))
+            .copied()
+            .expect("`true` should be bound");
+        let (plus_idx, _) = registry
+            .get(&Symbol::new("+"))
+            .expect("`+` native registered");
+        let if_idx = registry
+            .get(&Symbol::new("if"))
+            .map(|(idx, _)| idx)
+            .expect("`if` native registered");
+        let mut scope = Scope::root(&ctx_rc);
+        let block = compile_block(&body, &mut scope, &registry).expect("compile");
+        // The stolen block lives in the pool (1 entry); the then-arg is the
+        // result of the `+` call, dispatched generically.
+        assert_instrs(
+            block.instrs.as_ref(),
+            &[
+                Instr::LoadGlobal(true_slot as u32), // cond
+                Instr::Const(0),                     // `[3]` block literal (stolen by `+`)
+                Instr::ConstInt(2),                  // right operand
+                Instr::Call(plus_idx, 2),
+                Instr::Call(if_idx, 2),
+                Instr::Return,
+            ],
+            "compile `if true [3] + 2`",
+        );
+        assert_eq!(block.pool.len(), 1);
+    }
+
+    /// `either 1 a: 2 [3]` — non-Block t-arg. Both branch args must be
+    /// compiled as full expressions (the raw-token `Const` fallback diverged
+    /// from the walker), then dispatched generically.
+    #[test]
+    fn compile_either_fallback_compiles_arg_expressions() {
+        let (body, ctx_rc, registry) = parse_bind_and_registry("either 1 a: 2 [3]");
+        let a_slot = ctx_rc
+            .names
+            .borrow()
+            .get(&Symbol::new("a"))
+            .copied()
+            .expect("`a` should be bound");
+        let either_idx = registry
+            .get(&Symbol::new("either"))
+            .map(|(idx, _)| idx)
+            .expect("`either` native registered");
+        let mut scope = Scope::root(&ctx_rc);
+        let block = compile_block(&body, &mut scope, &registry).expect("compile");
+        assert_instrs(
+            block.instrs.as_ref(),
+            &[
+                Instr::ConstInt(1),              // cond
+                Instr::ConstInt(2),              // `a: 2` RHS (t-arg)
+                Instr::SetGlobal(a_slot as u32), // store (side effect)
+                Instr::Const(0),                 // `[3]` (f-arg, pool)
+                Instr::Call(either_idx, 3),      // generic dispatch
+                Instr::Return,
+            ],
+            "compile `either 1 a: 2 [3]`",
+        );
+        assert_eq!(block.pool.len(), 1);
     }
 
     /// `func [x][x * x]` emits `MakeFunc` with freevars=[]. (docs/plans/plan3.md:314)

@@ -338,15 +338,7 @@ pub(crate) fn eval_expression(
 /// they're consumed by [`eval_expression`] before the prefix evaluator ever
 /// sees them.
 fn infix_native_at(v: &Value, env: &Env) -> Option<Rc<FuncDef>> {
-    let sym = match v {
-        Value::Word { sym, binding, .. } | Value::GetWord { sym, binding, .. } => {
-            if !matches!(binding, Binding::Unbound) {
-                return None;
-            }
-            sym
-        }
-        _ => return None,
-    };
+    let sym = crate::natives::tables::unbound_word_sym(v)?;
     env.natives.get(sym).filter(|fd| fd.infix).cloned()
 }
 
@@ -1948,25 +1940,9 @@ fn collect_call_args(
 
     let arity = fd.params.len();
     let mut args: Vec<Value> = Vec::with_capacity(arity);
-    let uneval_first = matches!(
-        sym.as_str(),
-        "repeat"
-            | "foreach"
-            | "forall"
-            | "for"
-            | "forskip"
-            | "map-each"
-            | "remove-each"
-            | "make"
-            | "to"
-            | "default"
-            | "module"
-            | "bound?"
-            | "bind?"
-            | "context-of"
-            | "bind-of"
-            | "dump"
-    );
+    // Shared tables (natives/tables.rs) — one source of truth for the VM
+    // compiler and the walker, so the two can't drift apart.
+    let uneval_first = crate::natives::tables::is_uneval_first_native(sym.as_str());
 
     // M61: `module` has variable arity (1 for `module [body]`, 2 for
     // `module 'name [body]`). Peek the next value: a Word-family (the name)
@@ -1974,32 +1950,20 @@ fn collect_call_args(
     // pushed as-is (the name is a word-kind literal, not evaluated —
     // matches `module 'name ...` where `'name` is a lit-word in source).
     let module_arity_override = if sym.as_str() == "module" {
-        match data.get(*i) {
-            Some(
-                Value::Word { .. }
-                | Value::GetWord { .. }
-                | Value::LitWord { .. }
-                | Value::SetWord { .. },
-            ) => Some(2),
-            Some(Value::Block { .. }) => Some(1),
-            _ => None,
-        }
+        crate::natives::tables::module_arity_override(data.get(*i))
     } else {
         None
     };
-    let arity = module_arity_override.unwrap_or(arity);
     // `loop count block` (arity 2) vs `loop block` (arity 1, infinite).
     // Peek the first arg: Integer/Float → 2, Block → 1.
     let loop_arity_override = if sym.as_str() == "loop" {
-        match data.get(*i) {
-            Some(Value::Integer { .. }) | Some(Value::Float { .. }) => Some(2),
-            Some(Value::Block { .. }) | Some(Value::Paren { .. }) => Some(1),
-            _ => None,
-        }
+        crate::natives::tables::loop_arity_override(data.get(*i))
     } else {
         None
     };
-    let arity = loop_arity_override.unwrap_or(arity);
+    let arity = module_arity_override
+        .or(loop_arity_override)
+        .unwrap_or(arity);
 
     // Positional params.
     for n in 0..arity {
@@ -2250,16 +2214,7 @@ pub(crate) fn call_closure_func(
 /// True if `v` is an unbound `Word`/`GetWord` whose name is a registered
 /// native. Used to stop variadic argument collection at the next native call.
 fn is_native_word(v: &Value, env: &Env) -> bool {
-    let sym = match v {
-        Value::Word { sym, binding, .. } | Value::GetWord { sym, binding, .. } => {
-            if !matches!(binding, Binding::Unbound) {
-                return false;
-            }
-            sym
-        }
-        _ => return false,
-    };
-    env.natives.contains_key(sym)
+    crate::natives::tables::unbound_word_sym(v).is_some_and(|sym| env.natives.contains_key(sym))
 }
 
 /// Resolve a `Word`/`GetWord` to its value via the binding, or via the native

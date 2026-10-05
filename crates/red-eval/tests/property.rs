@@ -18,9 +18,7 @@
 //! to keep the test fast and to avoid i64/float edge cases the lexer rejects.
 
 use proptest::prelude::*;
-use red_core::{
-    load_source, mold_to_string, Series, Span, Symbol, Value,
-};
+use red_core::{load_source, mold_to_string, Series, Span, Symbol, Value};
 use red_eval::{render_error, run_source_with_exit_opts, RunOptions};
 use std::cell::RefCell;
 use std::io::Write;
@@ -272,16 +270,12 @@ proptest! {
     /// Programs are bounded (≤ 4 statements, small loop counts) to keep the
     /// test fast and avoid stack overflow on the walker in debug builds.
     ///
-    /// Known divergence (pre-existing, unrelated to any single milestone —
-    /// see `KNOWN_ISSUES.md` "vm_walk_stdout_parity_for_programs"):
-    /// `if 0 - if [0] a: 0` produces `expected block!, found set-word!`
-    /// (VM) vs `expected block!, found integer!` (walker). Both correctly
-    /// reject the nonsensical input, but at different points in argument
-    /// collection. The golden parity suite (`tests/parity.rs`) is unaffected
-    /// — this only surfaces on generated edge cases. If a proptest
-    /// regression seed for this input reappears, delete the
-    /// `property.proptest-regressions` file rather than marking the test
-    /// `#[ignore]` — fresh random runs pass reliably.
+    /// Historically diverged on `if 0 - if [0] a: 0` (raw-token `Const` vs
+    /// evaluated set-word RHS in the `if`/`either` branch-arg fallbacks) —
+    /// see KNOWN_ISSUES.md "RESOLVED" and the explicit regression cases in
+    /// `tests/parity.rs::if_either_arg_fetch_parity`. The pinned seed in
+    /// `property.proptest-regressions` re-runs that exact shape on every
+    /// run.
     #[test]
     fn vm_walk_stdout_parity_for_programs(src in gen_program()) {
         let vm = normalize(run_captured(&src, false));
@@ -548,7 +542,10 @@ mod send_boundary {
     /// Extends `gen_value` with `Object` and `Error` for broader coverage.
     fn gen_marshalable(_depth: u32) -> BoxedStrategy<Value> {
         prop_oneof![
-            any::<i64>().prop_map(|n| Value::Integer { n, span: Span::new(0, 0) }),
+            any::<i64>().prop_map(|n| Value::Integer {
+                n,
+                span: Span::new(0, 0)
+            }),
             (-1_000_000.0f64..1_000_000.0).prop_map(|f| Value::Float {
                 f,
                 span: Span::new(0, 0),
@@ -581,12 +578,11 @@ mod send_boundary {
             // Simple error value (message-only, marshalable).
             "[a-z0-9 ]{0,30}".prop_map(|s: String| Value::error(s)),
             // Simple object with one field.
-            ("[a-z][a-z0-9]{0,5}", any::<i64>())
-                .prop_map(|(name, val)| {
-                    let obj = ObjectDef::new();
-                    obj.ctx.set(Symbol::new(&name), Value::integer(val));
-                    Value::object(obj)
-                }),
+            ("[a-z][a-z0-9]{0,5}", any::<i64>()).prop_map(|(name, val)| {
+                let obj = ObjectDef::new();
+                obj.ctx.set(Symbol::new(&name), Value::integer(val));
+                Value::object(obj)
+            }),
         ]
         .prop_recursive(
             3,  // max depth

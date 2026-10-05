@@ -36,10 +36,12 @@ mod eval;
 mod func;
 mod io;
 mod registry;
+pub(crate) mod tables;
 mod test;
 mod words;
 
 pub(crate) use compare::{num_cmp, values_equal};
+pub(crate) use concurrency::register_concurrency_natives;
 pub(crate) use control::parse_error_block_public;
 pub(crate) use func::{extract_spec, func_native, FuncSpec};
 pub(crate) use registry::reg_refined;
@@ -47,7 +49,6 @@ pub use registry::{install_constants, register_natives};
 pub(crate) use test::register_test_natives;
 pub(crate) use test::run_tests_native;
 pub(crate) use words::value_predicate;
-pub(crate) use concurrency::register_concurrency_natives;
 // ---------------------------------------------------------------------------
 // M42: structured error enrichment
 // ---------------------------------------------------------------------------

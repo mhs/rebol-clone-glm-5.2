@@ -5,74 +5,37 @@ single milestone's changes. Each entry identifies the failing test, the
 minimal reproducer, the root cause (if known), and the recommended
 workaround.
 
-## `vm_walk_stdout_parity_for_programs` — VM/walker error-message divergence on nested `if` + infix
+## `vm_walk_stdout_parity_for_programs` — RESOLVED
 
 **Test:** `crates/red-eval/tests/property.rs:vm_walk_stdout_parity_for_programs`
 
-**Status:** Pre-existing (confirmed on the M43 baseline before M45). The
-test passes on fresh random input; it only fails when proptest's
-`property.proptest-regressions` seed file pins the specific shrunk input
-below.
+**Status:** Fixed. The proptest, the pinned seed in
+`property.proptest-regressions` (which pins the shrunk case
+`if 0 + if [0] a: 0`), and the explicit regression cases in
+`tests/parity.rs::if_either_arg_fetch_parity` all pass.
 
-**Minimal reproducer:**
+**What the divergence was:** on `if 0 - if [0] a: 0` the VM reported
+`expected block!, found set-word!` (col 15) while the walker reported
+`expected block!, found integer!` (col 18). The original diagnosis blamed
+`collect_args`/`eval_expression` — that was wrong. Those two are aligned;
+the actual cause was that `if`/`either` **bypass** the VM's generic
+argument collection via the special-case in `compile_word`
+(`vm/compiler.rs`), and `compile_if`/`compile_either`'s fallback branches
+pushed the *raw next token* as a `Const` instead of compiling it as a full
+expression — so `a: 0` was never evaluated (no `SetGlobal` side effect)
+and the type check fired on the unevaluated set-word one token early.
 
-```red
-if 0 - if [0] a: 0
-```
-
-**Observed divergence:**
-
-| Mode | Error |
-|------|-------|
-| VM (default) | `expected block!, found set-word!` |
-| Walker (`--walk`) | `expected block!, found integer!` |
-
-The column numbers also differ (VM col 15, walker col 18).
-
-**Root cause:**
-
-The program is nonsensical Red — `if` expects a block as its 2nd argument,
-but here it receives `0 - if [0] a: 0`, which parses as
-`0 - (if [0] a: 0)`. Both evaluators correctly reject the input, but they
-traverse the outer `if`'s argument list differently when the argument is
-itself a complex expression involving an infix operator (`-`) whose right
-operand is another `if` call with a trailing set-word. The VM and walker
-reach `if`'s block-argument type-check having consumed a different number
-of tokens, so they report the type of a different offending value.
-
-The golden parity suite (`crates/red-eval/tests/parity.rs`, 2 tests
-covering the full `programs/` fixture set) is **unaffected** — this only
-surfaces on generated edge cases that no real Red program would contain.
-
-**Relation to recent milestones:**
-
-None. M45's `now/year` path-resolution fix only affects paths where the
-head word resolves to a 0-arity native **with** a `/word` tail. `if` has
-arity 2, so it's unaffected. The error-message wording is byte-identical
-to the pre-failure state on the M43 baseline.
-
-**Workaround:**
-
-If a `property.proptest-regressions` seed file reappears pinning this
-input, delete it:
-
-```bash
-rm crates/red-eval/tests/property.proptest-regressions
-```
-
-Fresh random runs pass reliably (10/10 confirmed). Do **not** mark the
-test `#[ignore]` — that would hide genuine regressions introduced by
-future milestones.
-
-**Proper fix (deferred):**
-
-Align the VM's and walker's argument-collection logic for the case where
-an infix operator's right operand is a native call with trailing
-set-words. This lives in `interp_walker.rs::eval_expression` (walker) and
-`vm/compiler.rs::collect_args` (VM). The two paths disagree on how far to
-advance the cursor before type-checking `if`'s block argument. Tracked
-separately from any milestone since the impact is limited to invalid
-input.
+**The fix** (in `vm/compiler.rs`): the `if`/`either` fallbacks now compile
+their non-literal-Block branch args via `compile_expr` and dispatch
+generically (`Call(if, 2)` / `Call(either, 3)`), matching the walker's
+`collect_call_args`. The fast paths additionally refuse to inline a
+literal branch block when the *next* token is an infix native — the
+walker's argument fetch lets that native steal the block as its left
+operand (`if true [3] + 2` → `add([3], 2)` → type error), which inlining
+would have turned into arithmetic on `if`'s result. The duplicated
+argument-collection tables (`uneval_first` names, `module`/`loop` arity
+overrides, native-word predicates) were consolidated into
+`natives/tables.rs` so the VM and walker can't drift apart again.
 
 ## `float!` NaN/Inf propagation — `1.0 / 0.0` yields `inf` silently
 

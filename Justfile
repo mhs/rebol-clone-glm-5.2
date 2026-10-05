@@ -30,10 +30,9 @@ clean:
     rm -rf dist
 
 # Generate an HTML test-coverage report (requires `cargo install cargo-llvm-cov`).
-# Writes target/llvm-cov/html/index.html. The known-failing proptest
-# `vm_walk_stdout_parity_for_programs` (see KNOWN_ISSUES.md) is skipped.
+# Writes target/llvm-cov/html/index.html.
 # RUST_MIN_STACK=32MiB avoids a pre-existing stack overflow in the parity
 # test's Walk-mode deep recursion (the walker lacks tail-call optimization).
 coverage:
-    RUST_MIN_STACK=33554432 cargo llvm-cov --workspace --html --output-dir target/llvm-cov -- --skip vm_walk_stdout_parity_for_programs
+    RUST_MIN_STACK=33554432 cargo llvm-cov --workspace --html --output-dir target/llvm-cov
     @open target/llvm-cov/html/index.html
