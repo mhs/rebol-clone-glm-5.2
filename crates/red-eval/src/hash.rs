@@ -23,6 +23,15 @@
 //! extended in `interp_walker.rs` and `series.rs`; equality lives in
 //! `natives/compare.rs`; `same?`/`not-same?`/`words-of`/`values-of`/`reflect`
 //! are extended in `object.rs`.
+//!
+//! Cursored navigation (the v0.8 deferral, shipped): `next`/`back`/`at`/
+//! `skip`/`head`/`tail`/`index?` and `forall`/`forskip` iteration go through
+//! `extract_series`'s positioned-Block snapshot over the pair view — the same
+//! documented deviation as `vector!` (navigation returns a positioned
+//! `block!`, not a positioned `hash!`; views are snapshots, so mutation
+//! through them doesn't reach the hash — the mutating natives `remove`/
+//! `take`/`change` have dedicated Hash arms operating on the hash directly,
+//! and `remove-each`/`sort` are rejected with a clear error).
 
 use std::rc::Rc;
 
@@ -453,5 +462,123 @@ mod tests {
             mold_to_string(&val("h: make hash! [2 \"twenty\"] h/2")),
             "\"twenty\""
         );
+    }
+
+    // --- Cursored navigation (the v0.8 deferral, shipped — Feature B3) ---
+
+    fn err_msg(src: &str) -> String {
+        match run_capture_val(src) {
+            Err(msg) => msg,
+            Ok((v, _)) => panic!("expected error for {src:?}, got {}", mold_to_string(&v)),
+        }
+    }
+
+    /// Navigation returns positioned Block views over the alternating
+    /// key/value pair view (the vector! precedent — a documented deviation
+    /// from Red's positioned hash!). The hash's cursor seeds the view and
+    /// is never advanced by navigation.
+    #[test]
+    fn hash_cursored_navigation() {
+        let h = "h: make hash! [a 1 b 2 c 3] ";
+        // index? of the hash itself is the (never-advanced) cursor + 1.
+        assert_eq!(mold_to_string(&val(&format!("{h}index? h"))), "1");
+        // Views carry their own position.
+        assert_eq!(mold_to_string(&val(&format!("{h}index? next h"))), "2");
+        assert_eq!(mold_to_string(&val(&format!("{h}index? skip h 4"))), "5");
+        assert_eq!(mold_to_string(&val(&format!("{h}index? tail h"))), "7");
+        assert_eq!(mold_to_string(&val(&format!("{h}index? head next h"))), "1");
+        // Reading through views: the element at the view's cursor.
+        assert_eq!(mold_to_string(&val(&format!("{h}first next h"))), "1");
+        assert_eq!(
+            mold_to_string(&val(&format!("{h}pick at h 5 1"))),
+            "c",
+            "position 5 is the third pair's key"
+        );
+        assert_eq!(
+            mold_to_string(&val(&format!("{h}second head h"))),
+            "1",
+            "first pair's value"
+        );
+        // Navigation never mutated the hash.
+        assert_eq!(
+            mold_to_string(&val(&format!("{h}next h h"))),
+            "make hash! [a: 1 b: 2 c: 3]"
+        );
+    }
+
+    /// `remove` at the cursor removes the whole pair (cursor 0 = first key
+    /// slot). Mutates the hash directly, not a snapshot.
+    #[test]
+    fn hash_remove_at_cursor() {
+        let v = val("h: make hash! [a 1 b 2] remove h");
+        assert_eq!(mold_to_string(&v), "make hash! [b: 2]");
+        // Note: `remove tail h` removes from the *view* (a block), not the
+        // hash — the Hash arm only sees the hash passed directly, whose
+        // cursor is never advanced by navigation.
+    }
+
+    /// `take` at the cursor removes the pair and returns the element AT the
+    /// cursor (the key at a key slot, the value at a value slot).
+    #[test]
+    fn hash_take_at_cursor() {
+        let v = val("h: make hash! [a 1 b 2] take h");
+        assert_eq!(mold_to_string(&v), "a");
+        let v = val("h: make hash! [a 1 b 2] take h h");
+        assert_eq!(mold_to_string(&v), "make hash! [b: 2]");
+        // At tail: none. (`take tail h` reads from the *view* — a block at
+        // the end — and also yields none.)
+        let v = val("h: make hash! [a 1] take tail h");
+        assert_eq!(mold_to_string(&v), "none");
+    }
+
+    /// `change` at the cursor: key slot renames the pair's key (value and
+    /// order position kept). Changing through a *view* (e.g. `skip h 1`)
+    /// writes the detached snapshot, not the hash — the documented
+    /// snapshot-view deviation; the mutating natives only reach the hash
+    /// when it is passed directly.
+    #[test]
+    fn hash_change_at_cursor() {
+        let v = val("h: make hash! [a 1 b 2] change h 'new-key h");
+        assert_eq!(mold_to_string(&v), "make hash! [new-key: 1 b: 2]");
+        // Through a view: hash unchanged (snapshot deviation).
+        let v = val("h: make hash! [a 1 b 2] change skip h 1 99 h");
+        assert_eq!(mold_to_string(&v), "make hash! [a: 1 b: 2]");
+        // Existing key → error (rename would collide).
+        let got = err_msg("h: make hash! [a 1 b 2] change h 'b");
+        assert!(got.contains("key already exists"), "got {got:?}");
+        // Unhashable new key → error.
+        let got = err_msg("h: make hash! [a 1] change h [1 2]");
+        assert!(
+            got.contains("hash! key must be"),
+            "got {got:?}"
+        );
+        // At tail.
+        let got = err_msg("h: make hash! [a 1] change tail h 'z");
+        assert!(got.contains("change: at tail"), "got {got:?}");
+    }
+
+    /// `remove-each`/`sort` are rejected with a clear message — the
+    /// `extract_series` view is a detached snapshot, so mutation through it
+    /// would silently leave the hash unchanged.
+    #[test]
+    fn hash_remove_each_and_sort_rejected() {
+        let got = err_msg("h: make hash! [a 1] remove-each w h [false]");
+        assert!(
+            got.contains("remove-each: not supported on hash!"),
+            "got {got:?}"
+        );
+        let got = err_msg("h: make hash! [a 1] sort h");
+        assert!(got.contains("sort: not supported on hash!"), "got {got:?}");
+    }
+
+    /// `forall` iterates the pair view slot by slot through positioned
+    /// Block snapshots (`first w` is the slot's element).
+    #[test]
+    fn hash_forall() {
+        let v = val(
+            "total: 0 h: make hash! [10 1 20 2] forall w h [total: total + first w] total",
+        );
+        // Four slots: 10, 1, 20, 2.
+        assert_eq!(mold_to_string(&v), "33");
     }
 }

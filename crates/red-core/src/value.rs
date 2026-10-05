@@ -851,7 +851,16 @@ pub struct HashDef {
     pub entries: RefCell<HashMap<MapKey, Value>>,
     /// Insertion-order key list for stable test output only. Kept in sync
     /// with `entries` by `set`/`remove`/`clear`/the series-positional ops.
+    /// NOTE: it is also the source of the series-positional pair view
+    /// (`extract_series` in `red-eval/src/series.rs`) — iteration order here
+    /// is insertion order (Red's is unspecified).
     pub key_order: RefCell<Vec<MapKey>>,
+    /// Series cursor over the alternating key/value pair view (0..=pair_len).
+    /// Mirrors `VectorDef::cursor` (the v0.8 deferral, shipped): seeded by
+    /// `extract_series` when building the positioned-Block view. Not
+    /// advanced by navigation (views are independent, matching the vector
+    /// precedent) — written via `set_cursor` (reserved for streaming reads).
+    pub cursor: RefCell<usize>,
 }
 
 impl HashDef {
@@ -859,7 +868,19 @@ impl HashDef {
         Self {
             entries: RefCell::new(HashMap::new()),
             key_order: RefCell::new(Vec::new()),
+            cursor: RefCell::new(0),
         }
+    }
+
+    /// Current cursor position over the pair view (0..=pair_len).
+    pub fn cursor(&self) -> usize {
+        *self.cursor.borrow()
+    }
+
+    /// Set the cursor (clamped to 0..=pair_len).
+    pub fn set_cursor(&self, pos: usize) {
+        let max = self.pair_len();
+        *self.cursor.borrow_mut() = pos.min(max);
     }
 
     pub fn get(&self, key: &MapKey) -> Option<Value> {
@@ -877,11 +898,14 @@ impl HashDef {
     }
 
     /// Remove the entry at `key`. Returns the removed value (if any). Also
-    /// removes the key from `key_order` so the two stay in sync.
+    /// removes the key from `key_order` so the two stay in sync, and
+    /// re-clamps the cursor to the shrunken pair view.
     pub fn remove(&self, key: &MapKey) -> Option<Value> {
         let prev = self.entries.borrow_mut().remove(key);
         if prev.is_some() {
             self.key_order.borrow_mut().retain(|k| k != key);
+            let pos = self.cursor();
+            self.set_cursor(pos);
         }
         prev
     }
@@ -897,6 +921,7 @@ impl HashDef {
     pub fn clear(&self) {
         self.entries.borrow_mut().clear();
         self.key_order.borrow_mut().clear();
+        *self.cursor.borrow_mut() = 0;
     }
 
     /// Keys in insertion order (via `key_order`), as `Value`s.
@@ -972,6 +997,29 @@ impl HashDef {
         let i = (pos - 1) / 2;
         let key = self.key_order.borrow().get(i)?.clone();
         self.remove(&key)
+    }
+
+    /// Replace the key of the pair at 0-based `pair` index with `new`,
+    /// keeping the value and the insertion-order position (a `change` at a
+    /// key slot in the series view). Returns `false` if `pair` is out of
+    /// range or the new key already exists.
+    pub fn replace_key_at(&self, pair: usize, new: MapKey) -> bool {
+        let mut order = self.key_order.borrow_mut();
+        if pair >= order.len() {
+            return false;
+        }
+        let old = order[pair].clone();
+        let val = match self.entries.borrow().get(&old) {
+            Some(v) => v.clone(),
+            None => return false,
+        };
+        if new != old && self.entries.borrow().contains_key(&new) {
+            return false;
+        }
+        self.entries.borrow_mut().remove(&old);
+        self.entries.borrow_mut().insert(new.clone(), val);
+        order[pair] = new;
+        true
     }
 }
 

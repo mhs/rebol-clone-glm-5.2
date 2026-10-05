@@ -65,16 +65,34 @@ fn extract_series(v: &Value) -> Result<(Series, Span, bool), EvalError> {
             };
             Ok((series, Span::default(), false))
         }
-        // M83: hash! is a `series?` but has no cursor field; cursored
-        // navigation (`next`/`back`/`at`/`skip`/`head`/`tail`/`index?`/etc.)
-        // is deferred to v0.8. Natives that support hash! (`pick`/`poke`/
-        // `first`/`last`/`length?`/`append`/`insert`/`change`/`remove`/
-        // `take`/`clear`/`copy`/`select`/`find`) handle Hash before reaching
-        // here.
-        Value::Hash(_) => Err(EvalError::Native {
-            message: "hash! cursored navigation requires a cursor (deferred to v0.8)".into(),
-            span: v.span_or_default(),
-        }),
+        // M83 → v0.8 deferral, shipped: hash! cursored navigation
+        // (`next`/`back`/`at`/`skip`/`head`/`tail`/`index?`, `forall`/
+        // `forskip` iteration) via a positioned Block snapshot over the
+        // alternating key/value pair view — the same documented deviation as
+        // vector! above: navigation returns a positioned block!, not a
+        // hash!. The hash's own `cursor` field seeds the view's index (not
+        // advanced by navigation; `set_cursor` is reserved for streaming).
+        // The snapshot is rebuilt per op, so entry mutations ARE visible to
+        // later views, but mutations through a view's own storage do NOT
+        // propagate back (mutating natives — `remove`/`take`/`change` —
+        // have dedicated Hash arms before reaching here that operate on the
+        // hash directly; `remove-each`/`sort` are explicitly rejected).
+        Value::Hash(h) => {
+            let b = h.borrow();
+            let entries = b.entries.borrow();
+            let mut elems: Vec<Value> = Vec::with_capacity(b.pair_len());
+            for k in b.key_order.borrow().iter() {
+                if let Some(val) = entries.get(k) {
+                    elems.push(k.to_value());
+                    elems.push(val.clone());
+                }
+            }
+            let series = Series {
+                data: Rc::new(RefCell::new(elems)),
+                index: b.cursor(),
+            };
+            Ok((series, Span::default(), false))
+        }
         other => Err(EvalError::TypeError {
             expected: "series!",
             found: type_name(other),
@@ -1385,6 +1403,49 @@ fn change(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
         storage[cursor] = narrowed;
         return Ok(Value::Vector(v.clone()));
     }
+    // Hash! change at the cursor: at a key slot, renames the pair's key
+    // (keeping value + order position); at a value slot, overwrites the
+    // pair's value. Operates on the hash directly (the `extract_series`
+    // view is a detached snapshot).
+    if let Value::Hash(h) = &args[0] {
+        let b = h.borrow();
+        let cursor = b.cursor();
+        if cursor >= b.pair_len() {
+            return Err(EvalError::Native {
+                message: "change: at tail".into(),
+                span: Span::default(),
+            });
+        }
+        if cursor.is_multiple_of(2) {
+            let new_key = match red_core::value::MapKey::from_value(&args[1]) {
+                Some(k) => k,
+                None => {
+                    return Err(EvalError::Native {
+                        message: format!(
+                            "change: hash! key must be word!/string!/integer!/char!/logic!/none!, got {}",
+                            type_name(&args[1])
+                        ),
+                        span: args[1].span_or_default(),
+                    })
+                }
+            };
+            if !b.replace_key_at(cursor / 2, new_key) {
+                return Err(EvalError::Native {
+                    message: "change: key already exists in hash!".into(),
+                    span: args[1].span_or_default(),
+                });
+            }
+        } else {
+            // Value slot: overwrite the pair's value.
+            if !b.set_value_at(cursor + 1, args[1].clone()) {
+                return Err(EvalError::Native {
+                    message: "change: at tail".into(),
+                    span: Span::default(),
+                });
+            }
+        }
+        return Ok(Value::Hash(h.clone()));
+    }
     let (series, span, is_paren) = extract_series(&args[0])?;
     let len = storage_len(&series);
     if series.index >= len {
@@ -1414,6 +1475,20 @@ fn remove(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Ev
             storage.remove(cursor);
         }
         return Ok(Value::Vector(v.clone()));
+    }
+    // Hash! remove at the cursor: removes the whole key/value pair
+    // containing the cursor's position in the alternating pair view (the
+    // cursor's pair is `cursor / 2` — at a key slot or the value slot of
+    // that same pair). Operates on the hash directly (the `extract_series`
+    // view is a detached snapshot).
+    if let Value::Hash(h) = &args[0] {
+        let b = h.borrow();
+        let cursor = b.cursor();
+        let pair = cursor / 2;
+        if pair < b.len() {
+            b.remove_at(2 * pair + 1);
+        }
+        return Ok(Value::Hash(h.clone()));
     }
     let (series, span, is_paren) = extract_series(&args[0])?;
     let len = storage_len(&series);
@@ -1468,6 +1543,25 @@ fn take(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Value, Eval
             return Ok(Value::None);
         }
         return Ok(storage.remove(cursor));
+    }
+    // Hash! take at the cursor: removes the whole pair containing the
+    // cursor's position and returns the element AT the cursor (the key at
+    // a key slot, the value at a value slot). Operates on the hash
+    // directly (the `extract_series` view is a detached snapshot).
+    if let Value::Hash(h) = &args[0] {
+        let b = h.borrow();
+        let cursor = b.cursor();
+        let pair = cursor / 2;
+        if pair >= b.len() {
+            return Ok(Value::None);
+        }
+        let taken = if cursor.is_multiple_of(2) {
+            b.key_at(cursor + 1)
+        } else {
+            b.value_at(cursor + 1)
+        };
+        b.remove_at(2 * pair + 1);
+        return Ok(taken.unwrap_or(Value::None));
     }
     let (series, _, _) = extract_series(&args[0])?;
     let len = storage_len(&series);
@@ -1966,6 +2060,16 @@ fn remove_each(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
     if args.len() != 3 {
         return Err(arity(args, "remove-each", 3, args.len()));
     }
+    // hash! is rejected: `extract_series` returns a detached snapshot view,
+    // so removals would rewrite the snapshot and silently leave the hash
+    // unchanged. (`foreach [k v] hash` covers iteration; `remove` removes
+    // pairs at the cursor.)
+    if let Value::Hash(_) = &args[1] {
+        return Err(EvalError::Native {
+            message: "remove-each: not supported on hash! (mutation would not reach the hash)".into(),
+            span: args[1].span_or_default(),
+        });
+    }
     let body = body_block(args, 2, "remove-each")?;
     let compiled = resolve_compiled_block(&body, env);
     let slot = resolve_loop_slot(&args[0], env)?;
@@ -2216,6 +2320,15 @@ fn invoke_comparator(
 fn sort(args: &[Value], refs: &RefineArgs, env: &mut Env) -> Result<Value, EvalError> {
     if args.is_empty() {
         return Err(arity(args, "sort", 1, 0));
+    }
+    // hash! is rejected: `extract_series` returns a detached snapshot view,
+    // so sorting would reorder the snapshot and silently leave the hash
+    // unchanged.
+    if let Value::Hash(_) = &args[0] {
+        return Err(EvalError::Native {
+            message: "sort: not supported on hash! (mutation would not reach the hash)".into(),
+            span: args[0].span_or_default(),
+        });
     }
     let case_sensitive = refs.has(&Symbol::new("case"));
     let reverse = refs.has(&Symbol::new("reverse"));
