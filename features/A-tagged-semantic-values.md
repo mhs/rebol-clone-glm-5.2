@@ -1,11 +1,35 @@
 # Feature A: Tagged Semantic Values (close out plan18 M175 + M178)
 
-**Status:** Planned — not started
-**Source:** `docs/plans/plan18-semantic-types.md` lines 480–511 (M175) and 669–694 (M178)
-**Effort:** M (largest of the three feature files; the `Value::SemanticTagged`
-variant is a workspace-wide change)
-**Depends on:** Nothing. Benefits from Task C (coverage push) landing first as
-a safety net.
+**Status:** DONE — 2026-10-05 (commits d13db73, 8c131ba, cb9290a, 715066f, + this)
+
+Plan18 is now fully ticked (0 unchecked boxes remain). Per-section results:
+
+- **§1 days-in-month** (d13db73): arity-2 native with full leap-year rules.
+- **§2-3 Value::SemanticTagged + audit** (8c131ba): variant + constructor +
+  `unwrap_semantic` central funnel (type_name, mold/form, truthy, to_components
+  [predicates accept tagged values], as_number/num_cmp, extract_series/
+  series_to_values, select_field/pick_path_index, arithmetic untag in the four
+  core infix natives, values_equal tagged rules, copy tag preservation with
+  immediate-inner identity, span, SendValue mirror).
+- **§4-7 make-tagging, semantic-type?, mold/tagged, copy** (cb9290a): the
+  breaking `semantic-type?` re-semantic shipped per plan (lit-word! tag /
+  type name / none); `mold/tagged` 0-arg refinement alongside `/only`;
+  constructors documented as staying untagged.
+- **§8 M178 compiler extensions** (715066f): `[2 to 5 alpha]` → parse
+  two-int count prefix; `[3 segment]` passthrough pinned by tests; bare
+  `range lo hi` / `where [pred]` word forms in positional schemas; Paren
+  operands in range evaluated at check time against captured field words —
+  the plan's iso-date! dependent constraint works (the "synthetic func"
+  wiring turned out unnecessary: parse capture words live in user_ctx).
+- **§9 polish**: user guide at `docs/semantic-types.md`; golden+parity
+  fixture `tests/programs/semantic_tagged_values.red` (byte-for-byte both
+  modes); project-brief value-model section updated; plan18 fully ticked.
+
+Notes recorded during the work: `rgb?`'s byte constraint is unfalsifiable on
+constructible tuples (the constructor rejects out-of-range components), and
+`port?` is the builtin port! predicate — the semantic predicate for `port!`
+is not registered (name collision; use `valid?`). Both documented in the
+fixture.
 
 ## Goal
 

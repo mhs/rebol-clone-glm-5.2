@@ -1,0 +1,20 @@
+true
+true
+false
+true
+false
+tuple!
+rgb!
+1.2.3
+make rgb! 1.2.3
+true
+true
+none
+make error! [type: 'script message: "Invalid port: must be in range 1..65535, got 70000" where: 'make near: []]
+true
+false
+true
+29
+28
+29
+28

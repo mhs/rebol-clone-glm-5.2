@@ -477,15 +477,15 @@ comparisons, but same-tag uses strict equality). Document this.
 
 ### Tasks
 
-- [ ] Add `Value::SemanticTagged { tag: Symbol, value: Box<Value>, span: Span }`
+- [x] Add `Value::SemanticTagged { tag: Symbol, value: Box<Value>, span: Span }`
       variant in `value.rs`.
-- [ ] `type_name_for` → unwrap inner, return base type name.
-- [ ] Update `TYPE_WORDS` (no new entry — tagged values share the base type
+- [x] `type_name_for` → unwrap inner, return base type name.
+- [x] Update `TYPE_WORDS` (no new entry — tagged values share the base type
       name; `semantic-type?` is the discriminator).
-- [ ] Walker `eval_prefix`: `Value::SemanticTagged { .. }` self-evaluates
+- [x] Walker `eval_prefix`: `Value::SemanticTagged { .. }` self-evaluates
       (returns clone).
-- [ ] VM const-pool: emit as a constant.
-- [ ] Every `match v` arm in the codebase that handles base types
+- [x] VM const-pool: emit as a constant.
+- [x] Every `match v` arm in the codebase that handles base types
       (`Value::Integer`, `Value::Tuple`, etc.) must also handle
       `Value::SemanticTagged` by **unwrapping** — OR add a single
       `unwrap_semantic(v) -> &Value` helper and audit the hot paths. Pragmatic
@@ -493,22 +493,22 @@ comparisons, but same-tag uses strict equality). Document this.
       `compare.rs` equality, arithmetic, series pick/poke, path resolution
       (`pair/x`, `tuple/r`). Most of these already go through `type_name_for`
       or a central dispatch; the audit is mechanical.
-- [ ] `make <semantic-type-name>! <value>` in `make_native`: when the type
+- [x] `make <semantic-type-name>! <value>` in `make_native`: when the type
       operand is not a builtin but IS in `env.semantic_types`, validate via
       `valid?` and return
       `Value::SemanticTagged { tag: name, value: Box::new(spec.clone()), span }`.
       On validation failure, raise `EvalError::Native` with a rich error (M176).
-- [ ] `semantic-type? value`:
-  - if `Value::SemanticType(_)`: return the type name as a `lit-word!`.
-  - if `Value::SemanticTagged { tag, .. }`: return the tag as a `lit-word!`.
-  - else: return `none`.
-- [ ] `mold`/`form`: by default unwrap (render the inner value). Add
+- [x] `semantic-type? value` (**breaking** — was a boolean predicate):
+  - [x] if `Value::SemanticType(_)`: return the type name as a `lit-word!`.
+  - [x] if `Value::SemanticTagged { tag, .. }`: return the tag as a `lit-word!`.
+  - [x] else: return `none`.
+- [x] `mold`/`form`: by default unwrap (render the inner value). Add
       `mold/tagged` refinement (0-arity on `mold` — already has refinements? if
       not, register `mold` with `/tagged`) that renders `make <tag>! <inner-mold>`
       for `SemanticTagged` values.
-- [ ] Constructor `rgb 255 0 0` stays **untagged** (per plan default).
+- [x] Constructor `rgb 255 0 0` stays **untagged** (per plan default).
       `make rgb! 255.0.0` is **tagged**. Document the distinction.
-- [ ] `copy` of a `SemanticTagged` preserves the tag.
+- [x] `copy` of a `SemanticTagged` preserves the tag.
 
 ### Tests
 
@@ -666,15 +666,17 @@ the already-captured components in scope. Compiler emits
 
 ### Polish
 
-- [ ] `docs/` — write `docs/semantic-types.md` user guide (mirrors the plan's
+- [x] `docs/` — write `docs/semantic-types.md` user guide (mirrors the plan's
       examples).
 - [x] `examples/semantic-types.red` — demo script.
-- [ ] Golden fixtures: `crates/red-eval/tests/fixtures/semantic-*.red` +
-      `.expected` (10+ covering each shape, errors, tagged values).
+- [x] Golden fixtures: `crates/red-eval/tests/programs/semantic_tagged_values.red` +
+      `.expected` (covers each shape, errors, tagged values; joins the
+      golden + parity suites — the harness's fixture dir is `tests/programs/`,
+      not `tests/fixtures/`).
 - [x] Update `architecture.md` with the full M170–M178 section.
 - [x] Update `README.md` "What's implemented" + add a "Semantic types"
       subsection.
-- [ ] `project-brief.md` — add semantic types to the value model section.
+- [x] `project-brief.md` — add semantic types to the value model section.
 - [x] `cargo test --workspace` green; `cargo test --workspace --features force-walk`
       green (walker parity).
 - [x] `cargo bench` sanity (no regression on `fib 30` / `sum_loop` — the
@@ -685,12 +687,14 @@ the already-captured components in scope. Compiler emits
 ### Tasks
 
 - [x] Extend `compile_positional` for `optional` marker.
-- [ ] Extend `compile_streamed`/`compile_positional` for count forms
+- [x] Extend `compile_streamed`/`compile_positional` for count forms
       (`N constraint`, `lo hi constraint`).
-- [ ] Extend `range`/`where` to accept `Paren` operands evaluated with
-      captured components in scope (needs the parse scratch context to be the
-      function-local context of a synthetic func — wire via `env`).
-- [ ] Implement `days-in-month year month` helper native (for the `iso-date!`
+- [x] Extend `range`/`where` to accept `Paren` operands evaluated with
+      captured components in scope (the parse capture words live in
+      `user_ctx`, so the paren resolves them at check time — no synthetic
+      func needed). Bare word forms (`month: range 1 12`) also parse now,
+      unwrapped as well as the `[range lo hi]` block form.
+- [x] Implement `days-in-month year month` helper native (for the `iso-date!`
       example).
 - [x] `make <semantic-type>! <value>` construction (standard Rebol pattern).
 - [x] `validate 'type value` native with rich error messages.

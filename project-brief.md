@@ -218,7 +218,24 @@ enum Value {
     Vector(Rc<RefCell<VectorDef>>),          // vector! — M84 (synthetic, no span)
     Image(Rc<RefCell<ImageDef>>),            // image! — M85 (synthetic, no span)
    Typeset(Rc<TypesetDef>),                // typeset! — M89 (synthetic, no span)
+    SemanticType(Rc<SemanticTypeDef>),        // semantic-type! — M170 (parse-backed schema)
+    SemanticTagged {                         // tagged semantic value — plan18 M175:
+        tag: Symbol,                         // `make rgb! 1.2.3` = the tuple
+        value: Box<Value>,                   // tagged 'rgb!; transparent everywhere
+        span: Span,                          // (type?/mold/arith/equality unwrap;
+    },                                      //  semantic-type? discriminates)
+    Channel(Arc<ChannelInner>),              // channel! — M40 (Go-style; !Sync pair)
 }
+
+// Semantic types (M170–M178): a `SemanticTypeDef` is a schema over a base
+// datatype (name, base, shape, schema block, lazily-compiled parse rule),
+// registered in `Env::semantic_types` by `define-type`. Generated
+// predicates (`rgb?`), constructors (`rgb` — untagged), and func-spec
+// annotations (`[rgb!]`) validate via the compiled rule. `make <type>!
+// <value>` returns a `SemanticTagged` value — the base value carrying the
+// semantic type name as metadata. `unwrap_semantic(&Value) -> &Value` is
+// the central unwrap helper for the catch-all match sites. See
+// `docs/semantic-types.md` for the user guide.
 
 // v0.5 (M60): closure! — snapshot-capture first-class function.
 struct ClosureDef {
