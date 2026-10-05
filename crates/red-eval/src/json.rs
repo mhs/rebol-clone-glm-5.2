@@ -899,7 +899,7 @@ pub fn register_json_natives(env: &mut Env) {
 
 #[cfg(test)]
 mod tests {
-    use super::register_json_natives;
+    use super::{load_json_native, register_json_natives};
     use crate::binding::bind_pass;
     use crate::natives::{install_constants, register_natives, type_name};
     use crate::eval;
@@ -1217,5 +1217,216 @@ mod tests {
 
     fn mold_to_string(v: &Value) -> String {
         red_core::printer::mold_to_string(v)
+    }
+
+    fn err_msg(src: &str) -> String {
+        match run_capture_val(src) {
+            Err(msg) => msg,
+            Ok((v, _)) => panic!("expected error for {src:?}, got value {}", mold_to_string(&v)),
+        }
+    }
+
+    // --- exotic-encode arms (money/date/duration/percent/char/tag/…) ---
+
+    /// One table sweeps every scalar encoder arm that isn't a plain
+    /// number/string/bool/none. Values chosen to pin exact output.
+    /// (`print` renders the result string raw, so expected values are the
+    /// JSON text itself.)
+    #[test]
+    fn to_json_exotic_scalars_table() {
+        let cases: &[(&str, &str)] = &[
+            // Money: default USD (no suffix), non-USD (`:CUR`), negative.
+            ("print to-json $10.50", "\"$10.50\""),
+            ("print to-json $5.25:EUR", "\"$5.25:EUR\""),
+            ("print to-json -$10.50", "\"-$10.50\""),
+            // Percent: raw fractional value.
+            ("print to-json 50%", "0.5"),
+            // Char: single-char JSON string.
+            ("print to-json #\"A\"", "\"A\""),
+            // Tag: `"<...>"`.
+            ("print to-json <b>", "\"<b>\""),
+            // Issue / email / file / url: raw string contents.
+            ("print to-json #FF0000", "\"FF0000\""),
+            ("print to-json a@b.com", "\"a@b.com\""),
+            ("print to-json %file.txt", "\"file.txt\""),
+            ("print to-json http://x.y", "\"http://x.y\""),
+            // Duration: seconds as a float (3h30m = 12600s).
+            ("print to-json 3h30m", "12600.0"),
+            // Word-family: word name as string.
+            ("print to-json 'hello", "\"hello\""),
+            // Refinement: "/name".
+            ("print to-json /part", "\"/part\""),
+            // Tuple: array of byte integers.
+            ("print to-json 1.2.3", "[1,2,3]"),
+            // Pair: [x y] array.
+            ("print to-json 100x200", "[100,200]"),
+            // Binary (String8): base64 string. #{0102} → "AQI=".
+            ("print to-json #{0102}", "\"AQI=\""),
+        ];
+        for (src, want) in cases {
+            let got = out(src);
+            assert_eq!(
+                got.trim_end(), *want,
+                "case {src:?}: encoded {got:?}, expected {want:?}"
+            );
+        }
+    }
+
+    /// Date encoder: date-only, date+time, and zone suffixes (`Z` for UTC,
+    /// `+HH:MM`/`-HH:MM` otherwise).
+    #[test]
+    fn to_json_date_forms() {
+        let cases: &[(&str, &str)] = &[
+            ("print to-json 2024-07-14", "\"2024-07-14\""),
+            ("print to-json 2024-07-14/10:30:00", "\"2024-07-14T10:30:00\""),
+            (
+                "print to-json 2024-07-14/10:30:00+02:00",
+                "\"2024-07-14T10:30:00+02:00\"",
+            ),
+        ];
+        for (src, want) in cases {
+            let got = out(src);
+            assert_eq!(got.trim_end(), *want, "case {src:?}");
+        }
+    }
+
+    /// Map keys of every non-string kind render via
+    /// `map_key_to_json_string` (Sym/Int/Char/Bool/None).
+    #[test]
+    fn to_json_map_exotic_keys() {
+        // Word key (Sym).
+        let got = out("print to-json make map! ['a 1 'b 2]");
+        assert!(
+            got.contains("\"a\":1") && got.contains("\"b\":2"),
+            "got {got:?}"
+        );
+        // Integer + logic keys.
+        let got = out("print to-json make map! [1 \"one\" true \"yes\"]");
+        assert!(
+            got.contains("\"1\":\"one\"") && got.contains("\"true\":\"yes\""),
+            "got {got:?}"
+        );
+    }
+
+    /// `encode_float` rejects NaN/Inf with a specific message.
+    #[test]
+    fn to_json_nan_inf_error() {
+        for src in ["to-json 1.0 / 0.0", "to-json 0.0 / 0.0"] {
+            let got = err_msg(src);
+            assert!(
+                got.contains("NaN/Inf has no JSON representation"),
+                "case {src:?}: got {got:?}"
+            );
+        }
+    }
+
+    /// Control characters (< 0x20) encode as `\u00XX`. The source lexer has
+    /// no caret escapes, so the string is built in Rust and fed to the
+    /// native directly.
+    #[test]
+    fn to_json_control_char_escape() {
+        let v = Value::string("\u{1}x\u{1F}".to_string());
+        let result = super::to_json_native(
+            &[v],
+            &red_core::RefineArgs::default(),
+            &mut fresh_env(),
+        );
+        match result {
+            Ok(Value::String { s, .. }) => {
+                assert_eq!(s.as_ref(), "\"\\u0001x\\u001f\"", "got {s:?}")
+            }
+            other => panic!("expected string result, got {other:?}"),
+        }
+    }
+
+    // --- decoder: surrogate pairs + error arms ---
+
+    /// Valid surrogate pair decodes to the astral character; each malformed
+    /// surrogate form hits its specific error.
+    #[test]
+    fn load_json_surrogate_pairs() {
+        // Valid pair: U+1F600 (😀).
+        let v = val("load-json {\"\\uD83D\\uDE00\"}");
+        match &v {
+            Value::String { s, .. } => assert_eq!(s.as_ref(), "😀"),
+            other => panic!("expected string!, got {}", type_name(other)),
+        }
+        let err_cases: &[(&str, &str)] = &[
+            // Lone high surrogate followed by non-escape.
+            ("load-json {\"\\uD83Dx\"}", "expected low surrogate after high surrogate"),
+            // High surrogate followed by non-`u` escape.
+            ("load-json {\"\\uD83D\\n\"}", "expected 'u' after backslash in surrogate pair"),
+            // High followed by non-low `\uXXXX`.
+            ("load-json {\"\\uD83D\\u0041\"}", "invalid low surrogate"),
+            // Lone low surrogate.
+            ("load-json {\"\\uDE00\"}", "unexpected low surrogate without high surrogate"),
+            // Non-hex `\u` digit.
+            ("load-json {\"\\u00G0\"}", "non-hex digit in \\u escape"),
+        ];
+        for (src, want) in err_cases {
+            let got = err_msg(src);
+            assert!(got.contains(want), "case {src:?}: got {got:?}");
+        }
+    }
+
+    /// Decoder structural error arms (one table).
+    #[test]
+    fn load_json_error_arm_table() {
+        let cases: &[(&str, &str)] = &[
+            ("load-json {[1 2}", "expected ',' or ']' in array"),
+            ("load-json {{a:1}}", "expected string key in object"),
+            ("load-json {{\"a\" 1}}", "expected ':' after object key"),
+            ("load-json {{\"a\": 1 \"b\": 2}}", "expected ',' or '}' in object"),
+            ("load-json {\"\\q\"}", "invalid escape sequence"),
+            ("load-json \"&\"", "unexpected character '&'"),
+            ("load-json {tru}", "expected 'true'"),
+            ("load-json {}", "unexpected end of input"),
+        ];
+        for (src, want) in cases {
+            let got = err_msg(src);
+            assert!(got.contains(want), "case {src:?}: got {got:?}");
+        }
+    }
+
+    /// Integer overflow promotes to float; the depth limit rejects nesting
+    /// beyond `MAX_JSON_DEPTH`. Both feed the decoder directly (deep input
+    /// and huge literals are awkward to write as Red source).
+    #[test]
+    fn load_json_overflow_and_depth_limits() {
+        // i64 overflow → f64 promotion.
+        let v = val("load-json \"99999999999999999999\"");
+        match &v {
+            Value::Float { .. } => {}
+            other => panic!("expected float! from overflow, got {}", type_name(other)),
+        }
+        // Depth limit: 300-deep nested arrays exceed MAX_JSON_DEPTH (256).
+        let deep = format!("{}{}", "[".repeat(300), "]".repeat(300));
+        let result = load_json_native(
+            &[Value::string(deep)],
+            &red_core::RefineArgs::default(),
+            &mut fresh_env(),
+        );
+        match result {
+            Err(EvalError::Native { message, .. }) => {
+                assert!(message.contains("JSON nesting depth exceeded"), "got {message:?}");
+            }
+            other => panic!("expected depth error, got {other:?}"),
+        }
+        // Just under the limit is fine (250 deep).
+        let ok = format!("{}{}", "[".repeat(250), "]".repeat(250));
+        let result = load_json_native(
+            &[Value::string(ok)],
+            &red_core::RefineArgs::default(),
+            &mut fresh_env(),
+        );
+        assert!(result.is_ok(), "250-deep array should decode: {result:?}");
+    }
+
+    /// A minimal `Env` for calling natives directly (the decoder ignores it).
+    fn fresh_env() -> Env {
+        let ctx = Context::new();
+        install_constants(&ctx);
+        let ctx_rc = bind_pass(&red_core::value::Series::new(vec![]), ctx);
+        Env::new_with_output(ctx_rc, Box::new(std::io::sink()))
     }
 }

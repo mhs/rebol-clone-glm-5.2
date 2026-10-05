@@ -37,6 +37,29 @@ argument-collection tables (`uneval_first` names, `module`/`loop` arity
 overrides, native-word predicates) were consolidated into
 `natives/tables.rs` so the VM and walker can't drift apart again.
 
+## `values_equal` has no `(Block, Block)` arm — block! records never dedup in `query/distinct`
+
+**Test:** discovered by `query::tests::query_distinct_without_projection`
+(coverage push, Feature C).
+
+**Status:** Open. `natives/compare.rs::values_equal` compares
+Integer/Float/Decimal/Object/Map/Hash/Vector/… and word-family pairs, but
+falls through to `_ => false` for two `block!` values — so two structurally
+identical blocks compare unequal.
+
+**Impact:** `query [from <block-records> distinct]` returns duplicates
+(object! records dedup correctly via the Object arm; only key/value-pair
+block! records are affected). Any other consumer of `values_equal` on
+blocks (e.g. `find` on nested blocks, if it routes through here) is
+similarly affected.
+
+**Proper fix:** add a `(Value::Block, Value::Block)` arm that element-wise
+recurses (mirroring the existing Vector arm in `compare.rs` — same
+`zip`/`all` shape, over `data.iter().skip(index)`). The question to settle
+when fixing: should `Rc::ptr_eq` on the shared series be a fast path, and
+should the cursor (`index`) participate? For `distinct` semantics it must
+NOT (a positioned sub-block view equals the same elements from position 0).
+
 ## `float!` NaN/Inf propagation — `1.0 / 0.0` yields `inf` silently
 
 **Status:** By design (f64 parity). `float!` is backed by Rust's `f64`,

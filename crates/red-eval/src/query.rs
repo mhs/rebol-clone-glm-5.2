@@ -642,7 +642,7 @@ mod tests {
     use crate::html::register_html_natives;
     use red_core::context::Context;
     use red_core::parser::load_source;
-    use red_core::printer::mold_to_string;
+    use red_core::printer::{form_to_string, mold_to_string};
     use red_core::value::{Symbol, Value};
     use red_core::{Env, EvalError};
     use std::cell::RefCell;
@@ -905,5 +905,195 @@ people: [
     fn query_error_no_from() {
         let result = run_capture_val("query [select [name]]");
         assert!(result.is_err(), "query without from should error");
+    }
+
+    /// Rendered error message for a failed run.
+    fn err_msg(src: &str) -> String {
+        match run_capture_val(src) {
+            Err(msg) => msg,
+            Ok((v, _)) => panic!("expected error for {src:?}, got value {}", m(&v)),
+        }
+    }
+
+    /// Sweep the parse/plan error arms with exact message substrings — one
+    /// test covers every clause's truncation, wrong-type, and range errors.
+    #[test]
+    fn query_error_arm_table() {
+        let cases: &[(&str, &str)] = &[
+            // Non-word at keyword position.
+            ("query [5]", "query: expected keyword, got integer!"),
+            // `from` arg shape.
+            (
+                "query [from 5]",
+                "query: `from` expects a word or block, got integer!",
+            ),
+            // Unbound source word.
+            (
+                "query [from nosuchwordxyz]",
+                "query: `from` word `nosuchwordxyz` has no value",
+            ),
+            // `where` arg shape.
+            (
+                "query [from people where 5]",
+                "query: `where` expects a block!, got integer!",
+            ),
+            // `order` arg shape + contents.
+            (
+                "query [from people order 5]",
+                "query: `order` expects a block, got integer!",
+            ),
+            (
+                "query [from people order age]",
+                "query: `order` expects a block, got word!",
+            ),
+            (
+                "query [from people order [5]]",
+                "query: `order` block must contain words, got integer!",
+            ),
+            // `limit`/`offset` type + range.
+            (
+                "query [from people limit \"x\"]",
+                "query: `limit` expects an integer!, got string!",
+            ),
+            (
+                "query [from people limit -1]",
+                "query: `limit` must be non-negative, got -1",
+            ),
+            (
+                "query [from people offset -1]",
+                "query: `offset` must be non-negative, got -1",
+            ),
+            // `select` arg shape + contents.
+            (
+                "query [from people select [name 5]]",
+                "query: `select` block must contain only words, got integer!",
+            ),
+            (
+                "query [from people select 5]",
+                "query: `select` expects a block or `*`, got integer!",
+            ),
+            // Unknown keyword.
+            (
+                "query [from people bogus]",
+                "query: unknown keyword `bogus`",
+            ),
+            // Missing `from` clause.
+            ("query [select [name]]", "query: no `from` clause found"),
+        ];
+        let people = "people: [[name \"A\"]] ";
+        for (clause, want) in cases {
+            let src = format!("{people}{clause}");
+            let got = err_msg(&src);
+            assert!(
+                got.contains(want),
+                "case {clause:?}: expected message containing {want:?}, got {got:?}"
+            );
+        }
+    }
+
+    /// Truncated clauses (keyword at end of block) each hit their
+    /// "expects an argument" arm.
+    #[test]
+    fn query_truncated_clause_table() {
+        let cases: &[(&str, &str)] = &[
+            ("query [from]", "query: `from` expects a word or block argument"),
+            ("query [select]", "query: `select` expects a block or `*`"),
+            ("query [where]", "query: `where` expects a block"),
+            ("query [order]", "query: `order` expects a block of field words"),
+            ("query [limit]", "query: `limit` expects an integer"),
+            ("query [offset]", "query: `offset` expects an integer"),
+        ];
+        for (clause, want) in cases {
+            let got = err_msg(clause);
+            assert!(
+                got.contains(want),
+                "case {clause:?}: expected message containing {want:?}, got {got:?}"
+            );
+        }
+    }
+
+    /// `query_native`'s own type guard (wrong first-arg type).
+    #[test]
+    fn query_native_guards() {
+        assert_eq!(err_msg("query 5"), "expected block!, found integer!");
+        // Zero args (`query` alone): an arity error names the native.
+        let got = err_msg("query");
+        assert!(
+            got.contains("query") && got.contains("expects") && got.contains("argument"),
+            "expected arity error naming `query`, got {got:?}"
+        );
+    }
+
+    /// An unbound word inside the WHERE block propagates the evaluation
+    /// error out of `filter_rows`'s per-row dispatch.
+    #[test]
+    fn query_where_error_propagates() {
+        let got = err_msg(&format!(
+            "{PEOPLE_SRC} query [from people where [nosuchwordxyz > 1]]"
+        ));
+        assert!(
+            got.contains("nosuchwordxyz") && got.contains("has no value"),
+            "expected UnboundWord from WHERE block, got {got:?}"
+        );
+    }
+
+    /// A source whose records are neither object! nor block! fails in
+    /// `extract_fields` with the record type error.
+    #[test]
+    fn query_record_type_error() {
+        let got = err_msg("data: [1 2 3] query [from data where [x > 0]]");
+        assert!(
+            got.contains("query: record must be object! or block!, got integer!"),
+            "got {got:?}"
+        );
+    }
+
+    /// Ordering by a string field exercises `compare_values`' form-based
+    /// fallback (no numeric comparison available).
+    #[test]
+    fn query_order_string_field() {
+        let v = val(&format!("{PEOPLE_SRC} query [from people order [city]]"));
+        let names: Vec<String> = match &v {
+            Value::Block { series, .. } => {
+                let data = series.data.borrow();
+                data.iter()
+                    .skip(series.index)
+                    .map(|r| match get_field(r, &Symbol::new("name")) {
+                        Some(Value::Word { sym, .. }) | Some(Value::SetWord { sym, .. }) => {
+                            sym.as_str().into()
+                        }
+                        Some(other) => form_to_string(&other),
+                        None => String::new(),
+                    })
+                    .collect()
+            }
+            other => panic!("expected block, got {}", type_name(other)),
+        };
+        // "LA" < "NYC": Bob first, then Alice and Carol (stable sort keeps
+        // source order within equal keys).
+        assert_eq!(names, vec!["Bob", "Alice", "Carol"], "order by city asc");
+    }
+
+    /// `distinct` without projection dedups full records (objects compared
+    /// structurally via `values_equal`'s Object arm).
+    ///
+    /// NOTE: block! records ([name "A"] pairs) are NOT deduped today —
+    /// `values_equal` has no `(Block, Block)` arm, so two structurally
+    /// identical blocks compare unequal. Tracked in KNOWN_ISSUES.md.
+    #[test]
+    fn query_distinct_without_projection() {
+        let v = val(
+            "data: [
+                make object! [name: \"A\"]
+                make object! [name: \"A\"]
+                make object! [name: \"B\"]
+            ]
+            query [from data distinct]",
+        );
+        let count = match &v {
+            Value::Block { series, .. } => series.data.borrow().len() - series.index,
+            other => panic!("expected block, got {}", type_name(other)),
+        };
+        assert_eq!(count, 2, "2 distinct full records");
     }
 }

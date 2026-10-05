@@ -1,0 +1,2 @@
+make map! ["name" Alice "tags" a b "nested" make map! ["x" 1 "y" true false none]]
+1 2.5 three 4
