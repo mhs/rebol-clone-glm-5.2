@@ -17,9 +17,23 @@ print rgb? 192.168.1.10     ; false  (4 components, not 3)
 print type? 255.0.0         ; tuple! (still its base type)
 
 print "positional schema — tuple! (IPv4 address):"
-define-type 'ipv4! 'tuple! [a: byte b: byte c: byte d: byte]
+; The `where` clause on the first octet rejects reserved ranges:
+;   0.x.x.x (unspecified), 127.x.x.x (loopback),
+;   224-239.x.x.x (multicast), 240-255.x.x.x (reserved/broadcast).
+; (Note: `byte` is redundant on tuple! — the lexer already enforces 0-255
+; at the literal level. It's kept here for parity with rgb!.)
+define-type 'ipv4! 'tuple! [
+    a: [where [any [all [a >= 1 a <= 126] all [a >= 128 a <= 223]]]]
+    b: byte
+    c: byte
+    d: byte
+]
 print valid? 'ipv4! 192.168.1.10    ; true
 print valid? 'ipv4! 255.0.0         ; false  (only 3 components)
+print valid? 'ipv4! 127.0.0.1       ; false  (loopback — 127 reserved)
+print valid? 'ipv4! 0.0.0.0         ; false  (unspecified — 0 reserved)
+print valid? 'ipv4! 224.0.0.1       ; false  (multicast — 224-239 reserved)
+print valid? 'ipv4! 255.255.255.255 ; false  (broadcast — 240-255 reserved)
 
 print "scalar schema — integer! (TCP port):"
 define-type 'port! 'integer! [range 1 65535]

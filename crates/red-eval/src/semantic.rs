@@ -1953,12 +1953,30 @@ mod tests {
 
     #[test]
     fn define_type_ipv4_and_valid() {
-        let src = "define-type 'ipv4! 'tuple! [a: byte b: byte c: byte d: byte] ";
+        // IPv4 with reserved-range exclusion on the first octet:
+        //   valid first octets are 1-126 and 128-223 (rejects 0.x, 127.x
+        //   loopback, 224-239 multicast, 240-255 reserved/broadcast).
+        let src = concat!(
+            "define-type 'ipv4! 'tuple! [",
+            "a: [where [any [all [a >= 1 a <= 126] all [a >= 128 a <= 223]]]] ",
+            "b: byte c: byte d: byte] ",
+        );
         assert_eq!(mold_to_string(&val(&format!("{}{}", src, "valid? 'ipv4! 192.168.1.10"))), "true");
+        assert_eq!(mold_to_string(&val(&format!("{}{}", src, "valid? 'ipv4! 10.0.0.1"))), "true");
+        assert_eq!(mold_to_string(&val(&format!("{}{}", src, "valid? 'ipv4! 126.255.255.255"))), "true");
+        assert_eq!(mold_to_string(&val(&format!("{}{}", src, "valid? 'ipv4! 128.0.0.1"))), "true");
+        assert_eq!(mold_to_string(&val(&format!("{}{}", src, "valid? 'ipv4! 223.255.255.255"))), "true");
         // 3-byte tuple fails (ipv4 expects exactly 4 components)
         assert_eq!(mold_to_string(&val(&format!("{}{}", src, "valid? 'ipv4! 255.0.0"))), "false");
         // Non-tuple base
         assert_eq!(mold_to_string(&val(&format!("{}{}", src, "valid? 'ipv4! 42"))), "false");
+        // Reserved ranges (first octet excluded by the `where` clause)
+        assert_eq!(mold_to_string(&val(&format!("{}{}", src, "valid? 'ipv4! 0.0.0.0"))), "false");
+        assert_eq!(mold_to_string(&val(&format!("{}{}", src, "valid? 'ipv4! 127.0.0.1"))), "false");
+        assert_eq!(mold_to_string(&val(&format!("{}{}", src, "valid? 'ipv4! 224.0.0.1"))), "false");
+        assert_eq!(mold_to_string(&val(&format!("{}{}", src, "valid? 'ipv4! 239.255.255.255"))), "false");
+        assert_eq!(mold_to_string(&val(&format!("{}{}", src, "valid? 'ipv4! 240.0.0.0"))), "false");
+        assert_eq!(mold_to_string(&val(&format!("{}{}", src, "valid? 'ipv4! 255.255.255.255"))), "false");
     }
 
     #[test]
