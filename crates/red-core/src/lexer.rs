@@ -3773,11 +3773,11 @@ mod tests {
 
     #[test]
     fn dec_not_committed_falls_through() {
-        // `3.14decal` — `dec` followed by `al` is not committed
+        // `1.25decal` — `dec` followed by `al` is not committed
         // (not a delimiter/EOF after `dec`), so it falls through to
         // normal float parsing + word.
-        let toks = kinds("3.14decal");
-        assert_eq!(toks[0], TokenKind::Float(3.14));
+        let toks = kinds("1.25decal");
+        assert_eq!(toks[0], TokenKind::Float(1.25));
     }
 
     #[test]

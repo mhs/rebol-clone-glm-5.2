@@ -1176,7 +1176,7 @@ mod tests {
 
     #[test]
     fn round_trip_float() {
-        let v = Value::float(3.14);
+        let v = Value::float(2.5);
         let sv = v.marshal_send().unwrap();
         let back = sv.unmarshal();
         assert_eq!(mold_to_string(&back), mold_to_string(&v));
