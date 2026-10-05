@@ -1,6 +1,36 @@
 # Feature C: Coverage Push (weak files → 80%+)
 
-**Status:** Planned — not started
+**Status:** DONE (commits 4f93d6e, 65422a3, bd79f9e) — 2026-10-05
+
+**Result vs. targets:**
+
+| File | Before | After | Target |
+|---|---|---|---|
+| query.rs | 69% | **88.9%** | ~85% ✓ |
+| json.rs | 72% | **86.6%** | ~85% ✓ |
+| parse.rs | 72% | **85.2%** | — ✓ |
+| object.rs | 68% | **80.8%** | — ✓ |
+| vm/vm.rs | 68% | **70.9%** | high 70s ✗ (partial) |
+| interp_walker.rs | 62% | **65.1%** | high 70s ✗ (partial) |
+| **workspace total** | 81.1% | **82.8%** | ≥83% ~ (82.8) |
+
+Remaining vm.rs/interp_walker.rs gap: deep VM dispatch arms
+(`run_loop_reduce` nested returns, `call_native` heap fallback,
+`build_closure_def` ancestor-frame captures) and the walker's
+`resolve_word`/`write_setword` `Binding::Lexical` arms — reachable
+mainly via VM-invoked frames that fall back to the walker; follow-up
+if needed.
+
+**Bugs found by this push** (see KNOWN_ISSUES.md):
+1. `values_equal` has no `(Block, Block)` arm — `query/distinct` never
+   dedups block records (entry added).
+2. Refinement args collected after positionals — Red's
+   `parse/part input limit rules` order mis-collects (entry added).
+3. **Fixed** (65422a3): `collect into 'w` always failed — the binding
+   pass allocated a slot for the `into` keyword itself, so Phase 2
+   bound it and `is_word(.., "into")` no longer recognized the form.
+4. Fixed the 3 no-assert placeholder walker tests.
+
 **Baseline:** 81.1% lines workspace-wide; `just coverage` (RUST_MIN_STACK=
 33554432). Weak files in `crates/red-eval/src/`: `vm/vm.rs` 68%,
 `interp_walker.rs` 62%, `query.rs` 69%, `object.rs` 68%, `json.rs` 72%,
