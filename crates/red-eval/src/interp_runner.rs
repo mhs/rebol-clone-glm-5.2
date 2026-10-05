@@ -239,6 +239,14 @@ fn run_series_inner_opts(
             // Propagate as a hard error so the failure is visible.
             return Err(Error::Eval(e));
         }
+        // Phase 1 supervisor scaffolding: pre-cache the embedded
+        // `supervisor.red` module under the name `'supervisor` so
+        // `import 'supervisor` resolves without a filesystem path. Gated on
+        // the same `--no-stdlib` flag (the supervisor library is a stdlib
+        // extension). Idempotent — skips the parse/eval if already cached.
+        if let Err(e) = crate::stdlib::ensure_supervisor_module(&mut env) {
+            return Err(Error::Eval(e));
+        }
     }
     let block = Value::block(body);
     // Dispatch on `env.mode`: `Walk` → tree-walker (`eval`), `Vm` →

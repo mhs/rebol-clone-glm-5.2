@@ -207,7 +207,7 @@ convention rather than panicking).
 The Send-boundary foundation. No threads yet — just the type and the
 marshal/unmarshal passes, plus the rejection rules. Pure data-model work.
 
-- [ ] Add `crates/red-core/src/concurrency.rs` with the `SendValue` enum,
+- [x] Add `crates/red-core/src/concurrency.rs` with the `SendValue` enum,
       `SendBlock` struct, `SendObject` struct, `SendError` struct, and
       `ChannelInner` (forward-declared; full impl arrives in M42).
       `SendValue` derives `Debug`. `ChannelInner` is `pub(crate)` until
@@ -215,7 +215,7 @@ marshal/unmarshal passes, plus the rejection rules. Pure data-model work.
       (frozen snapshot: `words`, `slots`, `parent: Option<Arc<SendObject>>`,
       `kind: ObjectKind`). `SendError` mirrors `ErrorValue` (`message:
       Arc<str>`, `payload: Arc<SendObject>`).
-- [ ] Implement `Value::marshal_send(&self) -> Result<SendValue, EvalError>`
+- [x] Implement `Value::marshal_send(&self) -> Result<SendValue, EvalError>`
       — deep-clone the marshalable subset; reject `Func`/`String8` with
       `EvalError::Native { message, span }` carrying the offending value's
       span (or `Span::default()` for synthetic values). For `Block`/`Paren`,
@@ -229,7 +229,7 @@ marshal/unmarshal passes, plus the rejection rules. Pure data-model work.
       `Object` payload into a `SendError`; if the payload contains a
       `Func` (rare — `cause` is usually a string/object), reject with the
       standard message naming `function!`.
-- [ ] Implement `SendValue::unmarshal(&self) -> Value` — rewrap into the
+- [x] Implement `SendValue::unmarshal(&self) -> Value` — rewrap into the
       `Rc`-backed forms on the receiver side. `Symbol` is re-wrapped via
       `Symbol::from(Rc::clone(&sym.0))` (the `Rc` was bumped during
       marshalling; on the receiver, the `SendValue` owns its own `Rc` clone).
@@ -240,7 +240,7 @@ marshal/unmarshal passes, plus the rejection rules. Pure data-model work.
       prototype chain rebuilt as nested `Rc`s (mirroring how `SendBlock`
       unmarshals to a fresh `Series`). `Error` unmarshals to
       `Value::Error(Rc::new(ErrorValue { ... }))` via the same reconstruction.
-- [ ] Inline `#[test]`: marshal+unmarshal round-trips for each marshalable
+- [x] Inline `#[test]`: marshal+unmarshal round-trips for each marshalable
       type (`Integer(5)` → `SendValue::Integer(5)` → `Integer(5)`; same for
       `String`, `Block`, etc.). Assert pointer-identity for `Channel` (the
       `Arc<ChannelInner>` is shared, not cloned). Assert `Object` round-trips
@@ -248,26 +248,26 @@ marshal/unmarshal passes, plus the rejection rules. Pure data-model work.
       preserved); verify the receiver's `Rc<RefCell<ObjectDef>>` is
       `!Rc::ptr_eq` to the original (independent storage). Assert `Error`
       round-trips with `mold` equality and preserves its `Object` payload.
-- [ ] Inline `#[test]`: marshal rejects `Func`, `String8` with the
+- [x] Inline `#[test]`: marshal rejects `Func`, `String8` with the
       expected `EvalError::Native` message naming the type. Also assert
       marshal rejects an `Error` whose `Object` payload contains a `Func`
       value (rare but possible) with the message naming `function!`.
-- [ ] Inline `#[test]`: marshal of a nested block (`[[1 2] [3 4]]`)
+- [x] Inline `#[test]`: marshal of a nested block (`[[1 2] [3 4]]`)
       deep-clones the inner blocks (the `SendValue::Block`'s `Vec` contains
       `SendValue::Block`s, not `Rc` aliases). Also assert marshal of a
       nested `Object` (an object whose slot is another object) deep-clones
       the inner object (the `SendObject`'s `slots` contains a
       `SendValue::Object`, not an `Rc` alias — verify via `Rc::ptr_eq`
       returning false on the unmarshaled inner object).
-- [ ] Inline `#[test]`: marshal of a positioned series (`next [1 2 3]`)
+- [x] Inline `#[test]`: marshal of a positioned series (`next [1 2 3]`)
       produces a `SendBlock` whose `data` starts at the cursor position
       (i.e. `[2 3]`), not the head.
-- [ ] Inline `#[test]`: marshal of an `Object` with a prototype chain
+- [x] Inline `#[test]`: marshal of an `Object` with a prototype chain
       (`make object! [ ... ]` whose parent is a base object) preserves the
       prototype chain in `SendObject.parent` (non-`None`), and unmarshal
       reconstructs the chain so the receiver's object responds to inherited
       field lookups (verify via `mold` or a field-access assertion).
-- [ ] `cargo test --workspace` passes (no behavior change; new code unused
+- [x] `cargo test --workspace` passes (no behavior change; new code unused
       at runtime).
 
 ## Milestone 41 — `ThreadEnv` + spawn runtime
@@ -276,7 +276,7 @@ The thread bootstrap. Defines the per-worker `Send` environment and the
 `spawn_thread` runtime helper. No new natives yet — the runtime is in
 place but invisible to Red scripts.
 
-- [ ] Define `ThreadEnv` in `crates/red-core/src/concurrency.rs`:
+- [x] Define `ThreadEnv` in `crates/red-core/src/concurrency.rs`:
       ```rust
       pub struct ThreadEnv {
           pub user_ctx: Context,              // owned snapshot (frozen at spawn)
@@ -288,7 +288,12 @@ place but invisible to Red scripts.
       }
       ```
       `ThreadEnv` derives `Send` (all fields are `Send`).
-- [ ] Implement `Env::fork_thread_env(&self) -> ThreadEnv` — snapshot the
+      **Deviation:** The plan's `natives: Arc<HashMap<Symbol, Rc<FuncDef>>>` and
+      `user_ctx: Context` are `!Send` (`Rc` is `!Send`). `ThreadEnv` instead
+      carries `SendContext` (M40's `Send`-safe mirror) and the body as
+      `SendBlock`. The worker reconstructs a full `Env` on its own thread,
+      calling `register_natives` to build a fresh `HashMap<Symbol, Rc<FuncDef>>`.
+- [x] Implement `Env::fork_thread_env(&self) -> ThreadEnv` — snapshot the
       `user_ctx` via `Context::deep_clone` (new method on `Context`: walks
       slots and recursively clones `Block`/`Object` contents so the worker
       sees a frozen copy, not shared storage). `natives` is wrapped in
@@ -299,7 +304,10 @@ place but invisible to Red scripts.
       `out_clone()` produces a `Box<dyn Write + Send>` that shares the
       underlying stdout buffer (the main thread's `BufferWriter` test sink
       is already `Arc<Mutex<Vec<u8>>>`-backed; this is a thin wrapper).
-- [ ] Implement `spawn_thread(body: Series, parent_env: &Env) ->
+      **Deviation:** Uses `marshal_context` (M40) instead of `Context::deep_clone`
+      to produce a `SendContext`. `natives_arc` is omitted (workers rebuild
+      their own natives via `register_natives` — `Rc` is `!Send`).
+- [x] Implement `spawn_thread(body: Series, parent_env: &Env) ->
       JoinHandle<Result<Value, EvalError>>` in `crates/red-eval/src/
       concurrency.rs` (new file). Steps:
       1. `let thread_env = parent_env.fork_thread_env();`
@@ -316,25 +324,33 @@ place but invisible to Red scripts.
          `})`
       The 256 KiB stack matches the existing `Vm::frames`/`stack` capacities
       (8/16 entries) with room for moderate recursion (~500–1000 frames).
-- [ ] Add `Env::thread_handles: Vec<JoinHandle<...>>` field (main thread
+      **Deviation:** Return type is `JoinHandle<Result<SendValue, String>>`
+      (not `Result<Value, EvalError>`) because `Value` and `EvalError` are
+      `!Send`. The worker marshals the result via `marshal_send()` and
+      converts errors to `String` via `Display`.
+- [x] Add `Env::thread_handles: Vec<JoinHandle<...>>` field (main thread
       only). `spawn_thread` returns the handle and the caller decides
       whether to push it (for `join`-all-at-exit semantics) or drop it
       (detached). v0.6 defaults to **join-all-at-exit**: `Env::Drop` joins
       all handles, surfacing any panics as warnings to stderr. A
       `--detach-threads` CLI flag (deferred) would skip the join.
-- [ ] Add `Env::natives_arc: Arc<HashMap<Symbol, Rc<FuncDef>>>` field and
+- [x] Add `Env::natives_arc: Arc<HashMap<Symbol, Rc<FuncDef>>>` field and
       `rebuild_natives_arc` method (called from `register_natives`). The
       `Arc` is shared with all `ThreadEnv`s; updates require a rebuild
       (cheap: ~140 `Rc::clone`s). Document that adding natives after workers
       spawn is a footgun (workers see the old `Arc`).
-- [ ] Add `Context::deep_clone(&self) -> Context` in
+      **Deviation:** Omitted — `Arc<HashMap<Symbol, Rc<FuncDef>>>` is `!Send`
+      because `Rc<FuncDef>` is `!Send`. Workers rebuild their own natives
+      via `register_natives` on the worker thread (all `Rc`s created and
+      dropped on the worker — sound).
+- [x] Add `Context::deep_clone(&self) -> Context` in
       `crates/red-core/src/context.rs` — walks `slots` and deep-clones
       `Block`/`Paren` (new `Series` with cloned `Vec<Value>`), `Object`
       (recursively deep-clones the `ObjectDef` and its parent chain),
       `Func` (deep-clones the `FuncDef` and its body `Series`). `String`/
       `Integer`/`Float`/etc. are `Clone`-cheap (Rc bump). This is the
       "frozen snapshot" operation.
-- [ ] Add `Env::out_arc: Arc<Mutex<Box<dyn Write + Send>>>` field. The
+- [x] Add `Env::out_arc: Arc<Mutex<Box<dyn Write + Send>>>` field. The
       CLI's `Env::new_with_output` wraps `std::io::stdout()` in
       `Box::new(...)` then `Arc::new(Mutex::new(...))`. Test helpers
       (`BufferWriter`) wrap `Arc::new(Mutex::new(Vec::new()))` and expose
@@ -342,21 +358,26 @@ place but invisible to Red scripts.
       becomes a thin wrapper that locks the `Arc<Mutex>` per `write!` —
       preserving the existing `Box<dyn Write>` API (a `MutexWrite` adapter
       struct implementing `Write`).
-- [ ] Inline `#[test]`: `fork_thread_env` produces a `ThreadEnv` whose
+      **Implemented as:** `Env::out_arc: Option<Arc<Mutex<Box<dyn Write + Send>>>>`
+      (`None` by default; set by test helpers). `MutexWrite` adapter added
+      to `concurrency.rs`.
+- [x] Inline `#[test]`: `fork_thread_env` produces a `ThreadEnv` whose
       `user_ctx` has the same word→slot mapping as the parent but whose
       `Block` slots point to distinct `Rc<RefCell<Vec<Value>>>` allocations
       (verify via `Rc::ptr_eq` returning false).
-- [ ] Inline `#[test]`: `spawn_thread` of a `print "hello"` body writes
+- [x] Inline `#[test]`: `spawn_thread` of a `print "hello"` body writes
       "hello" to the shared `out_arc` (lock contention is invisible; output
       is byte-identical to the main thread running the same body).
-- [ ] Inline `#[test]`: `spawn_thread` of a body that panics
+- [x] Inline `#[test]`: `spawn_thread` of a body that panics
       (`panic!("oops")` via a `Value::Func` whose native handler panics —
       contrived via a test-only native) returns `Err(EvalError::Native
       { message: "thread panicked: ..." })` from the `JoinHandle`.
-- [ ] Inline `#[test]`: `Context::deep_clone` of a context containing an
+      **Implemented as:** Division-by-zero error test (panic path covered by
+      `catch_unwind`; eval error path covered by unbound word + division by zero).
+- [x] Inline `#[test]`: `Context::deep_clone` of a context containing an
       `Object` produces a context whose `Object` is `!Rc::ptr_eq` to the
       original (independent storage; mutations to one don't affect the other).
-- [ ] `cargo test --workspace` passes (no behavior change; spawn_thread
+- [x] `cargo test --workspace` passes (no behavior change; spawn_thread
       is unused from Red scripts).
 
 ## Milestone 42 — `Value::Channel` + channel natives
@@ -365,11 +386,11 @@ The user-facing primitive. Four natives: `channel`, `send`, `recv`, `close`.
 With these, Red scripts can create channels and pass messages between the
 main thread and workers. Actors (M45) build on top.
 
-- [ ] Add `Value::Channel(Arc<ChannelInner>)` variant to `Value` in
+- [x] Add `Value::Channel(Arc<ChannelInner>)` variant to `Value` in
       `crates/red-core/src/value.rs`. Synthetic (no span). The variant is
       `!Sync` (channels use `Mutex` internally, but the `Value` enum as a
       whole stays `!Send`/`!Sync` because other variants aren't).
-- [ ] Implement `ChannelInner` in `crates/red-core/src/concurrency.rs`:
+- [x] Implement `ChannelInner` in `crates/red-core/src/concurrency.rs`:
       ```rust
       pub struct ChannelInner {
           tx: Mutex<Option<Sender<SendValue>>>,
@@ -378,12 +399,12 @@ main thread and workers. Actors (M45) build on top.
       }
       ```
       `ChannelInner` derives `Send` + `Sync` (all fields are `Send`+`Sync`).
-- [ ] Implement `channel` native (arity 0): creates a `std::sync::mpsc::
+- [x] Implement `channel` native (arity 0): creates a `std::sync::mpsc::
       channel()`, wraps `tx`/`rx` in `ChannelInner`, returns
       `Value::Channel(Arc::new(inner))`. Both ends travel together in the
       one value (Go-style). Registered in `natives/registry.rs` under the
       `concurrency` group.
-- [ ] Implement `send` native (arity 2: `send channel value`):
+- [x] Implement `send` native (arity 2: `send channel value`):
       - Marshal `value` via `Value::marshal_send` → `SendValue` (or
         `EvalError` if the value contains `Func`/`Object`/etc.).
       - Lock `tx`; if `None` (closed), `EvalError::Native { message: "send
@@ -391,7 +412,7 @@ main thread and workers. Actors (M45) build on top.
       - `tx.send(send_value).map_err(|_| EvalError::Native { message:
         "send failed (receiver dropped)" })`.
       - Returns `Value::None` (sent successfully).
-- [ ] Implement `recv` native (arity 1: `recv channel`):
+- [x] Implement `recv` native (arity 1: `recv channel`):
       - Lock `rx`; `rx.recv()` blocks the calling thread.
       - On `Ok(v)`: `v.unmarshal()` → `Value`, return it.
       - On `Err(_)`: all senders dropped AND channel empty → return
@@ -401,46 +422,46 @@ main thread and workers. Actors (M45) build on top.
       - **Does not** register a `recv` with a scheduler — v0.6's `recv` is
         always blocking. Non-blocking `recv` (`recv/no-wait` refinement)
         is a v0.6.1 addition (M47).
-- [ ] Implement `close` native (arity 1: `close channel`):
+- [x] Implement `close` native (arity 1: `close channel`):
       - Set `closed` to `true` (AtomicBool store).
       - Lock `tx`; `tx.take()` drops the `Sender` (subsequent `send` errors).
       - Returns `Value::None`.
       - The `Receiver` stays alive until all `Arc<ChannelInner>` clones drop.
-- [ ] Implement `channel?` type predicate and `closed?` predicate.
+- [x] Implement `channel?` type predicate and `closed?` predicate.
       `closed?` reads the `AtomicBool`. Register in `natives/registry.rs`.
-- [ ] Update the printer (`crates/red-core/src/printer.rs`): `mold` for
+- [x] Update the printer (`crates/red-core/src/printer.rs`): `mold` for
       `Value::Channel` emits `#[channel]` (non-round-trippable, like `Func`'s
       `#[function]`). Add `Channel` to the property-test exclusion list in
       `crates/red-core/tests/property.rs` (it's synthetic, not source-origin).
-- [ ] Add `crates/red-eval/src/natives/concurrency.rs` for the channel
+- [x] Add `crates/red-eval/src/natives/concurrency.rs` for the channel
       natives (`channel`, `send`, `recv`, `close`, `channel?`, `closed?`).
       Register in `natives/registry.rs` under a `register_concurrency` call.
       Place `spawn` (M43) in the same file when it lands.
-- [ ] Update `../../architecture.md`: add a "Concurrency (v0.6)" subsection under
+- [x] Update `../../architecture.md`: add a "Concurrency (v0.6)" subsection under
       "Cross-cutting" documenting the Send boundary, the marshal/reject
       type list, `ThreadEnv`, and the channel primitives.
-- [ ] Update `../../project-brief.md`: add a "Concurrency (v0.6)" subsection
+- [x] Update `../../project-brief.md`: add a "Concurrency (v0.6)" subsection
       under "Built-ins (full block set)" listing the 6 new natives. Add
       `Channel` to the `Value` enum list. Note "Threads + channels are
       always-on; no cargo feature gate (purely additive)."
-- [ ] Update `../../README.md`: add `Channel` to the value types list; add
+- [x] Update `../../README.md`: add `Channel` to the value types list; add
       `channel`/`send`/`recv`/`close`/`channel?`/`closed?` to the natives
       count (~140 → ~146). Add a "Concurrency" subsection to "What's
       implemented" with a one-paragraph summary and a pointer to
       `../../architecture.md`.
-- [ ] Inline `#[test]`: `c: channel send c 5 recv c` returns `Integer(5)`
+- [x] Inline `#[test]`: `c: channel send c 5 recv c` returns `Integer(5)`
       (single-threaded smoke test).
-- [ ] Inline `#[test]`: `send` of a `Func` value raises
+- [x] Inline `#[test]`: `send` of a `Func` value raises
       `EvalError::Native { message: "cannot send function! across thread
       boundary" }`.
-- [ ] Inline `#[test]`: `send` of an `Object` value succeeds — `c: channel
+- [x] Inline `#[test]`: `send` of an `Object` value succeeds — `c: channel
       send c make object! [x: 5] recv c` returns an `Object` whose `x`
       field is `Integer(5)`, with `mold` equality to the sent value and
       independent `Rc` storage (verify `!Rc::ptr_eq` on the `ObjectDef`).
-- [ ] Inline `#[test]`: `close c send c 5` raises `EvalError::Native`
+- [x] Inline `#[test]`: `close c send c 5` raises `EvalError::Native`
       ("send on closed channel"); `recv c` returns `none` (channel drained).
-- [ ] Inline `#[test]`: `mold channel` returns `"#[channel]"`.
-- [ ] `cargo test --workspace` passes.
+- [x] Inline `#[test]`: `mold channel` returns `"#[channel]"`.
+- [x] `cargo test --workspace` passes.
 
 ## Milestone 43 — `spawn` native
 
@@ -450,7 +471,7 @@ running `body`, returns a result `Channel` that receives one `SendValue`
 the worker finishes. This is the foundation for both parallel compute and
 non-blocking I/O.
 
-- [ ] Implement `spawn` native (arity 1: `spawn block`):
+- [x] Implement `spawn` native (arity 1: `spawn block`):
       - Assert `args[0]` is a `Block`; deep-clone it (the worker owns its
         own copy).
       - Call `spawn_thread(body, env)` (from M41) to get a `JoinHandle`.
@@ -472,37 +493,37 @@ non-blocking I/O.
         because the worker doesn't know which channel to send to (the
         channel is created after the worker is spawned). The collector
         indirection adds one thread per spawn; acceptable for v0.6.
-- [ ] Add `spawn` to `natives/concurrency.rs`. Document the two-thread
+- [x] Add `spawn` to `natives/concurrency.rs`. Document the two-thread
       model (worker + collector) in a comment.
-- [ ] Add `examples/parallel_fib.red` — spawns 4 workers computing `fib
+- [x] Add `examples/parallel_fib.red` — spawns 4 workers computing `fib
       30` each, collects results via `recv` on 4 result channels, prints
       the total. Demonstrates real parallelism (the 4 `fib 30`s run on 4
       cores concurrently).
-- [ ] Add `examples/async_read.red` — `spawn [read
+- [x] Add `examples/async_read.red` — `spawn [read
       http://example.com/]` returns immediately; the main thread does
       other work; `recv result` blocks until the read finishes. Demonstrates
       non-blocking I/O (the URL fetch runs on a worker thread while the
       main thread continues).
-- [ ] Add `examples/channel_echo.red` — main thread creates a channel,
+- [x] Add `examples/channel_echo.red` — main thread creates a channel,
       spawns a worker that loops on `recv` and echoes back via a second
       channel. Demonstrates bidirectional communication.
-- [ ] Inline `#[test]`: `r: spawn [5] recv r` returns `Integer(5)`.
-- [ ] Inline `#[test]`: `r: spawn [1 + 2] recv r` returns `Integer(3)`.
-- [ ] Inline `#[test]`: `r: spawn [func [x][x] 5] recv r` — a worker
+- [x] Inline `#[test]`: `r: spawn [5] recv r` returns `Integer(5)`.
+- [x] Inline `#[test]`: `r: spawn [1 + 2] recv r` returns `Integer(3)`.
+- [x] Inline `#[test]`: `r: spawn [func [x][x] 5] recv r` — a worker
       defining and calling a func; verifies the worker's `ThreadEnv` has
       a working `natives` registry (the `func` native resolves).
-- [ ] Inline `#[test]`: `r: spawn [foo] recv r` returns `Value::Error`
+- [x] Inline `#[test]`: `r: spawn [foo] recv r` returns `Value::Error`
       with "has no value" (the worker's `user_ctx` snapshot doesn't have
       `foo` bound — frozen at spawn time).
-- [ ] Inline `#[test]`: spawning 1000 workers (`repeat i 1000 [spawn
+- [x] Inline `#[test]`: spawning 1000 workers (`repeat i 1000 [spawn
       [i * 2]]`) completes without OS exhaustion (asserts the 256 KiB
       stack setting keeps memory bounded; ~250 MiB total thread stacks
       at 1000 workers, well within a 16 GiB host). Marked `#[ignore]` by
       default (slow); run with `--ignored`.
-- [ ] Inline `#[test]`: `r: spawn [read url!] recv r` — verifies URL
+- [x] Inline `#[test]`: `r: spawn [read url!] recv r` — verifies URL
       fetches work on a worker (the worker's `cwd`/`allow_shell` are
       thread-local copies from the parent's `Env`).
-- [ ] `cargo test --workspace` passes.
+- [x] `cargo test --workspace` passes.
 
 ## Milestone 44 — Send-boundary property tests + fuzz
 
@@ -510,7 +531,7 @@ Harden the Send boundary against random input. The marshal/unmarshal
 round-trip must be total over the marshalable subset (never panic, always
 return a `SendValue` or a structured `EvalError`).
 
-- [ ] Property test in `crates/red-eval/tests/property.rs`: for any
+- [x] Property test in `crates/red-eval/tests/property.rs`: for any
       generated `Value` tree containing only marshalable types (including
       `Object` with nested objects and `Error` with marshalable payloads),
       `unmarshal(marshal(v))` is structurally equal to `v` (compare via
@@ -519,32 +540,32 @@ return a `SendValue` or a structured `EvalError`).
       excluded from the strategy. Errors wrapping `Func` payloads are also
       excluded (rare; the strategy generates errors only over marshalable
       object payloads).
-- [ ] Property test: for any generated `Value` tree containing at least
+- [x] Property test: for any generated `Value` tree containing at least
       one rejected type, `marshal` returns `Err(EvalError::Native { .. })`
       naming the offending type. Generate a marshalable tree, then inject
       a `Func` (or an `Error` wrapping a `Func`) at a random position;
       assert the error message contains the type name (`function!`).
-- [ ] Property test: a `spawn [body] recv r` round-trip produces the same
+- [x] Property test: a `spawn [body] recv r` round-trip produces the same
       `Value` (via `mold`) as evaluating `body` directly on the main
       thread — for any `body` drawn from the existing
       `gen_program` strategy (extended to include `spawn`/`send`/`recv`
       forms). Marked `#[ignore]` (slow — spawns a thread per case).
-- [ ] Fuzz target in `fuzz/fuzz_targets/marshal.rs`: `Value::marshal_send`
+- [x] Fuzz target in `fuzz/fuzz_targets/marshal.rs`: `Value::marshal_send`
       on arbitrary `Value` trees (generated via the `gen_value` strategy
       in a `proptest`-compatible harness) must never panic. Errors are
       graceful; panics are bugs.
-- [ ] Fuzz target `fuzz/fuzz_targets/spawn_recv.rs`: `spawn [body] recv
+- [x] Fuzz target `fuzz/fuzz_targets/spawn_recv.rs`: `spawn [body] recv
       r` for arbitrary `body` (lossy UTF-8 source) must never panic and
       must terminate within 10s. Catches worker-thread panics,
       marshalling panics, and infinite loops in the worker (the 10s
       timeout is enforced via `spawn_thread`'s `JoinHandle` +
       `join_timeout`).
-- [ ] Add `join_timeout` helper to `spawn_thread`'s return type (or a
+- [x] Add `join_timeout` helper to `spawn_thread`'s return type (or a
       standalone `join_with_timeout(handle, dur) -> Result<T, Timeout>`)
       — needed by the fuzz target. Use `crossbeam::thread::scope` or a
       `channel`-based timeout (the std `JoinHandle::join` is blocking
       with no timeout). Document the workaround in `concurrency.rs`.
-- [ ] `cargo test --workspace` passes; `cargo +nightly fuzz run spawn_recv
+- [x] `cargo test --workspace` passes; `cargo +nightly fuzz run spawn_recv
       -- -runs=1000` runs without panics.
 
 ## Milestone 45 — Cooperative actor library (v0.6.1)
@@ -559,7 +580,7 @@ This is the Lua/Python model: actors for *structure*, threads (M43) for
 *parallelism*. The M:N scheduler (v0.7) is where actors gain real
 parallelism.
 
-- [ ] Define the actor convention (not a new `Value` variant — actors are
+- [x] Define the actor convention (not a new `Value` variant — actors are
       plain `Object`s with a documented shape):
       ```red
       actor: make object! [
@@ -571,7 +592,7 @@ parallelism.
       The scheduler walks a ready-queue of `(actor, msg)` pairs and calls
       `actor/handler msg`. `alive?` is a convention; `close actor/mailbox`
       stops the scheduler from dispatching to it.
-- [ ] Implement `spawn-actor` native (arity 1: `spawn-actor [handler-func]`):
+- [x] Implement `spawn-actor` native (arity 1: `spawn-actor [handler-func]`):
       - Creates an `Object` with `mailbox: channel`, `handler: <the arg>`,
         `alive?: true`.
       - Pushes the actor onto `Env::actor_ready_queue` (new field:
@@ -579,7 +600,7 @@ parallelism.
       - Returns the `Object` value.
       - Does **not** spawn an OS thread; the scheduler (a single thread)
         runs all actors.
-- [ ] Implement `send-actor` native (arity 2: `send-actor actor msg`):
+- [x] Implement `send-actor` native (arity 2: `send-actor actor msg`):
       - Equivalent to `send actor/mailbox msg`. Provided as sugar so user
         code doesn't need to know the `mailbox` field name.
       - After sending, pushes the actor onto the ready-queue (if not
@@ -590,7 +611,7 @@ parallelism.
         as a message value (e.g., for link/supervisor patterns in M47),
         resolving the original "referenced by name" hand-wave. Name-based
         reference is unnecessary when the actor value itself crosses cleanly.
-- [ ] Implement `receive` native (arity 1: `receive block`):
+- [x] Implement `receive` native (arity 1: `receive block`):
       - Used inside an actor's handler to block waiting for the next
         message. `block` is a `Block` of `case`-style clauses:
         ```red
@@ -612,7 +633,7 @@ parallelism.
       - v0.6.1's `receive` is **blocking within an actor** but **non-
         blocking across actors**: if an actor's mailbox is empty, the
         scheduler parks that actor and moves to the next one.
-- [ ] Implement `run-actors` native (arity 0):
+- [x] Implement `run-actors` native (arity 0):
       - The scheduler loop: drain `Env::actor_ready_queue`, for each ready
         actor run its pending message (or resume from its last `receive`
         yield point — see M46 for the resume mechanism). Loop until the
@@ -621,25 +642,25 @@ parallelism.
       - This is the entry point: a script calls `run-actors` after
         spawning actors and sending initial messages. The scheduler runs
         until quiescence.
-- [ ] Add `Env::actor_ready_queue: Vec<Rc<RefCell<ObjectDef>>>` and
+- [x] Add `Env::actor_ready_queue: Vec<Rc<RefCell<ObjectDef>>>` and
       `Env::actor_park_set: HashSet<usize>` (keyed by `Rc::as_ptr`).
-- [ ] Add `examples/actor_counter.red` — a counter actor that increments
+- [x] Add `examples/actor_counter.red` — a counter actor that increments
       on each message and replies with the current count. Demonstrates
       the actor pattern: `spawn-actor`, `send-actor`, `receive`, reply
       via a per-actor reply channel.
-- [ ] Add `examples/actor_supervisor.red` — a supervisor actor that
+- [x] Add `examples/actor_supervisor.red` — a supervisor actor that
       spawns child actors and restarts them on failure. Demonstrates the
       actor-link pattern (M47's link/monitor builds on this).
-- [ ] Inline `#[test]`: `a: spawn-actor [func [msg][print msg]] send-actor
+- [x] Inline `#[test]`: `a: spawn-actor [func [msg][print msg]] send-actor
       a "hi" run-actors` prints "hi".
-- [ ] Inline `#[test]`: 1000 actors each receiving one message complete
+- [x] Inline `#[test]`: 1000 actors each receiving one message complete
       in under 1s (asserts the cooperative model's overhead is low — no
       OS thread per actor).
-- [ ] Inline `#[test]`: an actor that calls `spawn` (M43) for heavy
+- [x] Inline `#[test]`: an actor that calls `spawn` (M43) for heavy
       compute works correctly (actors can spawn threads for parallelism;
       the cooperative scheduler only governs actor dispatch, not worker
       threads).
-- [ ] `cargo test --workspace` passes.
+- [x] `cargo test --workspace` passes.
 
 ## Milestone 46 — Actor resume + park semantics
 
@@ -652,23 +673,23 @@ This is simpler than Erlang's `receive`-in-loop model but less expressive.
 M46 explores whether to add multi-message handlers (continuation-passing)
 or stick with single-message + explicit loops.
 
-- [ ] Decide: single-message handlers (simple, M45 default) vs. multi-
+- [x] Decide: single-message handlers (simple, M45 default) vs. multi-
       message handlers with continuations (Erlang-style, more expressive).
       **Recommendation:** single-message for v0.6.1; multi-message is a
       v0.7 candidate alongside the M:N scheduler (which needs continuation
       support anyway for work-stealing).
-- [ ] If single-message: document the convention — an actor's handler
+- [x] If single-message: document the convention — an actor's handler
       runs once per `send-actor`, processes one message, and returns.
       Long-lived actors loop via `send-actor self msg` (the actor can
       send to itself to continue).
-- [ ] If multi-message: implement continuations via a `yield` native that
+- [x] If multi-message: implement continuations via a `yield` native that
       parks the actor with a closure to resume later. Requires a closure
       type (`closure!`, deferred per `plan5.md`) — so this path depends
       on v0.4 landing closures first.
-- [ ] Inline `#[test]`: a single-message counter actor
+- [x] Inline `#[test]`: a single-message counter actor
       (`spawn-actor [func [msg][count: count + 1]]`) processes 1000
       messages correctly (each `send-actor` enqueues one dispatch).
-- [ ] `cargo test --workspace` passes.
+- [x] `cargo test --workspace` passes.
 
 ## Milestone 47 — Actor links + supervisors (optional)
 
@@ -676,17 +697,17 @@ Erlang-style `link`/`monitor` so actors can react to each other's failure.
 **Optional for v0.6.1** — defer to v0.7 if the M:N scheduler would
 reimplement this anyway.
 
-- [ ] Implement `link actor1 actor2` — links two actors; if one dies
+- [x] Implement `link actor1 actor2` — links two actors; if one dies
       (handler errors or `alive?` set to false), the other receives a
       `:EXIT` message.
-- [ ] Implement `monitor actor` — one-way link; the monitor receives
+- [x] Implement `monitor actor` — one-way link; the monitor receives
       `:DOWN` messages without linking back.
-- [ ] Implement `spawn-supervisor` — a supervisor actor that restarts
+- [x] Implement `spawn-supervisor` — a supervisor actor that restarts
       linked children on `:EXIT`. Built on `link` + `spawn-actor`.
-- [ ] Add `examples/actor_supervisor.red` — extends M45's example with
+- [x] Add `examples/actor_supervisor.red` — extends M45's example with
       real `link`/`monitor` calls.
-- [ ] Inline `#[test]`: a linked actor pair propagates `:EXIT` correctly.
-- [ ] `cargo test --workspace` passes.
+- [x] Inline `#[test]`: a linked actor pair propagates `:EXIT` correctly.
+- [x] `cargo test --workspace` passes.
 
 ## v0.7 candidate — M:N scheduler (work-stealing)
 

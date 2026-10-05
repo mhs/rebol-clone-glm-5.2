@@ -16,11 +16,17 @@
 
 use std::rc::Rc;
 
-use red_core::value::{ModuleDef, Value};
+use red_core::value::{ModuleDef, Symbol, Value};
 use red_core::{Env, EvalError};
 
 /// The stdlib source, embedded at compile time.
 pub const STDLIB_SRC: &str = include_str!("../stdlib/stdlib.red");
+
+/// The supervisor library source, embedded at compile time. Phase 1 stub
+/// (Phase 2 fills in `supervise`/`supervisor-send`/child specs). Cached by
+/// `ensure_supervisor_module` under the name `'supervisor` so
+/// `import 'supervisor` resolves without a filesystem path.
+pub const SUPERVISOR_SRC: &str = include_str!("../stdlib/supervisor.red");
 
 /// Idempotent: parse + eval the stdlib source once (cached on
 /// `env.stdlib`), then alias its exports into `env.user_ctx`. Safe to
@@ -85,4 +91,41 @@ fn alias_stdlib_exports(m: &Rc<std::cell::RefCell<ModuleDef>>, env: &mut Env) {
             env.user_ctx.set(sym, val);
         }
     }
+}
+
+/// Idempotent: parse + evaluate `SUPERVISOR_SRC` as a module body once and
+/// cache the resulting `ModuleDef` in `env.modules['supervisor]`. Subsequent
+/// calls skip the parse/eval (the cache invariant). Unlike `ensure_stdlib`,
+/// this does NOT alias the module's exports into `env.user_ctx` — that is
+/// `import 'supervisor`'s job (matches the named-module cache invariant from
+/// M61). Safe to call repeatedly.
+pub fn ensure_supervisor_module(env: &mut Env) -> Result<(), EvalError> {
+    let name = Symbol::new("supervisor");
+    if env.modules.contains_key(&name) {
+        return Ok(());
+    }
+    let module_rc = load_supervisor_module(env)?;
+    env.modules.insert(name, Rc::clone(&module_rc));
+    Ok(())
+}
+
+/// Parse + evaluate `SUPERVISOR_SRC` as a module body, returning the resulting
+/// `ModuleDef`. Mirrors `load_stdlib_module` above: the source is a bare
+/// `module 'supervisor [...]` form, so evaluating it yields a `Value::Module`
+/// directly. Errors mirror `load_stdlib_module` for consistency.
+fn load_supervisor_module(env: &mut Env) -> Result<Rc<std::cell::RefCell<ModuleDef>>, EvalError> {
+    let body = red_core::parser::load_source(SUPERVISOR_SRC).map_err(|e| EvalError::Native {
+        message: format!("supervisor: parse error: {e}"),
+        span: red_core::value::Span::default(),
+    })?;
+    let module_rc = match crate::module::eval_body_for_module_pub(&body, env)? {
+        Some(m) => m,
+        None => {
+            return Err(EvalError::Native {
+                message: "supervisor: source did not yield a module value".to_string(),
+                span: red_core::value::Span::default(),
+            });
+        }
+    };
+    Ok(module_rc)
 }
