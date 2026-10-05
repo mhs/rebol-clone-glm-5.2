@@ -354,14 +354,12 @@ fn collect_parse_capture_words(series: &Series, ctx: &Context) {
         } = &data[i]
         {
             if matches!(sym.as_str(), "copy" | "set" | "collect" | "into") && i + 1 < n {
-                if let Some(name) = loop_word_name(&data[i + 1]) {
-                    ctx.slot_index(name);
-                }
-                // Skip the operand; the following rule (1+ values) is walked
-                // normally below — its sub-blocks may contain nested
-                // copy/set/collect/into forms we still want to find.
-                // For `collect into 'word rule`, also skip the `into` word.
-                if sym.as_str() == "collect"
+                // `collect into 'word rule` — the *target* word is at i+2,
+                // not i+1. Allocating for i+1 would give the `into` keyword
+                // itself a slot; Phase 2 then binds it, and `parse`'s
+                // `is_word(.., "into")` (which requires Unbound) no longer
+                // recognizes the append form — the shape mis-parses.
+                let is_collect_into = sym.as_str() == "collect"
                     && i + 2 < n
                     && matches!(
                         &data[i + 1],
@@ -370,8 +368,16 @@ fn collect_parse_capture_words(series: &Series, ctx: &Context) {
                             binding: Binding::Unbound,
                             ..
                         } if sym.as_str() == "into"
-                    )
-                {
+                    );
+                let target = if is_collect_into { &data[i + 2] } else { &data[i + 1] };
+                if let Some(name) = loop_word_name(target) {
+                    ctx.slot_index(name);
+                }
+                // Skip the operand; the following rule (1+ values) is walked
+                // normally below — its sub-blocks may contain nested
+                // copy/set/collect/into forms we still want to find.
+                // For `collect into 'word rule`, also skip the `into` word.
+                if is_collect_into {
                     // `collect into 'word rule` — skip `into`, 'word.
                     i += 3;
                 } else {

@@ -60,6 +60,31 @@ when fixing: should `Rc::ptr_eq` on the shared series be a fast path, and
 should the cursor (`index`) participate? For `distinct` semantics it must
 NOT (a positioned sub-block view equals the same elements from position 0).
 
+## Refinement args are collected after positional args — Red's leading-refinement call order mis-collects
+
+**Test:** discovered by `parse::tests::parse_part` (coverage push, Feature C §3).
+
+**Status:** Open (design limitation of both collectors). The walker's
+`collect_call_args` and the VM's `collect_args` gather **positional args
+first, then each refinement's args at the tail** (in refinement-spec
+order). In Red, a leading path refinement's args are consumed immediately
+after the path — so Red's `parse/part "abcde" 3 [rules]` order fails here:
+`3` is consumed as the (second) positional (the rules arg) →
+`expected block!, found integer!`.
+
+**Impact:** any call where a refinement's arguments appear *before* later
+positional args (`parse/part input limit rules`, `copy/part series n
+/other …`). The repo's own fixtures use the working order
+(`parse/part "abcde" ["a" "b" "c"] 3` — refinement args after all
+positionals — see `tests/programs/refinements_basic.red`).
+
+**Proper fix:** collect each active refinement's args at the point the
+refinement token appears (spaced form) or immediately after the leading
+path (path form), rather than deferring all refinement-arg collection to
+the tail. Both `interp_walker.rs::collect_call_args` and
+`vm/compiler.rs::collect_args` (plus the infix-operand path) need the
+same change, and the parity suite should pin the new order.
+
 ## `float!` NaN/Inf propagation — `1.0 / 0.0` yields `inf` silently
 
 **Status:** By design (f64 parity). `float!` is backed by Rust's `f64`,

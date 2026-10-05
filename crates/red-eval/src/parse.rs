@@ -2091,4 +2091,147 @@ mod tests {
         assert_eq!(m(&val(r#"parse "" [3]"#)), "false");
         assert_eq!(m(&val(r#"parse "" [2 3]"#)), "false");
     }
+
+    // --- Coverage push (Feature C §3): untested rules & input forms ---
+
+    fn err_msg(src: &str) -> String {
+        match run_capture_val(src) {
+            Err(msg) => msg,
+            Ok((v, _)) => panic!("expected error for {src:?}, got value {}", m(&v)),
+        }
+    }
+
+    /// `reject` fails the whole parse (false) from wherever it appears.
+    #[test]
+    fn parse_reject() {
+        assert_eq!(m(&val(r#"parse "abc" ["a" reject]"#)), "false");
+        assert_eq!(m(&val(r#"parse "abc" [reject "a" "b" "c"]"#)), "false");
+    }
+
+    /// `opt` matches zero or one occurrence; `while` matches zero or more
+    /// (only `any`/`some` were previously covered).
+    #[test]
+    fn parse_opt_and_while() {
+        assert_eq!(m(&val(r#"parse "ab" [opt "z" "a" "b"]"#)), "true");
+        assert_eq!(m(&val(r#"parse "zab" [opt "z" "a" "b"]"#)), "true");
+        assert_eq!(m(&val(r#"parse "aab" [while "a" "b"]"#)), "true");
+        assert_eq!(m(&val(r#"parse "b" [while "a" "b"]"#)), "true");
+        // `opt` must not consume more than one.
+        assert_eq!(m(&val(r#"parse "zzab" [opt "z" "a" "b"]"#)), "false");
+    }
+
+    /// `behind rule` — reverse lookahead: steps back one element, runs the
+    /// rule there, restores the cursor.
+    #[test]
+    fn parse_behind() {
+        assert_eq!(m(&val(r#"parse "abc" ["a" "b" behind #"b" "c"]"#)), "true");
+        // Previous char doesn't match → behind fails.
+        assert_eq!(m(&val(r#"parse "abc" ["a" "b" behind #"a" "c"]"#)), "false");
+        // At position 0 there's nothing behind → fails.
+        assert_eq!(m(&val(r#"parse "abc" [behind #"x" "a" "b" "c"]"#)), "false");
+        // Block input: behind on elements.
+        assert_eq!(m(&val("parse [a b] ['a behind 'a 'b]")), "true");
+        assert_eq!(m(&val("parse [a b] ['a behind 'b 'b]")), "false");
+    }
+
+    /// `accept value` — unconditionally succeeds and pushes the value into
+    /// the active collect target. (Literal matches inside a collect also
+    /// push their captured values, so the block holds the chars too.)
+    #[test]
+    fn parse_accept() {
+        let v = val(r#"parse "abc" [collect w ["a" "b" "c" accept 42]] w"#);
+        assert_eq!(m(&v), r#"[#"a" #"b" #"c" 42]"#);
+        // Without a collect target, accept still succeeds (no-op push).
+        assert_eq!(m(&val(r#"parse "abc" ["a" "b" "c" accept "done"]"#)), "true");
+    }
+
+    /// `into 'word rule` — parse the current block element as a sub-series,
+    /// binding the element to `word`.
+    #[test]
+    fn parse_into() {
+        let v = val("parse [[a b]] [into w ['a 'b]] w");
+        assert_eq!(m(&v), "[a b]");
+        assert_eq!(m(&val("parse [[a b]] [into w ['a 'z]]")), "false");
+        // Nested: the sub-parse can itself use `into`.
+        let v = val("parse [[a [b c]]] [into w ['a into t ['b 'c]]] w");
+        assert_eq!(m(&v), "[a [b c]]");
+    }
+
+    /// `collect into 'word rule` appends to the word's existing block
+    /// instead of replacing it. (`skip` pushes no capture — use literal
+    /// matches to produce collected values.)
+    #[test]
+    fn parse_collect_into_appends() {
+        let v = val(r#"w: [0] parse "ab" [collect into w ["a" "b"]] w"#);
+        assert_eq!(m(&v), r#"[0 #"a" #"b"]"#);
+    }
+
+    /// `keep 'word` reads the word's value into the collect target.
+    #[test]
+    fn parse_keep_word() {
+        let v = val(r#"v: 42 parse "" [collect w [keep 'v]] w"#);
+        assert_eq!(m(&v), "[42]");
+        // `keep (expr)` evaluates the paren.
+        let v = val(r#"parse "" [collect w [keep (1 + 2)]] w"#);
+        assert_eq!(m(&v), "[3]");
+    }
+
+    /// `/part length` limits the input to the first N elements (chars for
+    /// string!, values for block!), so trailing input is ignored.
+    ///
+    /// NOTE on argument order (deviation from Red — see KNOWN_ISSUES.md):
+    /// this implementation collects refinement args *after* the positional
+    /// args, so the working call shape is `parse/part input rules length`.
+    /// Red's `parse/part input length rules` (refinement arg immediately
+    /// after the path) mis-collects: `length` is consumed as the rules
+    /// positional.
+    #[test]
+    fn parse_part() {
+        // Trailing input beyond the part limit is invisible to the rules…
+        assert_eq!(m(&val(r#"parse/part "abcdef" ["a" "b" "c"] 3"#)), "true");
+        // …and rules needing it fail.
+        assert_eq!(m(&val(r#"parse/part "abcdef" ["a" "b" "c"] 2"#)), "false");
+        // Block form.
+        assert_eq!(m(&val("parse/part [a b c d] ['a 'b] 2")), "true");
+        assert_eq!(m(&val("parse/part [a b c] ['a 'b 'c] 2")), "false");
+    }
+
+    /// Paren input: a `paren!` value fed to `parse` directly (via `first`
+    /// on a block containing one — parens evaluate in normal argument
+    /// position, so this is the only way to reach the arm).
+    #[test]
+    fn parse_paren_input() {
+        assert_eq!(m(&val("parse first [(a b c)] ['a 'b 'c]")), "true");
+        assert_eq!(m(&val("parse first [(a b c)] ['a 'z]")), "false");
+    }
+
+    /// char! `to` — advance until a specific char (cursor lands *at* it).
+    #[test]
+    fn parse_to_char() {
+        assert_eq!(m(&val(r#"parse "xy" [to #"y" "y"]"#)), "true");
+        // `to` never fails — missing needle advances to end.
+        assert_eq!(m(&val(r#"parse "xy" [to #"z" end]"#)), "true");
+    }
+
+    /// `??` debug rule prints the cursor position to stdout and succeeds.
+    #[test]
+    fn parse_debug_rule() {
+        let (v, out) = run_capture_val(r#"parse "abc" ["a" ?? "b" "c"]"#).unwrap();
+        assert_eq!(m(&v), "true");
+        let out = String::from_utf8_lossy(&out).into_owned();
+        assert!(
+            out.contains("parse: cursor at byte 1"),
+            "?? should print cursor position, got {out:?}"
+        );
+    }
+
+    /// Input/rules type errors.
+    #[test]
+    fn parse_type_errors() {
+        assert_eq!(
+            err_msg(r#"parse 5 ["a"]"#),
+            "expected string! or block!, found integer!"
+        );
+        assert_eq!(err_msg(r#"parse "x" 5"#), "expected block!, found integer!");
+    }
 }

@@ -2245,4 +2245,140 @@ mod tests {
             "trace buffer should be empty when tracing is off"
         );
     }
+
+    // --- Coverage push (Feature C §2): type-check parity, closures,
+    // hand-built-block invariants, walker-fallback boundary ---
+
+    fn run_vm_err(src: &str) -> String {
+        let (block, mut env) = compile_for_vm(src);
+        match run(block, &mut env, None) {
+            Err(e) => e.to_string(),
+            Ok(v) => panic!("expected error for {src:?}, got {}", mold_to_string(&v)),
+        }
+    }
+
+    /// Build a `CompiledBlock` from raw instrs (empty pool/tables, zero
+    /// spans) — the hand-built-block pattern for invariant-path tests.
+    fn hand_block(instrs: Vec<Instr>) -> CompiledBlock {
+        let n = instrs.len();
+        CompiledBlock {
+            instrs: instrs.into(),
+            pool: Vec::new().into(),
+            symbols: Vec::new().into(),
+            freevars_table: Vec::new().into(),
+            captures_table: Vec::new().into(),
+            n_locals: 0,
+            freevars: Vec::new(),
+            source_span: Span::new(0, 0),
+            spans: vec![Span::new(0, 0); n].into(),
+            needs_rebind: false,
+            arity: 0,
+        }
+    }
+
+    /// A bare VM env (natives registered, no source compiled).
+    fn fresh_vm_env() -> Env {
+        let ctx = Context::new();
+        install_constants(&ctx);
+        let ctx_rc = bind_pass(&red_core::value::Series::new(vec![]), ctx);
+        let mut env = Env::new(Rc::clone(&ctx_rc));
+        register_natives(&mut env);
+        env.mode = EvalMode::Vm;
+        env
+    }
+
+    fn run_hand_err(instrs: Vec<Instr>) -> String {
+        let mut env = fresh_vm_env();
+        match run(hand_block(instrs), &mut env, None) {
+            Err(e) => e.to_string(),
+            Ok(v) => panic!("expected error, got {}", mold_to_string(&v)),
+        }
+    }
+
+    /// M89 runtime param type-check: the VM's message must match the
+    /// walker's `check_param_types` byte-for-byte (the `--features
+    /// force-walk` parity gate depends on it — see the comment at the
+    /// `prepare_call` type-check loop).
+    #[test]
+    fn vm_param_type_check_error_parity() {
+        let got = run_vm_err("f: func [x [integer!]][x + 1] f \"a\"");
+        assert_eq!(
+            got, "type error: arg 1 expected [integer!], got string!",
+            "VM param type-check message must match the walker byte-for-byte"
+        );
+    }
+
+    /// Closures end-to-end in the VM: `MakeClosure`, `prepare_call`'s
+    /// closure arm, and the `LoadCapture`/`SetCapture` happy paths. Capture
+    /// mutation: each call writes the shared capture cell, so the second
+    /// call observes the first call's write. (Note: the cell is distinct
+    /// from the original global — closure captures don't propagate back.)
+    #[test]
+    fn vm_closure_end_to_end() {
+        let v = run_vm("y: 10 c: closure [x][x + y] c 5");
+        assert!(matches!(v, Value::Integer { n: 15, .. }), "got {v:?}");
+        let v = run_vm("cnt: 0 c: closure [][cnt: cnt + 1] a: c b: c a + b");
+        assert!(
+            matches!(v, Value::Integer { n: 3, .. }),
+            "capture mutation: second call must observe first call's write, got {v:?}"
+        );
+    }
+
+    /// Hand-built blocks hit the defensive invariant arms that real
+    /// compilation never produces. Halt and EndRefine-without-MarkRefine
+    /// return `VmInvariant` compile errors (never panic).
+    #[test]
+    fn vm_hand_built_invariants() {
+        assert_eq!(
+            run_hand_err(vec![Instr::Halt]),
+            "compile error: VM invariant violated: VM reached Halt (block needs_rebind — use walker)"
+        );
+        assert_eq!(
+            run_hand_err(vec![Instr::EndRefine, Instr::Return]),
+            "compile error: VM invariant violated: EndRefine without MarkRefine"
+        );
+    }
+
+    /// The off-stream and pool-OOB guards carry `debug_assert!`s that
+    /// abort in debug builds (the tests run debug); the release fallback
+    /// returns a `VmInvariant` error. Pin the debug behavior so a silent
+    /// removal of either guard is noticed.
+    #[test]
+    #[should_panic(expected = "VM ran off instr stream: pc=1 len=1")]
+    fn vm_hand_built_ran_off_stream_panics_in_debug() {
+        run_hand_err(vec![Instr::ConstInt(1)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "block_pool OOB")]
+    fn vm_hand_built_pool_oob_panics_in_debug() {
+        run_hand_err(vec![Instr::Const(0), Instr::Return]);
+    }
+
+    /// `invoke_via_walker`: a func-valued parameter in operator position
+    /// can't be statically compiled, so the VM routes through the walker.
+    /// Assert the result (not just "no panic") — the fixture
+    /// `higher_order.red` covers this end-to-end but only via stdout.
+    #[test]
+    fn vm_higher_order_via_walker_returns_result() {
+        let v = run_vm("inc: func [x][x + 1] apply-twice: func [f x][(f x) + f x] apply-twice get 'inc 5");
+        assert!(matches!(v, Value::Integer { n: 12, .. }), "got {v:?}");
+    }
+
+    /// The `needs_rebind` boundary contract: blocks that need rebinding
+    /// (`use`/`make object!`) compile to a `[Halt]` stub; `dispatch_block`
+    /// routes them to the walker before `run`. Running such a stub directly
+    /// must produce the documented VmInvariant error (covered by the Halt
+    /// case in `vm_hand_built_invariants`); here we pin that the compiler
+    /// actually produces the stub for a `use` block.
+    #[test]
+    fn vm_use_block_compiles_to_halt_stub() {
+        let (block, _env) = compile_for_vm("use [x][x: 1]");
+        assert!(block.needs_rebind, "`use` block should be flagged needs_rebind");
+        assert!(
+            matches!(block.instrs.as_ref(), [Instr::Halt]),
+            "`use` block should compile to a single Halt stub, got {:?}",
+            block.instrs.as_ref()
+        );
+    }
 }
