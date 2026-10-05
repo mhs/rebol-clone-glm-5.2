@@ -431,6 +431,9 @@ pub fn register_natives(env: &mut Env) {
     // Ports + minimal synchronous networking (M113)
     crate::net::register_net_natives(env);
 
+    // Concurrency natives (M42): channel/send/recv/close/channel?/closed?
+    crate::natives::register_concurrency_natives(env);
+
     // M30: invalidate the VM's indexed-natives cache so the next `vm::run`
     // rebuilds it from the now-complete `natives` map. (Cheap: the rebuild
     // is O(n) on the first `vm::run`, then cached for the rest of the

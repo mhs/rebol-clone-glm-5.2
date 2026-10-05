@@ -56,7 +56,7 @@ pub fn register_net_natives(env: &mut Env) {
     };
 
     reg(env, "open", open_native as NF, 1);
-    reg(env, "close", close_native as NF, 1);
+    reg(env, "close", close_port_native as NF, 1);
     reg(env, "create", create_native as NF, 1);
     reg(env, "port?", port_predicate as NF, 1);
 }
@@ -148,7 +148,7 @@ fn open_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
 /// `close port` → `none`. Drops the `PortState`, releasing the `ureq` body
 /// `Read` handle or file handle. A second `read`/`write` on a closed port
 /// raises `NetError::Closed`.
-fn close_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
+pub(crate) fn close_port_native(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value, EvalError> {
     if args.len() != 1 {
         return Err(arity_err(args, "close", 1, args.len()));
     }

@@ -15,6 +15,7 @@ pub mod binding;
 pub mod bitset;
 pub mod build;
 pub mod codec;
+pub mod concurrency;
 pub mod convert;
 pub mod hash;
 pub mod html;

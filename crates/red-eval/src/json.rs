@@ -240,7 +240,8 @@ fn encode(
         | Value::Vector(_)
         | Value::Image(_)
         | Value::Bitset(_)
-        | Value::Error(_) => Err(EvalError::Native {
+        | Value::Error(_)
+        | Value::Channel(_) => Err(EvalError::Native {
             message: format!(
                 "to-json: cannot encode {} (no JSON representation)",
                 type_name(value)

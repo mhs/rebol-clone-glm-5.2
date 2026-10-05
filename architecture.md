@@ -1359,6 +1359,22 @@ main levers:
     invalidates implicitly; `user_ctx` slots are append-only so cached
     `LoadGlobal(slot)` indices stay valid.
 - **Single-threaded**: no `Send`/`Sync` requirements; `Env` is `!Send`.
+  **Concurrency (v0.6)**: OS-thread workers with marshalled channels. The
+  `SendValue` enum (in `concurrency.rs`) is the Send-safe mirror of the
+  marshalable `Value` subset — `Arc`-backed instead of `Rc`, no `RefCell`.
+  Crossing a thread boundary requires `Value::marshal_send()` → `SendValue`
+  (deep-clone; rejects `Func`/`String8`). `SendValue::unmarshal()` rewraps
+  into `Rc`-backed forms on the receiver (fresh `Rc`s — no `Rc` crosses a
+  thread boundary). `ThreadEnv` is the per-worker `Send`-safe environment
+  snapshot (user context as `SendContext`, shared output sink as
+  `Arc<Mutex<...>>`). `spawn_thread` (in `red-eval/src/concurrency.rs`) forks
+  a 256 KiB stack worker thread that reconstructs a full `Env`, registers
+  natives, binds, compiles, and runs. `Value::Channel(Arc<ChannelInner>)` is a
+  Go-style bidirectional channel (both ends in one value). Marshalable types:
+  all scalars, `Block`/`Paren`, word variants, `Object` (deep-cloned to
+  `SendObject`), `Error`, `Channel` (shared), and all aggregate types.
+  Rejected: `Func` (`!Send` via `Rc<Context>` captures), `String8` (POC stub).
+  Always-on; no cargo feature gate (purely additive).
 - **No precedence parsing**: Red is prefix/eager, so the parser has no
   expression grammar — every value is one token (or one bracketed group).
 - **Printer round-trip gaps (POC)**: `Func` molds as `#[function]`,

@@ -400,7 +400,8 @@ fn eval_prefix(
         | Value::Bitset(_)
         | Value::Port(_)
         | Value::Typeset(_)
-        | Value::SemanticType(_) => Ok(cur),
+        | Value::SemanticType(_)
+        | Value::Channel(_) => Ok(cur),
 
         // Path: a function-headed path is a refined call (`copy/part`,
         // `find/case`); anything else is a data-path select (`block/2`,

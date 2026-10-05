@@ -119,7 +119,9 @@ history per version.
   scalar; `30s`/`1.5h`/`250ms`/`1d1h` compound — strict descending unit
   order; `date - date → duration!`).
 - **I/O handles:** `Port` (`open %file.red` / `open http://example.com/` —
-  synchronous I/O handle, file or HTTP).
+  synchronous I/O handle, file or HTTP), `Channel` (Go-style bidirectional
+  channel: `channel`/`send`/`recv`/`close`/`channel?`/`closed?` — both ends
+  travel in one value; marshalled across the Send boundary via `SendValue`).
 - **Semantic types:** `semantic-type!` — parse-backed schemas over base
   datatypes. `define-type 'rgb! 'tuple! [r: byte g: byte b: byte]` compiles
   a schema to a `parse` rule; `valid? 'rgb! 255.0.0` checks it. Generated
@@ -152,7 +154,7 @@ history per version.
   per-instr `file:line:col` annotations (no run); `--disasm-func <name>` disassembles
   a named top-level func body; `--trace` emits one line per executed VM instr to stderr.
 
-### Natives (~140)
+### Natives (~146)
 - **I/O:** `print`, `prin`, `probe`, `form`, `mold` (`/only` — callable native
   wrapping the printer).
 - **Arithmetic / comparison / logic:** `+ - * / //`, `**` (power), `= <> < >
@@ -311,6 +313,15 @@ the full Red field set (`code`/`type`/`args`/`near`/`where`/`by`); the VM and
 walker auto-enrich `Native` errors with `where`/`near` via `enrich_error`;
 structured errors render as `*** Error: [loc: ]<type> error: <message>` (e.g.
 `math error: divide by zero`).
+
+### Concurrency (v0.6)
+OS-thread workers with marshalled channels. `spawn [body]` (M43) forks a
+worker thread; `channel`/`send`/`recv`/`close` provide Go-style bidirectional
+channels (both ends in one value). Crossing the Send boundary marshals values
+into `SendValue` (an `Arc`-backed, `RefCell`-free mirror of the marshalable
+`Value` subset); rejects `Func`/`String8`. `Object`/`Error`/`Block` and all
+aggregate types deep-clone into Send-safe mirrors. See `architecture.md` for
+the Send-boundary type list and `ThreadEnv` design.
 
 ## Examples
 

@@ -30,6 +30,7 @@ use red_core::value::{Symbol, Value};
 use red_core::EvalError;
 
 mod compare;
+mod concurrency;
 mod control;
 mod eval;
 mod func;
@@ -46,6 +47,7 @@ pub use registry::{install_constants, register_natives};
 pub(crate) use test::register_test_natives;
 pub(crate) use test::run_tests_native;
 pub(crate) use words::value_predicate;
+pub(crate) use concurrency::register_concurrency_natives;
 // ---------------------------------------------------------------------------
 // M42: structured error enrichment
 // ---------------------------------------------------------------------------
@@ -197,6 +199,7 @@ pub(crate) fn type_name(v: &Value) -> &'static str {
         Value::Port(_) => "port!",
         Value::Typeset(_) => "typeset!",
         Value::SemanticType(_) => "semantic-type!",
+        Value::Channel(_) => "channel!",
     }
 }
 

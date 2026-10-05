@@ -703,7 +703,8 @@ fn compile_prefix(
         | Value::Bitset(_)
         | Value::Port(_)
         | Value::Typeset(_)
-        | Value::SemanticType(_) => {
+        | Value::SemanticType(_)
+        | Value::Channel(_) => {
             let idx = c.push_const(cur.clone());
             c.emit(Instr::Const(idx));
         }

@@ -628,12 +628,17 @@ for `bind` to report unbound words with a location.
   misidentifications); `math` eval-order mode + user-level `trace` demoted
   to v0.11. See `plan13-feature-parity.md`.
 - Optional/deferred: shared-cell closures, `unimport`, reactivity (v0.8);
-  concurrency (v0.8); `regex!`/`struct!`/`handle!` (v0.8, alongside
-  `routine!` FFI); `ref!` (internal C-level reference, no script surface);
-  `routine!` FFI, named timezones, the full port model, `typeset!` algebra.
-  `recurse`/`recur` (anonymous self-reference) is deferred to v0.8+ as a
-  possible ergonomic extension — not a Red-parity gap. (`parse` is in
-  scope — see "Dialects".)
+   concurrency (v0.8); `regex!`/`struct!`/`handle!` (v0.8, alongside
+   `routine!` FFI); `ref!` (internal C-level reference, no script surface);
+   `routine!` FFI, named timezones, the full port model, `typeset!` algebra.
+   `recurse`/`recur` (anonymous self-reference) is deferred to v0.8+ as a
+   possible ergonomic extension — not a Red-parity gap. (`parse` is in
+   scope — see "Dialects".)
+- **Concurrency (v0.6)**: `channel`/`send`/`recv`/`close`/`channel?`/`closed?`
+  — Go-style bidirectional channels (both ends in one value). `Value::Channel`
+  variant added to the `Value` enum. Threads + channels are always-on; no
+  cargo feature gate (purely additive). Marshal/unmarshal across the Send
+  boundary via `SendValue` (in `concurrency.rs`); rejects `Func`/`String8`.
 
 ## Dialects
 
