@@ -539,13 +539,21 @@ fn make_native(args: &[Value], _refs: &RefineArgs, env: &mut Env) -> Result<Valu
             return func_native(&[spec_block, body_block], &RefineArgs::empty(), env);
         }
         other => {
-            // M178: `make <semantic-type>! <value>` — when the type name isn't
-            // a builtin, check if it's a registered semantic type. If so,
-            // validate the value and return it (untagged). This is the
-            // standard Rebol `make <type>! <spec>` construction pattern.
+            // M178 → M175: `make <semantic-type>! <value>` — when the type
+            // name isn't a builtin, check if it's a registered semantic
+            // type. If so, validate the value and return it **tagged**
+            // (`Value::SemanticTagged`): the standard Rebol
+            // `make <type>! <spec>` construction pattern, now carrying the
+            // semantic type name as metadata. Validation failure raises
+            // `validate_value`'s M177 rich error.
             if let Some(def) = env.lookup_semantic_type(&Symbol::new(other)) {
-                return crate::semantic::validate_value(&def, spec)
-                    .map(|_| spec.clone());
+                return crate::semantic::validate_value(&def, spec).map(|_| {
+                    Value::semantic_tagged(
+                        def.name.clone(),
+                        spec.clone(),
+                        spec.span_or_default(),
+                    )
+                });
             }
             return Err(EvalError::Native {
                 message: format!("make: {other:?} type not supported in POC"),
@@ -1477,6 +1485,18 @@ fn mold_native(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Valu
     if args.len() != 1 {
         return Err(arity_err(args, "mold", 1, args.len()));
     }
+    // M175 (plan18 L505-508): `mold/tagged` renders a tagged semantic
+    // value as `make <tag>! <inner-mold>` — the source form that would
+    // reconstruct it. Non-tagged values render as usual (the refinement is
+    // a no-op for them).
+    if refs.has(&Symbol::new("tagged")) {
+        if let Value::SemanticTagged { tag, value, .. } = &args[0] {
+            let inner = mold_to_string(value);
+            return Ok(Value::string(std::rc::Rc::from(
+                format!("make {}! {}", tag.as_str().trim_end_matches('!'), inner).as_str(),
+            )));
+        }
+    }
     let mut s = mold_to_string(&args[0]);
     if refs.has(&Symbol::new("only")) && matches!(args[0], Value::Block { .. }) {
         // `mold_to_string` of a Block always emits `[`...`]`; strip both ends.
@@ -1546,12 +1566,13 @@ pub fn register_convert_natives(env: &mut Env) {
     // form (arity 1)
     reg(env, "form", form_native as NF, 1);
 
-    // mold (arity 1, with /only refinement — M111)
+    // mold (arity 1, with /only — M111 — and /tagged — plan18 M175 —
+    // refinements)
     env.natives.insert(
         Symbol::new("mold"),
         Rc::new(FuncDef {
             params: vec![Symbol::new("__arg0")],
-            refinements: vec![(Symbol::new("only"), vec![])],
+            refinements: vec![(Symbol::new("only"), vec![]), (Symbol::new("tagged"), vec![])],
             native: Some(mold_native as NF),
             variadic: false,
             infix: false,

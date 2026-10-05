@@ -1656,7 +1656,11 @@ fn integer_val(v: &Value) -> Option<i64> {
 // Predicates
 // ---------------------------------------------------------------------------
 
-/// `semantic-type? value` — `true` if value is a `semantic-type!`.
+/// `semantic-type? value` — the tagged-value discriminator (plan18 M175;
+/// **breaking change** from the pre-M175 boolean predicate):
+/// - a `semantic-type!` value → its type name as a `lit-word!`
+/// - a tagged semantic value → its tag as a `lit-word!`
+/// - anything else → `none`
 fn semantic_type_predicate(
     args: &[Value],
     _refs: &RefineArgs,
@@ -1665,7 +1669,17 @@ fn semantic_type_predicate(
     if args.is_empty() {
         return Err(arity_err(args, "semantic-type?", 1, 0));
     }
-    Ok(Value::Logic(matches!(args[0], Value::SemanticType(_))))
+    match &args[0] {
+        Value::SemanticType(def) => Ok(Value::LitWord {
+            sym: def.name.clone(),
+            span: Span::default(),
+        }),
+        Value::SemanticTagged { tag, .. } => Ok(Value::LitWord {
+            sym: tag.clone(),
+            span: Span::default(),
+        }),
+        _ => Ok(Value::None),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1764,15 +1778,123 @@ mod tests {
 
     #[test]
     fn semantic_type_predicate_true() {
-        let v = val("make semantic-type! [name: 'rgb! base: 'tuple! schema: [r: byte g: byte b: byte]]");
-        assert!(matches!(v, Value::SemanticType(_)));
-        assert_eq!(mold_to_string(&val("semantic-type? make semantic-type! [name: 'rgb! base: 'tuple! schema: []]")), "true");
+        // M175 breaking change: `semantic-type?` of a semantic-type! value
+        // returns its name as a lit-word! (was `true`).
+        let v = val("semantic-type? make semantic-type! [name: 'rgb! base: 'tuple! schema: []]");
+        assert_eq!(mold_to_string(&v), "'rgb!");
     }
 
     #[test]
     fn semantic_type_predicate_false() {
-        assert_eq!(mold_to_string(&val("semantic-type? 5")), "false");
-        assert_eq!(mold_to_string(&val("semantic-type? \"hi\"")), "false");
+        // Anything else → none (was `false`).
+        assert_eq!(mold_to_string(&val("semantic-type? 5")), "none");
+        assert_eq!(mold_to_string(&val("semantic-type? \"hi\"")), "none");
+    }
+
+    // --- Tagged semantic values (plan18 M175 — Feature A §4-6) ---
+
+    const RGB_DEF: &str = "define-type 'rgb! 'tuple! [r: byte g: byte b: byte] ";
+
+    #[test]
+    fn make_semantic_returns_tagged() {
+        // `make rgb! 1.2.3` returns the tuple tagged 'rgb!.
+        let v = val(&format!("{RGB_DEF}make rgb! 1.2.3"));
+        match &v {
+            Value::SemanticTagged { tag, value, .. } => {
+                assert_eq!(tag.as_str(), "rgb!");
+                assert!(matches!(**value, Value::Tuple { .. }));
+            }
+            other => panic!("expected SemanticTagged, got {other:?}"),
+        }
+        // Validation failure raises the M177 rich error. (`port!` — a
+        // range over integer! — fails on a lexable literal, unlike rgb!
+        // whose byte constraint every lexable tuple satisfies.)
+        let e = match run_capture_val(
+            "define-type 'port! 'integer! [range 1 65535] make port! 70000",
+        ) {
+            Err(msg) => msg,
+            Ok((v, _)) => panic!("expected error, got {}", mold_to_string(&v)),
+        };
+        assert!(
+            e.contains("Invalid port") && e.contains("1..65535"),
+            "rich error names the semantic type and constraint, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn tagged_value_is_transparent() {
+        let src = format!("{RGB_DEF}t: make rgb! 1.2.3 ");
+        // type? / mold / form unwrap to the base type.
+        assert_eq!(mold_to_string(&val(&format!("{src}type? t"))), "tuple!");
+        match &val(&format!("{src}mold t")) {
+            Value::String { s, .. } => assert_eq!(s.as_ref(), "1.2.3"),
+            other => panic!("mold of tagged tuple, got {other:?}"),
+        }
+        match &val(&format!("{src}form t")) {
+            Value::String { s, .. } => assert_eq!(s.as_ref(), "1.2.3"),
+            other => panic!("form of tagged tuple should be \"1.2.3\", got {other:?}"),
+        }
+        // Generated predicate accepts the (already-validated) tagged value.
+        assert_eq!(mold_to_string(&val(&format!("{src}rgb? t"))), "true");
+        // Arithmetic/ordering dispatch on the inner value.
+        assert_eq!(mold_to_string(&val(&format!("{src}t * 2"))), "2.4.6");
+        // Equality: tagged vs plain compares inners; tagged vs tagged needs
+        // both tag and inner.
+        assert_eq!(mold_to_string(&val(&format!("{src}t = 1.2.3"))), "true");
+        assert_eq!(
+            mold_to_string(&val(&format!("{src}t = make rgb! 1.2.3"))),
+            "true"
+        );
+        assert_eq!(
+            mold_to_string(&val(&format!("{src}t <> make rgb! 2.3.4"))),
+            "true"
+        );
+    }
+
+    #[test]
+    fn semantic_type_q_discriminates_tag() {
+        // The M175 discriminator: a tagged value → its tag as a lit-word!.
+        let v = val(&format!("{RGB_DEF}semantic-type? make rgb! 1.2.3"));
+        assert_eq!(mold_to_string(&v), "'rgb!");
+    }
+
+    #[test]
+    fn mold_tagged_refinement() {
+        // `mold/tagged` renders the reconstructing source form; the
+        // refinement is a no-op for non-tagged values.
+        let v = val(&format!("{RGB_DEF}mold/tagged make rgb! 1.2.3"));
+        assert_eq!(mold_to_string(&v), "\"make rgb! 1.2.3\"");
+        let v = val(&format!("{RGB_DEF}mold/tagged 5"));
+        assert_eq!(mold_to_string(&v), "\"5\"");
+    }
+
+    #[test]
+    fn copy_preserves_tag() {
+        // Series inner: copied + re-tagged. Immediate inner (tuple!):
+        // identity (Red copies immediates as themselves).
+        let v = val(&format!("{RGB_DEF}semantic-type? copy make rgb! 1.2.3"));
+        assert_eq!(mold_to_string(&v), "'rgb!");
+        // A block-based semantic type: copy the block, keep the tag.
+        let e = "define-type 'tags! 'block! [some word!] ";
+        let v = val(&format!(
+            "{e}b: make tags! [a b] c: copy b semantic-type? c"
+        ));
+        assert_eq!(mold_to_string(&v), "'tags!");
+        // The copied inner is a fresh series (independent storage).
+        let v = val(&format!(
+            "{e}b: make tags! [a b] append copy b 'c b"
+        ));
+        assert_eq!(mold_to_string(&v), "[a b]");
+    }
+
+    #[test]
+    fn constructors_stay_untagged() {
+        // Plan L509-510: the generated constructor (`rgb …`) returns the
+        // plain base value; only `make rgb! …` tags.
+        let v = val(&format!("{RGB_DEF}rgb? rgb 1 2 3"));
+        assert_eq!(mold_to_string(&v), "true");
+        let v = val(&format!("{RGB_DEF}semantic-type? rgb 1 2 3"));
+        assert_eq!(mold_to_string(&v), "none");
     }
 
     #[test]

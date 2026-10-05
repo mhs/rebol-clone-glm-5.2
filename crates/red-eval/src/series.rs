@@ -1591,10 +1591,24 @@ fn copy(args: &[Value], refs: &RefineArgs, _env: &mut Env) -> Result<Value, Eval
         return Ok(Value::hash(h.borrow().clone()));
     }
     // M175 (plan18 L511): `copy` of a tagged semantic value preserves the
-    // tag — copy the inner value (honoring /part etc.) and re-tag.
+    // tag. Series inners are copied (honoring /part etc.) and re-tagged;
+    // immediate inners (tuple!, pair!, …) are returned unchanged — Red
+    // copies immediates as themselves (plain `copy 1.2.3` still errors
+    // here, a pre-existing gap; the tagged path doesn't add to it).
     if let Value::SemanticTagged { tag, value, span } = &args[0] {
-        let inner = copy(&[(**value).clone()], refs, _env)?;
-        return Ok(Value::semantic_tagged(tag.clone(), inner, *span));
+        return match &**value {
+            Value::Block { .. }
+            | Value::Paren { .. }
+            | Value::String { .. }
+            | Value::String8 { .. }
+            | Value::Map(_)
+            | Value::Hash(_)
+            | Value::Vector(_) => {
+                let inner = copy(&[(**value).clone()], refs, _env)?;
+                Ok(Value::semantic_tagged(tag.clone(), inner, *span))
+            }
+            _ => Ok(args[0].clone()),
+        };
     }
     // M84: vector! shallow copy (new VectorDef with cloned kind + elems
     // from cursor to tail; cursor reset to 0).
