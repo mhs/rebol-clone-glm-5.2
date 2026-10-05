@@ -2040,6 +2040,22 @@ fn collect_call_args(
 /// typeset and the actual type. Untyped params (`None`) are skipped —
 /// back-compat with all pre-M89 funcs. Refinement-arg types are not checked
 /// (v0.7 deferral); only positional params.
+/// The expected-type label for a type-check failure: the M177 rich form
+/// (`name (base type!)`) when the typeset carries a semantic ref, else the
+/// plain sorted word list. Shared by the positional (`check_param_types`)
+/// and refinement (`check_refinement_types`) checkers so their messages
+/// stay in lockstep (the VM's positional check is message-locked
+/// byte-for-byte to `check_param_types`).
+fn typeset_error_label(ts: &red_core::value::TypesetDef) -> String {
+    if ts.semantic.borrow().is_some() {
+        let sem = ts.semantic.borrow();
+        if let Some(def) = sem.as_ref() {
+            return format!("{} (base {}!)", def.name.as_str(), def.base.as_str());
+        }
+    }
+    crate::typeset::typeset_label(ts)
+}
+
 pub(crate) fn check_param_types(
     fd: &Rc<FuncDef>,
     args: &[Value],
@@ -2059,27 +2075,55 @@ pub(crate) fn check_param_types(
             // ref (if any). For ordinary typesets (no semantic ref), this
             // is identical to `accepts`.
             if !ts.accepts_with_env(arg, env) {
-                // M177: if the typeset has a semantic ref, produce a rich
-                // error message using the semantic type name.
-                let label = if ts.semantic.borrow().is_some() {
-                    let sem = ts.semantic.borrow();
-                    if let Some(def) = sem.as_ref() {
-                        format!(
-                            "{} (base {}!)",
-                            def.name.as_str(),
-                            def.base.as_str(),
-                        )
-                    } else {
-                        crate::typeset::typeset_label(ts)
-                    }
-                } else {
-                    crate::typeset::typeset_label(ts)
-                };
                 return Err(EvalError::Native {
                     message: format!(
                         "type error: arg {} expected {}, got {}",
                         i + 1,
-                        label,
+                        typeset_error_label(ts),
+                        crate::natives::type_name(arg),
+                    ),
+                    span: arg.span_or_default(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The v0.8 deferral, shipped: per-arg runtime type-check for refinement
+/// args (parallel to `check_param_types` for positional params). Checks
+/// only *active* refinements — inactive ones default their slots to
+/// `none` and are never type-checked (Red semantics). The VM routes
+/// refined user-func calls through the walker (compilation of refined
+/// user-func calls falls back via `MalformedSpec`), so this is the single
+/// check site.
+pub(crate) fn check_refinement_types(
+    fd: &Rc<FuncDef>,
+    refs: &RefineArgs,
+    env: &mut Env,
+) -> Result<(), EvalError> {
+    if fd.refinement_types.is_empty() {
+        return Ok(());
+    }
+    for ((ref_name, _arg_words), arg_types) in
+        fd.refinements.iter().zip(fd.refinement_types.iter())
+    {
+        // Inactive refinement: args default to `none`, no check.
+        let Some(collected) = refs.get(ref_name) else {
+            continue;
+        };
+        for (j, ts) in arg_types.iter().enumerate() {
+            let Some(ts) = ts else { continue };
+            let Some(arg) = collected.get(j) else {
+                continue; // arity error caught by the collector
+            };
+            if !ts.accepts_with_env(arg, env) {
+                return Err(EvalError::Native {
+                    message: format!(
+                        "type error: refinement /{} arg {} expected {}, got {}",
+                        ref_name.as_str(),
+                        j + 1,
+                        typeset_error_label(ts),
                         crate::natives::type_name(arg),
                     ),
                     span: arg.span_or_default(),
@@ -2097,6 +2141,7 @@ pub(crate) fn call_user_func(
     env: &mut Env,
 ) -> Result<Value, EvalError> {
     check_param_types(fd, &args, env)?;
+    check_refinement_types(fd, refs, env)?;
     let call_ctx = fd.ctx.clone();
     let mut slot = 0;
     for arg in args.iter() {
@@ -2168,6 +2213,7 @@ pub(crate) fn call_closure_func(
     captures: &Rc<Vec<std::cell::RefCell<Value>>>,
 ) -> Result<Value, EvalError> {
     check_param_types(fd, &args, env)?;
+    check_refinement_types(fd, refs, env)?;
     let call_ctx = fd.ctx.clone();
     let mut slot = 0;
     for arg in args.iter() {

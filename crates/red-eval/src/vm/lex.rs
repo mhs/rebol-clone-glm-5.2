@@ -453,6 +453,7 @@ fn analyze_func_form(data: &[Value], i: usize, scope: &mut Scope, result: &mut A
         crate::natives::FuncSpec {
             params: Vec::new(),
             refinements: Vec::new(),
+            refinement_types: Vec::new(),
             locals: Vec::new(),
             param_types: Vec::new(),
         }

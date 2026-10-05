@@ -1638,6 +1638,7 @@ impl<'env> Vm<'env> {
         let mut fd = FuncDef {
             params: spec.params,
             refinements: spec.refinements,
+            refinement_types: spec.refinement_types,
             locals: spec.locals,
             freevars,
             param_types: spec.param_types,
@@ -1696,6 +1697,7 @@ impl<'env> Vm<'env> {
         let mut fd = FuncDef {
             params: spec.params,
             refinements: spec.refinements,
+            refinement_types: spec.refinement_types,
             locals: spec.locals,
             freevars: freevar_names,
             param_types: spec.param_types,

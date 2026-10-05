@@ -173,10 +173,18 @@ pub struct FuncDef {
     /// identically). `None` = unchecked (back-compat with all pre-M89 funcs).
     /// `Some(ts)` = `ts.accepts(arg)` must be true or the call raises a
     /// `TypeError` (rendered via `EvalError::Native` for the dynamic expected-
-    /// typeset message). Refinement-arg types are not checked in v0.7 — only
-    /// positional params. Stored as `Rc<TypesetDef>` so a shared spec block
+    /// typeset message). Stored as `Rc<TypesetDef>` so a shared spec block
     /// reuses one typeset across many `func` definitions.
     pub param_types: Vec<Option<Rc<TypesetDef>>>,
+    /// Per-refinement-arg runtime type-checks (the v0.8 deferral, shipped),
+    /// parallel to `refinements`: `refinement_types[i][j] = Some(ts)` iff
+    /// the spec block has a `[type! ...]` annotation block following arg
+    /// word `j` of refinement `i`. Checked at call time for *active*
+    /// refinements only (inactive ones default their slots to `none`) by
+    /// the walker's `check_refinement_types` — refined user-func calls
+    /// already route through the walker in VM mode, so it's the single
+    /// check site. Empty for natives and pre-annotation specs.
+    pub refinement_types: Vec<Vec<Option<Rc<TypesetDef>>>>,
     /// Lazily-filled compiled-form cache (v0.3, M22+). `None` until the
     /// bytecode compiler runs (M24), then `Some(Rc<CompiledBlock>)`. Retained
     /// as `Rc` so pointer identity (`Rc::ptr_eq`) can drive cache invalidation

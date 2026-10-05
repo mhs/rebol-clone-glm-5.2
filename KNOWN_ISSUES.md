@@ -85,6 +85,27 @@ the tail. Both `interp_walker.rs::collect_call_args` and
 `vm/compiler.rs::collect_args` (plus the infix-operand path) need the
 same change, and the parity suite should pin the new order.
 
+## `string!` is not a series — series natives (`first`/`find`/`skip`/…) reject strings
+
+**Test:** discovered while testing refinement-arg types (Feature B2);
+`length?` fixed separately in this round.
+
+**Status:** Open (design gap). `series? "abc"` ⇒ `false` — `string!` is
+deliberately not routed through `extract_series` (`series.rs`), so every
+series-position native (`first`/`second`/`skip`/`at`/`find`/`select`/…)
+raises `expected series!, found string!`. Only `length?` (fixed via a
+dedicated arm, char count) and the natives in `strings.rs` work on
+strings. Real Red treats `string!` as a series (cursor over chars).
+
+**Impact:** no string cursor navigation; the string API lives entirely in
+`strings.rs` (copy/part, find, etc. where implemented).
+
+**Proper fix:** a `Value::String` arm in `extract_series` returning a
+cursor-over-chars view (likely a `Vec<Value>` of `char!`s or a byte-index
+cursor — needs a design pass for multi-byte UTF-8), plus audit of
+`mk_series` (a positioned view should render as the substring, not a
+block). Substantial — belongs in a dedicated round.
+
 ## `float!` NaN/Inf propagation — `1.0 / 0.0` yields `inf` silently
 
 **Status:** By design (f64 parity). `float!` is backed by Rust's `f64`,

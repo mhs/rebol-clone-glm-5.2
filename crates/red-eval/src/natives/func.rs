@@ -39,6 +39,7 @@ pub(crate) fn function_native(
     let mut fd = FuncDef {
         params: spec.params,
         refinements: spec.refinements,
+            refinement_types: spec.refinement_types,
         locals: spec.locals,
         param_types: spec.param_types,
         body: body_series,
@@ -78,6 +79,7 @@ pub(crate) fn func_native(
     let mut fd = FuncDef {
         params: spec.params,
         refinements: spec.refinements,
+            refinement_types: spec.refinement_types,
         param_types: spec.param_types,
         body: body_series,
         native: None,
@@ -125,6 +127,7 @@ pub(crate) fn does_native(
 pub(crate) struct FuncSpec {
     pub params: Vec<Symbol>,
     pub refinements: Vec<(Symbol, Vec<Symbol>)>,
+    pub refinement_types: Vec<Vec<Option<Rc<red_core::value::TypesetDef>>>>,
     pub locals: Vec<Symbol>,
     /// M89: parallel to `params`. `param_types[i] = Some(ts)` iff the spec
     /// block has a `[type! ...]` annotation block immediately following
@@ -150,10 +153,13 @@ pub(crate) struct FuncSpec {
 ///                                       locals.
 ///   type-annotation := block        — a `[type! ...]` block immediately
 ///                                       following a positional param word
-///                                       (M89) becomes the param's runtime
-///                                       typeset. Skipped in refinement/local
-///                                       sections (refinement-arg types
-///                                       deferred to v0.8).
+///                                       (M89) or a refinement-arg word
+///                                       (v0.8 deferral, shipped) becomes
+///                                       that arg's runtime typeset.
+///                                       Skipped in the local section; a
+///                                       block with no preceding arg word
+///                                       in a refinement section is an
+///                                       error.
 ///
 /// Words become positional params (in order) unless inside a refinement or
 /// `<local>` section.
@@ -176,6 +182,10 @@ pub(crate) fn extract_spec(
     let mut refinements: Vec<(Symbol, Vec<Symbol>)> = Vec::new();
     let mut locals: Vec<Symbol> = Vec::new();
     let mut param_types: Vec<Option<Rc<red_core::value::TypesetDef>>> = Vec::new();
+    // v0.8 deferral, shipped: per-refinement-arg type annotations,
+    // parallel to `refinements` (one entry per refinement, one slot per
+    // arg word).
+    let mut refinement_types: Vec<Vec<Option<Rc<red_core::value::TypesetDef>>>> = Vec::new();
     // Section state: which collector following words go into.
     #[derive(Clone, Copy)]
     enum Section {
@@ -198,6 +208,7 @@ pub(crate) fn extract_spec(
             }
             Value::Refinement { sym, .. } => {
                 refinements.push((sym.clone(), Vec::new()));
+                refinement_types.push(Vec::new());
                 section = Section::Refinement;
             }
             Value::Word { sym, .. } | Value::LitWord { sym, .. } => match section {
@@ -208,17 +219,40 @@ pub(crate) fn extract_spec(
                 Section::Refinement => {
                     if let Some(last) = refinements.last_mut() {
                         last.1.push(sym.clone());
+                        if let Some(ts_last) = refinement_types.last_mut() {
+                            ts_last.push(None);
+                        }
                     }
                 }
                 Section::Local => locals.push(sym.clone()),
             },
             // M89: a `block!` immediately following a param word in the
             // Params section is the param's runtime typeset annotation
-            // (`[integer! float!]`). Refinement/local-section blocks stay
-            // skipped (refinement-arg types deferred to v0.8).
+            // (`[integer! float!]`).
             Value::Block { .. } if matches!(section, Section::Params) => {
                 if let Some(last) = param_types.last_mut() {
                     *last = Some(crate::typeset::parse_typeset_block(v, env)?);
+                }
+            }
+            // v0.8 deferral, shipped: a `block!` immediately following a
+            // refinement-arg word is that arg's runtime typeset annotation
+            // (`func [x /ref y [integer!]] ...`). Attaches to the
+            // refinement's LAST arg word; a block with no preceding arg
+            // word in the section is a spec error.
+            Value::Block { .. } if matches!(section, Section::Refinement) => {
+                let has_arg_word = refinements
+                    .last()
+                    .is_some_and(|(_, args)| !args.is_empty());
+                if !has_arg_word {
+                    return Err(EvalError::Native {
+                        message: "func: type annotation without a refinement argument word"
+                            .into(),
+                        span: v.span_or_default(),
+                    });
+                }
+                if let Some(ts_last) = refinement_types.last_mut() {
+                    let idx = ts_last.len().saturating_sub(1);
+                    ts_last[idx] = Some(crate::typeset::parse_typeset_block(v, env)?);
                 }
             }
             _ => {
@@ -231,6 +265,7 @@ pub(crate) fn extract_spec(
         refinements,
         locals,
         param_types,
+        refinement_types,
     })
 }
 
@@ -360,6 +395,7 @@ pub(crate) fn closure_native(
     let mut fd = FuncDef {
         params: spec.params,
         refinements: spec.refinements,
+            refinement_types: spec.refinement_types,
         param_types: spec.param_types,
         body: body_series,
         native: None,
@@ -705,5 +741,162 @@ mod tests {
         // capture propagation, `LoadCapture` fails.
         let src = "m: module 'm [count: 0 bump: closure [] [if true [count: count + 1] count] export 'bump] m/bump m/bump m/bump";
         assert_eq!(mold_to_string(&val(src)), "3");
+    }
+
+    // --- Refinement-arg types (the v0.8 deferral, shipped — Feature B2) ---
+
+    #[test]
+    fn refinement_arg_types_checked() {
+        // Accept: typed refinement arg passes.
+        let v = val("f: func [x /scale y [integer!]][x * y] f/scale 10 3");
+        assert_eq!(mold_to_string(&v), "30");
+        // Reject: wrong type names the refinement and the arg index, in the
+        // same format as the positional check.
+        let got = match run_capture_val("f: func [x /scale y [integer!]][x * y] f/scale 10 \"oops\"") {
+            Err(msg) => msg,
+            Ok((v, _)) => panic!("expected error, got {}", mold_to_string(&v)),
+        };
+        assert!(
+            got.contains("type error: refinement /scale arg 1 expected [integer!], got string!"),
+            "got {got:?}"
+        );
+    }
+
+    #[test]
+    fn refinement_arg_types_multiple_and_indexed() {
+        // Second refinement arg is checked with its own typeset and index.
+        let got = match run_capture_val(
+            "f: func [/r a [integer!] b [string!]][a] f/r 1 2",
+        ) {
+            Err(msg) => msg,
+            Ok((v, _)) => panic!("expected error, got {}", mold_to_string(&v)),
+        };
+        assert!(
+            got.contains("type error: refinement /r arg 2 expected [string!], got integer!"),
+            "got {got:?}"
+        );
+        // Second refinement's annotation doesn't leak into the first's.
+        let v = val("f: func [/r a [integer!] /t b [string!]][b] f/t \"x\"");
+        assert_eq!(mold_to_string(&v), "\"x\"");
+    }
+
+    #[test]
+    fn refinement_arg_types_mixed_with_positional() {
+        // Both checks fire on the same call; positional is checked first.
+        let got = match run_capture_val(
+            "f: func [x [string!] /scale y [integer!]][x] f/scale 5 \"ok\"",
+        ) {
+            Err(msg) => msg,
+            Ok((v, _)) => panic!("expected error, got {}", mold_to_string(&v)),
+        };
+        assert!(
+            got.contains("type error: arg 1 expected [string!], got integer!"),
+            "positional check should fire first, got {got:?}"
+        );
+        let got = match run_capture_val(
+            "f: func [x [string!] /scale y [integer!]][x] f/scale \"ok\" \"bad\"",
+        ) {
+            Err(msg) => msg,
+            Ok((v, _)) => panic!("expected error, got {}", mold_to_string(&v)),
+        };
+        assert!(
+            got.contains("type error: refinement /scale arg 1 expected [integer!], got string!"),
+            "got {got:?}"
+        );
+    }
+
+    #[test]
+    fn refinement_arg_types_inactive_not_checked() {
+        // Calling without the refinement: args default to none, no check
+        // fires (Red semantics).
+        let v = val("f: func [x /scale y [integer!]][either y [y][x]] f 42");
+        assert_eq!(mold_to_string(&v), "42");
+    }
+
+    #[test]
+    fn refinement_arg_types_backcompat() {
+        // Specs without annotations behave exactly as before.
+        let v = val("f: func [x /scale y][x + y] f/scale 1 2");
+        assert_eq!(mold_to_string(&v), "3");
+        // Untyped refinement args accept anything (the check never fires;
+        // `form` of a string arg succeeds).
+        let v = val("f: func [x /scale y][form y] f/scale 1 \"2\"");
+        assert_eq!(mold_to_string(&v), "\"2\"");
+    }
+
+    #[test]
+    fn refinement_arg_types_closure() {
+        // Closures get the same check (call_closure_func).
+        // Interleaved spaced form (`c 10 /scale 3`): the path form
+        // (`c/scale`) selects fields on closures, and a leading spaced
+        // refinement (`c /scale …`) mis-collects into the positional param.
+        let v = val("c: closure [x /scale y [integer!]][x * y] c 10 /scale 3");
+        assert_eq!(mold_to_string(&v), "30");
+        let got = match run_capture_val(
+            "c: closure [x /scale y [integer!]][x * y] c 10 /scale \"bad\"",
+        ) {
+            Err(msg) => msg,
+            Ok((v, _)) => panic!("expected error, got {}", mold_to_string(&v)),
+        };
+        assert!(
+            got.contains("type error: refinement /scale arg 1 expected [integer!], got string!"),
+            "got {got:?}"
+        );
+    }
+
+    #[test]
+    fn refinement_arg_types_spec_errors() {
+        // A block with no preceding arg word in the refinement section is a
+        // spec error (nothing to annotate).
+        let got = match run_capture_val("f: func [x /ref [integer!]][x]") {
+            Err(msg) => msg,
+            Ok((v, _)) => panic!("expected error, got {}", mold_to_string(&v)),
+        };
+        assert!(
+            got.contains("type annotation without a refinement argument word"),
+            "got {got:?}"
+        );
+        // Unknown type words error through parse_typeset_block.
+        let got = match run_capture_val("f: func [x /ref y [nosuchtype!]][y] f/ref 1") {
+            Err(msg) => msg,
+            Ok((v, _)) => panic!("expected error, got {}", mold_to_string(&v)),
+        };
+        assert!(
+            got.contains("unknown type word nosuchtype!"),
+            "got {got:?}"
+        );
+    }
+
+    #[test]
+    fn refinement_arg_types_semantic() {
+        // M176 semantic types work on refinement args too, with the M177
+        // rich error label.
+        // (`port!` — an integer range — can fail on a lexable literal,
+        // unlike `rgb!` whose byte constraint is always satisfied by a
+        // lexable tuple.)
+        let pre = "define-type 'port! 'integer! [range 1 65535] ";
+        let v = val(&format!(
+            "{pre}f: func [/col v [port!]][v] f/col 443"
+        ));
+        assert_eq!(mold_to_string(&v), "443");
+        let got = match run_capture_val(&format!(
+            "{pre}f: func [/col v [port!]][v] f/col 99999"
+        )) {
+            Err(msg) => msg,
+            Ok((v, _)) => panic!("expected error, got {}", mold_to_string(&v)),
+        };
+        assert!(
+            got.contains("refinement /col arg 1 expected port!"),
+            "got {got:?}"
+        );
+    }
+
+    #[test]
+    fn refinement_arg_types_function_spec_too() {
+        // `function` (which collects <local>s) parses the same annotations.
+        let v = val(
+            "f: function [x /scale y [integer!] <local> z][z: x * y z] f/scale 2 4",
+        );
+        assert_eq!(mold_to_string(&v), "8");
     }
 }

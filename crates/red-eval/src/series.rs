@@ -483,6 +483,13 @@ fn length_q(args: &[Value], _refs: &RefineArgs, _env: &mut Env) -> Result<Value,
     if let Value::String8 { bytes, .. } = &args[0] {
         return Ok(Value::integer(bytes.len() as i64));
     }
+    // string! length is the char count (Red semantics). `string!` is not a
+    // series in this implementation (`series? "abc"` ⇒ false), so this is a
+    // dedicated arm rather than an `extract_series` path — see
+    // KNOWN_ISSUES.md for the broader string/series gap.
+    if let Value::String { s, .. } = &args[0] {
+        return Ok(Value::integer(s.chars().count() as i64));
+    }
     // M43: map! entry count.
     if let Value::Map(m) = &args[0] {
         return Ok(Value::integer(m.borrow().len() as i64));

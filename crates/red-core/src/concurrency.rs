@@ -1055,6 +1055,10 @@ fn unmarshal_func_def(f: &SendFuncDef) -> FuncDef {
         locals,
         freevars,
         param_types: Vec::new(),
+        // Type annotations (positional + refinement) are dropped at the
+        // marshal boundary alongside `param_types` — `Rc<TypesetDef>` isn't
+        // Send-safe, and the unmarshaled func isn't invocable anyway.
+        refinement_types: Vec::new(),
         compiled: None,
         body: unmarshal_block(&f.body),
         ctx: unmarshal_context(&f.ctx),

@@ -1322,6 +1322,7 @@ fn compile_user_call(
             .map(|n| Symbol::new(&format!("__arg{n}")))
             .collect(),
         refinements: Vec::new(),
+        refinement_types: Vec::new(),
         locals: Vec::new(),
         freevars: Vec::new(),
         param_types: Vec::new(),
@@ -1547,6 +1548,7 @@ fn compile_make_func(
         crate::natives::FuncSpec {
             params: Vec::new(),
             refinements: Vec::new(),
+            refinement_types: Vec::new(),
             locals: Vec::new(),
             param_types: Vec::new(),
         }
